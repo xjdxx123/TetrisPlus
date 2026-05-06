@@ -111,10 +111,9 @@
     font-weight: 600;
   }
 
-  .help-toggle {
+  .help-toggle, .bg-toggle {
     position: fixed;
     bottom: 18px;
-    right: 22px;
     z-index: 6;
     width: 32px;
     height: 32px;
@@ -127,7 +126,10 @@
     backdrop-filter: blur(10px);
     transition: color 0.2s, border-color 0.2s;
   }
-  .help-toggle:hover { color: var(--ink); border-color: rgba(108,240,255,0.5); }
+  .help-toggle { right: 22px; }
+  .bg-toggle   { right: 62px; font-size: 10px; letter-spacing: 0.08em; font-weight: 600; }
+  .help-toggle:hover, .bg-toggle:hover { color: var(--ink); border-color: rgba(108,240,255,0.5); }
+  .bg-toggle.off { color: rgba(108,240,255,0.9); border-color: rgba(108,240,255,0.5); }
 
   /* Game over overlay */
   .game-over {
@@ -225,6 +227,7 @@
     <h4 style="margin-top:10px;">Panels</h4>
     <div class="row"><span>Drag in 3D</span><span>Click + drag panel</span></div>
   </div>
+  <button class="bg-toggle" id="bgToggle" title="Toggle background">BG</button>
   <button class="help-toggle" id="helpToggle" title="Toggle controls">?</button>
 
   <div class="game-over" id="gameOver">
@@ -289,15 +292,16 @@ const PLAY_W = COLS * CELL;
 const PLAY_H = ROWS * CELL;
 const PLAY_D = DEPTH * CELL;
 
-// Tetromino colors (glass tints)
+// Tetromino colors — saturated poster hues so each piece reads as one
+// unambiguous color even when stacked deep.
 const PIECE_COLORS = {
-  I: 0x4ad9ff, // cyan
-  O: 0xffd246, // yellow
-  T: 0xc768ff, // purple
-  S: 0x5fff8a, // green
-  Z: 0xff4a6b, // red
-  J: 0x4a7dff, // blue
-  L: 0xff9a3c, // orange
+  I: 0x22e6ff, // cyan
+  O: 0xffd400, // yellow
+  T: 0xb84cff, // violet
+  S: 0x39ff7a, // green
+  Z: 0xff2c5a, // red
+  J: 0x2a6cff, // blue
+  L: 0xff8a1c, // orange
 };
 
 // Tetromino shapes — each piece has 4 rotation states (4×4 grids)
@@ -925,8 +929,7 @@ const sky = new THREE.Mesh(skyGeo, skyMat);
 scene.add(sky);
 
 // Atmospheric horizon glow (a subtle ring)
-{
-  const geo = new THREE.PlaneGeometry(200, 30);
+const horizon = (() => {
   const c2 = document.createElement('canvas');
   c2.width = 512; c2.height = 64;
   const ctx2 = c2.getContext('2d');
@@ -943,13 +946,12 @@ scene.add(sky);
     blending: THREE.AdditiveBlending, depthWrite: false,
     side: THREE.DoubleSide, fog: false,
   });
-  // Wrap the horizon glow as a cylinder
   const hgeo = new THREE.CylinderGeometry(80, 80, 18, 64, 1, true);
-  const hmat = mat;
-  const horizon = new THREE.Mesh(hgeo, hmat);
-  horizon.position.y = -PLAY_H/2 + 4;
-  scene.add(horizon);
-}
+  const mesh = new THREE.Mesh(hgeo, mat);
+  mesh.position.y = -PLAY_H/2 + 4;
+  scene.add(mesh);
+  return mesh;
+})();
 
 // ---- Animated scanning light cones (slow sweep) ----
 const scanCones = [];
@@ -1045,13 +1047,14 @@ const innerGeometry = makeRoundedBoxGeometry(cubeSize * 0.55, cubeSize * 0.55, c
 
 const materialCache = new Map();
 function getCubeMaterial(color, opts = {}) {
-  const key = color + ':' + (opts.ghost ? 'g' : 'n');
+  const variant = opts.ghost ? 'g' : (opts.active ? 'a' : 'n');
+  const key = color + ':' + variant;
   if (materialCache.has(key)) return materialCache.get(key);
   const c = new THREE.Color(color);
-  // Locked cubes are opaque resin (poster colors, glossy clearcoat). Ghost
-  // cubes stay alpha-blended so they read as a preview. The wall material is
-  // alpha-blended (not transmissive) so opaque cubes draw correctly through
-  // it via renderOrder — see addWall() below.
+  // Locked cubes are opaque resin (poster colors, glossy clearcoat). Active
+  // (currently-falling) cubes use the same look but with extra emissive lift
+  // so the controlled piece reads brighter than locked stack. Ghost cubes
+  // stay alpha-blended so they read as a preview.
   const mat = new THREE.MeshPhysicalMaterial({
     color: c,
     metalness: 0.0,
@@ -1065,7 +1068,7 @@ function getCubeMaterial(color, opts = {}) {
     opacity: opts.ghost ? 0.12 : 1.0,
     envMapIntensity: 1.0,
     emissive: c,
-    emissiveIntensity: opts.ghost ? 0.15 : 0.65,
+    emissiveIntensity: opts.ghost ? 0.15 : (opts.active ? 0.95 : 0.65),
     side: THREE.FrontSide,
     depthWrite: true,
   });
@@ -1433,7 +1436,7 @@ function rebuildPieceMesh() {
   const cells = getPieceCells(activePiece);
   for (const { col, row } of cells) {
     for (let d = 0; d < DEPTH; d++) {
-      const cube = makeCube(activePiece.color);
+      const cube = makeCube(activePiece.color, { active: true });
       cube.position.copy(cellToWorld(col, row, d));
       pieceGroup.add(cube);
     }
@@ -2022,7 +2025,7 @@ cssScene.add(linesObj);
 // Next panel — shows mini cube preview in CSS
 const nextEl = makePanelEl(`
   <div style="font-size:10px; letter-spacing:0.22em; color:#8b93ad; text-transform:uppercase; font-weight:600;">Next</div>
-  <div id="next-preview" style="margin-top:8px; height:80px; width:100px; display:flex; align-items:center; justify-content:center; position:relative;"></div>
+  <div id="next-preview" style="margin-top:8px; height:120px; width:140px; display:flex; align-items:center; justify-content:center; position:relative;"></div>
 `);
 nextEl.id = 'panel-next';
 const nextObj = new CSS3DObject(nextEl);
@@ -2033,7 +2036,7 @@ cssScene.add(nextObj);
 // Hold panel
 const holdEl = makePanelEl(`
   <div style="font-size:10px; letter-spacing:0.22em; color:#8b93ad; text-transform:uppercase; font-weight:600;">Hold</div>
-  <div id="hold-preview" style="margin-top:8px; height:80px; width:100px; display:flex; align-items:center; justify-content:center; position:relative;"></div>
+  <div id="hold-preview" style="margin-top:8px; height:120px; width:140px; display:flex; align-items:center; justify-content:center; position:relative;"></div>
 `);
 holdEl.id = 'panel-hold';
 const holdObj = new CSS3DObject(holdEl);
@@ -2105,7 +2108,7 @@ function renderMiniPiece(container, key) {
   if (!key) return;
   const shape = PIECES[key][0];
   const color = PIECE_COLORS[key];
-  const cellSize = 16;
+  const cellSize = 28;
   // Find bounds
   let minR=4, maxR=-1, minC=4, maxC=-1;
   for (let r=0;r<4;r++) for (let c=0;c<4;c++) {
@@ -2159,16 +2162,22 @@ function updateHUD() {
   // Need to also re-render previews
   nextEl.innerHTML = `
     <div style="font-size:10px; letter-spacing:0.22em; color:#8b93ad; text-transform:uppercase; font-weight:600;">Next</div>
-    <div id="next-preview" style="margin-top:8px; height:80px; width:100px; display:flex; align-items:center; justify-content:center; position:relative;"></div>
+    <div id="next-preview" style="margin-top:8px; height:120px; width:140px; display:flex; align-items:center; justify-content:center; position:relative;"></div>
   `;
   holdEl.innerHTML = `
     <div style="font-size:10px; letter-spacing:0.22em; color:#8b93ad; text-transform:uppercase; font-weight:600;">Hold</div>
-    <div id="hold-preview" style="margin-top:8px; height:80px; width:100px; display:flex; align-items:center; justify-content:center; position:relative;"></div>
+    <div id="hold-preview" style="margin-top:8px; height:120px; width:140px; display:flex; align-items:center; justify-content:center; position:relative;"></div>
   `;
   const np = nextEl.querySelector('#next-preview');
   const hp = holdEl.querySelector('#hold-preview');
   if (np && nextQueue.length > 0) renderMiniPiece(np, nextQueue[0]);
-  if (hp && holdPiece) renderMiniPiece(hp, holdPiece);
+  if (hp) {
+    if (holdPiece) renderMiniPiece(hp, holdPiece);
+    else hp.innerHTML = `<div style="
+      width:72px; height:72px;
+      border:1.5px dashed rgba(108,240,255,0.25);
+      border-radius:6px;"></div>`;
+  }
 }
 
 // =============================================================
@@ -2546,6 +2555,23 @@ const helpEl = document.getElementById('help');
 const helpToggle = document.getElementById('helpToggle');
 helpToggle.addEventListener('click', () => {
   helpEl.classList.toggle('hidden');
+});
+
+// =============================================================
+// Background toggle — hide cityscape/sky/floor so just the case is visible
+// =============================================================
+const bgToggle = document.getElementById('bgToggle');
+let bgVisible = true;
+let savedFog = scene.fog;
+bgToggle.addEventListener('click', () => {
+  bgVisible = !bgVisible;
+  cityGroup.visible = bgVisible;
+  sky.visible       = bgVisible;
+  horizon.visible   = bgVisible;
+  floor.visible     = bgVisible;
+  floorRing.visible = bgVisible;
+  scene.fog         = bgVisible ? savedFog : null;
+  bgToggle.classList.toggle('off', !bgVisible);
 });
 
 // =============================================================
