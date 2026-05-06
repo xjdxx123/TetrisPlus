@@ -274,6 +274,8 @@ import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
+import { SMAAPass } from 'three/addons/postprocessing/SMAAPass.js';
 import { CSS3DRenderer, CSS3DObject } from 'three/addons/renderers/CSS3DRenderer.js';
 
 // =============================================================
@@ -350,7 +352,8 @@ const PIECE_KEYS = Object.keys(PIECES);
 // =============================================================
 const app = document.getElementById('app');
 
-const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+// antialias:false — SMAA in the post-process composer handles AA on offscreen targets
+const renderer = new THREE.WebGLRenderer({ antialias: false, alpha: true });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.setClearColor(0x000000, 0);
@@ -379,6 +382,64 @@ const DEFAULT_CAM_POS = new THREE.Vector3(14, 4, 26);
 const DEFAULT_CAM_TARGET = new THREE.Vector3(0, 0, 0);
 camera.position.copy(DEFAULT_CAM_POS);
 camera.lookAt(DEFAULT_CAM_TARGET);
+
+// =============================================================
+// Post-processing pipeline
+//   RenderPass → UnrealBloom → Vignette → SMAA → OutputPass
+// Bloom is the visual headline (was imported but never wired). Vignette pulls
+// the eye to the case; SMAA replaces the disabled MSAA on offscreen targets.
+// =============================================================
+const composer = new EffectComposer(renderer);
+composer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+composer.setSize(window.innerWidth, window.innerHeight);
+
+composer.addPass(new RenderPass(scene, camera));
+
+const bloomPass = new UnrealBloomPass(
+  new THREE.Vector2(window.innerWidth, window.innerHeight),
+  0.6,   // strength
+  0.7,   // radius
+  0.85,  // threshold (only highlights bloom)
+);
+composer.addPass(bloomPass);
+
+const VignetteShader = {
+  uniforms: {
+    tDiffuse:   { value: null },
+    uIntensity: { value: 0.65 },
+    uRadius:    { value: 0.45 },
+  },
+  vertexShader: /* glsl */`
+    varying vec2 vUv;
+    void main() {
+      vUv = uv;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: /* glsl */`
+    uniform sampler2D tDiffuse;
+    uniform float uIntensity;
+    uniform float uRadius;
+    varying vec2 vUv;
+    void main() {
+      vec4 col = texture2D(tDiffuse, vUv);
+      float d = distance(vUv, vec2(0.5));
+      float v = smoothstep(uRadius, uRadius + 0.5, d);
+      col.rgb *= 1.0 - v * uIntensity;
+      gl_FragColor = col;
+    }
+  `,
+};
+const vignettePass = new ShaderPass(VignetteShader);
+composer.addPass(vignettePass);
+
+const smaaPass = new SMAAPass(
+  window.innerWidth * Math.min(window.devicePixelRatio, 2),
+  window.innerHeight * Math.min(window.devicePixelRatio, 2),
+);
+composer.addPass(smaaPass);
+
+composer.addPass(new OutputPass());
 
 // =============================================================
 // Custom HDR-like environment — procedural cubemap with bokeh
@@ -620,8 +681,9 @@ function makeSparkleTexture() {
 // =============================================================
 // Futuristic environment — cyberpunk cityscape backdrop
 // =============================================================
-// Atmospheric fog so distant geometry softly fades into the dark
-scene.fog = new THREE.Fog(0x05080f, 35, 110);
+// Atmospheric fog — tight band so the case sits in clear air but the city
+// hazes out behind it. Provides depth separation so the playfield reads first.
+scene.fog = new THREE.Fog(0x05080f, 25, 65);
 
 const cityGroup = new THREE.Group();
 scene.add(cityGroup);
@@ -692,15 +754,16 @@ for (let i = 0; i < buildingCount; i++) {
   const h = heightBase;
 
   const tex = buildingTextures[Math.floor(Math.random() * buildingTextures.length)];
-  // Use MeshBasicMaterial with emissive-like additive overlay; the building itself
-  // is dark with bright window texture
+  // Dark base with window texture — emissive intensity dropped so the city
+  // doesn't compete with the case for attention. Bloom in post will lift the
+  // brightest windows back up without saturating the whole skyline.
   const mat = new THREE.MeshStandardMaterial({
     color: 0x080a14,
     roughness: 0.9,
     metalness: 0.1,
     emissive: 0xffffff,
     emissiveMap: tex,
-    emissiveIntensity: 1.6,
+    emissiveIntensity: 0.6,
     fog: true,
   });
   const geo = new THREE.BoxGeometry(w, h, d);
@@ -985,31 +1048,32 @@ function getCubeMaterial(color, opts = {}) {
   const key = color + ':' + (opts.ghost ? 'g' : 'n');
   if (materialCache.has(key)) return materialCache.get(key);
   const c = new THREE.Color(color);
+  // Glass-look without `transmission`. Three.js excludes transmissive objects
+  // from each others' transmission buffers, so true-glass cubes inside true-
+  // glass walls would render invisible through the walls. Instead we fake the
+  // glass look with alpha + clearcoat + iridescence: cubes are alpha-blended
+  // (so they ARE in the wall's transmission buffer), with mirror-smooth
+  // clearcoat highlights, chromatic iridescent edges, and tinted emissive
+  // that bloom picks up. Reads as colored glass, sorts correctly through walls.
   const mat = new THREE.MeshPhysicalMaterial({
-    color: 0xffffff,                       // base white — color comes from attenuation (volume tint)
+    color: c,
     metalness: 0.0,
-    roughness: 0.02,                       // mirror-smooth glass
-    transmission: opts.ghost ? 0.0 : 1.0,  // full refraction
-    thickness: 1.4,                        // thicker = more visible volume tint
-    attenuationColor: c,                   // light traveling through glass picks up this color
-    attenuationDistance: 0.9,
-    ior: 1.52,                             // real glass IOR
+    roughness: 0.08,
+    ior: 1.5,
     clearcoat: 1.0,
-    clearcoatRoughness: 0.02,
-    iridescence: 0.25,                     // subtle rainbow chromatic edges
+    clearcoatRoughness: 0.03,
+    iridescence: 0.35,
     iridescenceIOR: 1.3,
     iridescenceThicknessRange: [100, 400],
     specularIntensity: 1.0,
     specularColor: 0xffffff,
-    // Ghost stays alpha-blended (it's intentionally see-through);
-    // real cubes use transmission only — keeping them out of the
-    // transparent pass avoids sort-bugs against the case walls.
     transparent: true,
-    opacity: opts.ghost ? 0.12 : 1.0,
-    envMapIntensity: 1.6,
+    opacity: opts.ghost ? 0.12 : 0.7,
+    envMapIntensity: 1.0,
     emissive: c,
-    emissiveIntensity: opts.ghost ? 0.15 : 0.08,
+    emissiveIntensity: opts.ghost ? 0.15 : 0.45,
     side: THREE.FrontSide,
+    // Real cubes write depth so adjacent cells sort correctly; ghost doesn't
     depthWrite: !opts.ghost,
   });
   materialCache.set(key, mat);
@@ -1070,25 +1134,29 @@ const caseGroup = new THREE.Group();
 scene.add(caseGroup);
 
 // Glass shell — built as 4 individual side walls + bottom (no top, like reference)
-// Each wall is a thin slab so light refracts properly through real glass thickness.
+// Walls use ALPHA blending (no `transmission`) so glass cubes inside the case
+// show through correctly. Three.js's transmission buffer only contains opaque
+// objects — both transmissive and alpha-transparent cubes are excluded from
+// that buffer, which is why a refractive wall would render with nothing
+// visible inside. The "glass" feel here comes from clearcoat highlights,
+// strong fresnel, env-map reflections, and a faint blue tint.
 const wallThickness = 0.06;
 const wallMat = new THREE.MeshPhysicalMaterial({
-  color: 0xffffff,
+  color: 0xb8dcff,
   metalness: 0.0,
-  roughness: 0.0,
-  transmission: 1.0,
-  thickness: 0.3,
-  ior: 1.45,
-  attenuationColor: new THREE.Color(0xd8efff),
-  attenuationDistance: 30.0,
+  roughness: 0.05,
+  ior: 1.5,
   clearcoat: 1.0,
-  clearcoatRoughness: 0.0,
+  clearcoatRoughness: 0.04,
   specularIntensity: 1.0,
   reflectivity: 0.5,
   transparent: true,
-  opacity: 0.35,
+  opacity: 0.18,
   envMapIntensity: 1.6,
+  emissive: 0x9ec8ff,
+  emissiveIntensity: 0.05,
   side: THREE.DoubleSide,
+  depthWrite: false,
 });
 function addWall(w, h, d, x, y, z) {
   const g = new THREE.BoxGeometry(w, h, d);
@@ -1105,22 +1173,24 @@ addWall(PLAY_W + wallThickness*2, PLAY_H, wallThickness, 0, 0,  PLAY_D/2 + wallT
 addWall(PLAY_W + wallThickness*2, PLAY_H, wallThickness, 0, 0, -PLAY_D/2 - wallThickness/2);
 addWall(wallThickness, PLAY_H, PLAY_D, -PLAY_W/2 - wallThickness/2, 0, 0);
 addWall(wallThickness, PLAY_H, PLAY_D,  PLAY_W/2 + wallThickness/2, 0, 0);
-// Bottom (slightly thicker, shows reflections)
+// Bottom — same alpha-blended glass treatment, slightly more opaque so the
+// stack visually rests on something
 const bottomMat = new THREE.MeshPhysicalMaterial({
-  color: 0xffffff,
+  color: 0xb8dcff,
   metalness: 0.0,
-  roughness: 0.0,
-  transmission: 1.0,
-  thickness: 0.2,
-  ior: 1.45,
-  attenuationColor: new THREE.Color(0xd8efff),
-  attenuationDistance: 30.0,
+  roughness: 0.05,
+  ior: 1.5,
   clearcoat: 1.0,
-  clearcoatRoughness: 0.0,
+  clearcoatRoughness: 0.04,
+  specularIntensity: 1.0,
+  reflectivity: 0.5,
   transparent: true,
-  opacity: 0.4,
+  opacity: 0.28,
+  envMapIntensity: 1.6,
+  emissive: 0x9ec8ff,
+  emissiveIntensity: 0.05,
   side: THREE.DoubleSide,
-  envMapIntensity: 1.4,
+  depthWrite: false,
 });
 const bottomGeo = new THREE.BoxGeometry(PLAY_W + wallThickness*2, 0.12, PLAY_D + wallThickness*2);
 const bottom = new THREE.Mesh(bottomGeo, bottomMat);
@@ -1144,6 +1214,20 @@ const frameMat = new THREE.LineBasicMaterial({
 });
 const frame = new THREE.LineSegments(frameEdges, frameMat);
 caseGroup.add(frame);
+
+// Inner edge frame — traces the interior of the play volume so the case
+// reads as a contained box even when the outer frame is camera-occluded.
+const innerFrameGeo = new THREE.BoxGeometry(PLAY_W, PLAY_H, PLAY_D);
+const innerFrameEdges = new THREE.EdgesGeometry(innerFrameGeo);
+const innerFrameMat = new THREE.LineBasicMaterial({
+  color: 0x6cf0ff,
+  transparent: true,
+  opacity: 0.22,
+  blending: THREE.AdditiveBlending,
+  depthWrite: false,
+});
+const innerFrame = new THREE.LineSegments(innerFrameEdges, innerFrameMat);
+caseGroup.add(innerFrame);
 
 // Bright top rim — extra-prominent (like the reference's lit top edge)
 const topRimGeo = new THREE.BoxGeometry(
@@ -1200,6 +1284,25 @@ const innerFloor = new THREE.Mesh(innerFloorGeo, innerFloorMat);
 innerFloor.rotation.x = -Math.PI / 2;
 innerFloor.position.y = -PLAY_H / 2 + 0.015;
 caseGroup.add(innerFloor);
+
+// Static flash-light pool — pre-allocated PointLights for line-clear flashes.
+// Adding/removing PointLights at runtime forces Three.js to recompile every
+// material that responds to lights, causing the multi-line-clear stutter.
+// Keep them parented permanently with intensity:0 and animate intensity only.
+const FLASH_LIGHT_POOL_SIZE = 4; // max rows in a single clear (Tetris)
+const flashLightPool = [];
+for (let i = 0; i < FLASH_LIGHT_POOL_SIZE; i++) {
+  const fl = new THREE.PointLight(0xffffff, 0, 30);
+  fl.position.set(0, 0, 0);
+  caseGroup.add(fl);
+  flashLightPool.push({ light: fl, busy: false });
+}
+function acquireFlashLight() {
+  for (const slot of flashLightPool) {
+    if (!slot.busy) { slot.busy = true; return slot; }
+  }
+  return null; // all in use; skip this flash light (visual: still has plane flash)
+}
 
 // =============================================================
 // Coordinate helpers — board cell -> world position
@@ -1388,10 +1491,7 @@ function tryRotate(dir) {
     if (!collides(activePiece, activePiece.col + k, activePiece.row, nrot)) {
       activePiece.col += k;
       activePiece.rot = nrot;
-      // Kick visual rotation
-      pieceRotTarget += dir > 0 ? Math.PI * 0.5 : -Math.PI * 0.5;
-      // Actually, snap target to 0 — we just want a quick wobble
-      pieceRotTarget = 0;
+      // Quick wobble — spring back to 0 in animate()
       pieceRotVisual = dir > 0 ? -0.45 : 0.45;
       pieceRotVel = 0;
       rebuildPieceMesh();
@@ -1523,104 +1623,305 @@ function animateCubeTo(cube, target) {
 }
 
 // =============================================================
-// Shatter / Particles
+// Shatter / Particles — GPU-instanced shards (one draw call total)
 // =============================================================
-const shards = []; // {mesh, vel, angVel, life, maxLife}
-const shardGroup = new THREE.Group();
-scene.add(shardGroup);
+// All shards share one InstancedBufferGeometry + ShaderMaterial. Per-instance
+// attributes drive position/rotation/color/lifetime in the vertex shader, so
+// CPU work is just "write attribute slots and bump needsUpdate." A 4-line
+// Tetris with shatterPower=2.5 used to allocate 2,400 Mesh objects + spike GC.
+// Now: zero allocations, one draw call regardless of shard count.
+const SHARD_CAPACITY = 2048;
+const _baseShardGeo = new THREE.TetrahedronGeometry(0.22, 0);
+const shardGeo = new THREE.InstancedBufferGeometry();
+shardGeo.index = _baseShardGeo.index;
+shardGeo.setAttribute('position', _baseShardGeo.attributes.position);
+shardGeo.setAttribute('normal', _baseShardGeo.attributes.normal);
+shardGeo.instanceCount = SHARD_CAPACITY;
 
-const sparkles = []; // additive points
-const sparkleGroup = new THREE.Group();
-scene.add(sparkleGroup);
+const _shardOrigin    = new Float32Array(SHARD_CAPACITY * 3);
+const _shardVelocity  = new Float32Array(SHARD_CAPACITY * 3);
+const _shardAngVel    = new Float32Array(SHARD_CAPACITY * 3);
+const _shardColor     = new Float32Array(SHARD_CAPACITY * 3);
+const _shardSpawnTime = new Float32Array(SHARD_CAPACITY);
+const _shardMaxLife   = new Float32Array(SHARD_CAPACITY);
+const _shardScale     = new Float32Array(SHARD_CAPACITY);
+// Initialize all maxLife=0 so every slot starts "expired" (invisible)
+for (let i = 0; i < SHARD_CAPACITY; i++) _shardSpawnTime[i] = -1000.0;
 
-// Single shard geometry shared by every shard mesh — huge GPU batching win
-const SHARD_GEOM = new THREE.TetrahedronGeometry(0.22, 0);
-// Material cache keyed by hex color — one MeshBasicMaterial per piece color,
-// reused across all shard meshes (was MeshPhysicalMaterial per shard before).
-const _shardMatCache = new Map();
-function getShardMat(color) {
-  if (_shardMatCache.has(color)) return _shardMatCache.get(color);
-  const mat = new THREE.MeshBasicMaterial({
-    color,
-    transparent: true,
-    opacity: 0.95,
-    blending: THREE.AdditiveBlending,
-    depthWrite: false,
-    side: THREE.DoubleSide,
-    fog: false,
-  });
-  _shardMatCache.set(color, mat);
-  return mat;
-}
+const _aOriginAttr    = new THREE.InstancedBufferAttribute(_shardOrigin, 3);
+const _aVelocityAttr  = new THREE.InstancedBufferAttribute(_shardVelocity, 3);
+const _aAngVelAttr    = new THREE.InstancedBufferAttribute(_shardAngVel, 3);
+const _aColorAttr     = new THREE.InstancedBufferAttribute(_shardColor, 3);
+const _aSpawnAttr     = new THREE.InstancedBufferAttribute(_shardSpawnTime, 1);
+const _aMaxLifeAttr   = new THREE.InstancedBufferAttribute(_shardMaxLife, 1);
+const _aScaleAttr     = new THREE.InstancedBufferAttribute(_shardScale, 1);
+_aOriginAttr.setUsage(THREE.DynamicDrawUsage);
+_aVelocityAttr.setUsage(THREE.DynamicDrawUsage);
+_aAngVelAttr.setUsage(THREE.DynamicDrawUsage);
+_aColorAttr.setUsage(THREE.DynamicDrawUsage);
+_aSpawnAttr.setUsage(THREE.DynamicDrawUsage);
+_aMaxLifeAttr.setUsage(THREE.DynamicDrawUsage);
+_aScaleAttr.setUsage(THREE.DynamicDrawUsage);
+shardGeo.setAttribute('aOrigin',    _aOriginAttr);
+shardGeo.setAttribute('aVelocity',  _aVelocityAttr);
+shardGeo.setAttribute('aAngVel',    _aAngVelAttr);
+shardGeo.setAttribute('aColor',     _aColorAttr);
+shardGeo.setAttribute('aSpawnTime', _aSpawnAttr);
+shardGeo.setAttribute('aMaxLife',   _aMaxLifeAttr);
+shardGeo.setAttribute('aScale',     _aScaleAttr);
 
+const shardMat = new THREE.ShaderMaterial({
+  uniforms: {
+    uTime:    { value: 0.0 },
+    uGravity: { value: new THREE.Vector3(0.0, -16.0, 0.0) },
+    uFloorY:  { value: -PLAY_H / 2 - 0.45 },
+  },
+  vertexShader: /* glsl */`
+    attribute vec3  aOrigin;
+    attribute vec3  aVelocity;
+    attribute vec3  aAngVel;
+    attribute vec3  aColor;
+    attribute float aSpawnTime;
+    attribute float aMaxLife;
+    attribute float aScale;
+
+    uniform float uTime;
+    uniform vec3  uGravity;
+    uniform float uFloorY;
+
+    varying vec3  vColor;
+    varying float vAlpha;
+
+    mat3 axisRot(vec3 axis, float angle) {
+      float c = cos(angle);
+      float s = sin(angle);
+      float t = 1.0 - c;
+      return mat3(
+        t*axis.x*axis.x + c,        t*axis.x*axis.y - s*axis.z, t*axis.x*axis.z + s*axis.y,
+        t*axis.x*axis.y + s*axis.z, t*axis.y*axis.y + c,        t*axis.y*axis.z - s*axis.x,
+        t*axis.x*axis.z - s*axis.y, t*axis.y*axis.z + s*axis.x, t*axis.z*axis.z + c
+      );
+    }
+
+    void main() {
+      float age = uTime - aSpawnTime;
+      // Cull expired or unspawned slots by collapsing them to zero
+      if (age < 0.0 || age > aMaxLife) {
+        gl_Position = vec4(2.0, 2.0, 2.0, 1.0); // outside clip space
+        vAlpha = 0.0;
+        return;
+      }
+
+      // Rotate the local vertex by integrated angular velocity
+      vec3 axis = aAngVel;
+      float aLen = length(axis);
+      vec3 nAxis = aLen > 1e-4 ? axis / aLen : vec3(0.0, 1.0, 0.0);
+      vec3 local = position * aScale;
+      local = axisRot(nAxis, aLen * age) * local;
+
+      // Ballistic position: origin + v*t + 0.5*g*t² (no drag/bounce — visual diff is minor)
+      vec3 worldPos = aOrigin + aVelocity * age + 0.5 * uGravity * age * age;
+      // Soft floor clamp so shards "settle" at the floor instead of falling through
+      worldPos.y = max(worldPos.y, uFloorY);
+
+      // Lifetime fade — last 0.4s ramps alpha+scale to 0
+      float fadeStart = max(0.0, aMaxLife - 0.4);
+      float fade = 1.0 - smoothstep(fadeStart, aMaxLife, age);
+      vAlpha = fade;
+      // Apply fade to scale too (prevents popping on cull)
+      local *= fade;
+
+      vColor = aColor;
+      gl_Position = projectionMatrix * viewMatrix * vec4(worldPos + local, 1.0);
+    }
+  `,
+  fragmentShader: /* glsl */`
+    varying vec3  vColor;
+    varying float vAlpha;
+    void main() {
+      if (vAlpha <= 0.001) discard;
+      gl_FragColor = vec4(vColor, vAlpha);
+    }
+  `,
+  transparent: true,
+  blending: THREE.AdditiveBlending,
+  depthWrite: false,
+  fog: false,
+});
+
+const shardMesh = new THREE.Mesh(shardGeo, shardMat);
+shardMesh.frustumCulled = false; // bounding box would be wrong for shader-driven motion
+scene.add(shardMesh);
+
+let _shardCursor = 0;
+let _shardClock = 0.0;
+
+// =============================================================
+// Sparkle pool — one Points + ShaderMaterial, ring buffer of 4096 slots.
+// Each cube cleared used to allocate a fresh BufferGeometry + PointsMaterial
+// (~40 allocations per Tetris). Now: zero per-frame allocations.
+// =============================================================
+const SPARKLE_CAPACITY = 4096;
+const sparkleGeo = new THREE.BufferGeometry();
+const _sparkleOrigin   = new Float32Array(SPARKLE_CAPACITY * 3);
+const _sparkleVelocity = new Float32Array(SPARKLE_CAPACITY * 3);
+const _sparkleColor    = new Float32Array(SPARKLE_CAPACITY * 3);
+const _sparkleSpawn    = new Float32Array(SPARKLE_CAPACITY);
+const _sparkleLife     = new Float32Array(SPARKLE_CAPACITY);
+for (let i = 0; i < SPARKLE_CAPACITY; i++) _sparkleSpawn[i] = -1000.0;
+
+const _spOriginAttr   = new THREE.BufferAttribute(_sparkleOrigin, 3);
+const _spVelocityAttr = new THREE.BufferAttribute(_sparkleVelocity, 3);
+const _spColorAttr    = new THREE.BufferAttribute(_sparkleColor, 3);
+const _spSpawnAttr    = new THREE.BufferAttribute(_sparkleSpawn, 1);
+const _spLifeAttr     = new THREE.BufferAttribute(_sparkleLife, 1);
+_spOriginAttr.setUsage(THREE.DynamicDrawUsage);
+_spVelocityAttr.setUsage(THREE.DynamicDrawUsage);
+_spColorAttr.setUsage(THREE.DynamicDrawUsage);
+_spSpawnAttr.setUsage(THREE.DynamicDrawUsage);
+_spLifeAttr.setUsage(THREE.DynamicDrawUsage);
+sparkleGeo.setAttribute('position',   _spOriginAttr);
+sparkleGeo.setAttribute('aVelocity',  _spVelocityAttr);
+sparkleGeo.setAttribute('aColor',     _spColorAttr);
+sparkleGeo.setAttribute('aSpawnTime', _spSpawnAttr);
+sparkleGeo.setAttribute('aLife',      _spLifeAttr);
+
+const sparkleMat = new THREE.ShaderMaterial({
+  uniforms: {
+    uTime:    { value: 0.0 },
+    uGravity: { value: -16.0 * 0.4 },
+    uMap:     { value: makeSparkleTexture() },
+    // uSize is in "pixels-at-unit-distance"; gl_PointSize = uSize / -mvPos.z
+    uSize:    { value: 220.0 },
+  },
+  vertexShader: /* glsl */`
+    attribute vec3  aVelocity;
+    attribute vec3  aColor;
+    attribute float aSpawnTime;
+    attribute float aLife;
+
+    uniform float uTime;
+    uniform float uGravity;
+    uniform float uSize;
+
+    varying vec3  vColor;
+    varying float vAlpha;
+
+    void main() {
+      float age = uTime - aSpawnTime;
+      if (age < 0.0 || age > aLife) {
+        gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+        gl_PointSize = 0.0;
+        vAlpha = 0.0;
+        return;
+      }
+
+      vec3 worldPos = position + aVelocity * age + vec3(0.0, 0.5 * uGravity * age * age, 0.0);
+      vec4 mvPos = viewMatrix * vec4(worldPos, 1.0);
+      gl_Position = projectionMatrix * mvPos;
+      gl_PointSize = uSize / max(0.1, -mvPos.z);
+
+      vAlpha = 1.0 - clamp(age / aLife, 0.0, 1.0);
+      vColor = aColor;
+    }
+  `,
+  fragmentShader: /* glsl */`
+    uniform sampler2D uMap;
+    varying vec3  vColor;
+    varying float vAlpha;
+    void main() {
+      if (vAlpha <= 0.001) discard;
+      vec4 tex = texture2D(uMap, gl_PointCoord);
+      gl_FragColor = vec4(vColor, vAlpha) * tex;
+    }
+  `,
+  transparent: true,
+  blending: THREE.AdditiveBlending,
+  depthWrite: false,
+  fog: false,
+});
+
+const sparkleMesh = new THREE.Points(sparkleGeo, sparkleMat);
+sparkleMesh.frustumCulled = false;
+scene.add(sparkleMesh);
+
+let _sparkleCursor = 0;
+
+const _shardWorld = new THREE.Vector3();
+const _shardColorObj = new THREE.Color();
 function shatter(cube) {
   const color = cube.userData.color;
-  const world = new THREE.Vector3();
-  cube.getWorldPosition(world);
+  cube.getWorldPosition(_shardWorld);
+  _shardColorObj.set(color);
 
-  // Shard count scales with SHATTER_POWER tweak (1x base = 8 shards/cube;
-  // cinematic = 16). Lower-poly material + shared geometry keeps it cheap.
+  // Shard count scales with SHATTER_POWER (1x = 8/cube, cinematic = 16/cube).
+  // All shards write into the shared InstancedBufferGeometry — zero allocations,
+  // one draw call regardless of total active shard count.
   const count = Math.round(8 * TWEAKS.shatterPower);
-  const mat = getShardMat(color);
   for (let i = 0; i < count; i++) {
-    const mesh = new THREE.Mesh(SHARD_GEOM, mat);
-    mesh.position.copy(world);
-    mesh.position.x += (Math.random() - 0.5) * 0.3;
-    mesh.position.y += (Math.random() - 0.5) * 0.3;
-    mesh.position.z += (Math.random() - 0.5) * 0.3;
-    mesh.scale.setScalar(0.7 + Math.random() * 0.7);
-    shardGroup.add(mesh);
+    const idx = _shardCursor;
+    _shardCursor = (_shardCursor + 1) % SHARD_CAPACITY;
+    const i3 = idx * 3;
+
+    _shardOrigin[i3 + 0] = _shardWorld.x + (Math.random() - 0.5) * 0.3;
+    _shardOrigin[i3 + 1] = _shardWorld.y + (Math.random() - 0.5) * 0.3;
+    _shardOrigin[i3 + 2] = _shardWorld.z + (Math.random() - 0.5) * 0.3;
 
     const angle = Math.random() * Math.PI * 2;
     const speed = (4 + Math.random() * 6) * TWEAKS.shatterPower;
     const vy = (2 + Math.random() * 4) * TWEAKS.shatterPower;
-    const vel = new THREE.Vector3(
-      Math.cos(angle) * speed,
-      vy,
-      Math.sin(angle) * speed * 0.6,
-    );
-    const angVel = new THREE.Vector3(
-      (Math.random() - 0.5) * 12,
-      (Math.random() - 0.5) * 12,
-      (Math.random() - 0.5) * 12,
-    );
-    shards.push({ mesh, vel, angVel, life: 0, maxLife: 1.4 + Math.random() * 0.5, baseScale: mesh.scale.x });
+    _shardVelocity[i3 + 0] = Math.cos(angle) * speed;
+    _shardVelocity[i3 + 1] = vy;
+    _shardVelocity[i3 + 2] = Math.sin(angle) * speed * 0.6;
+
+    _shardAngVel[i3 + 0] = (Math.random() - 0.5) * 12;
+    _shardAngVel[i3 + 1] = (Math.random() - 0.5) * 12;
+    _shardAngVel[i3 + 2] = (Math.random() - 0.5) * 12;
+
+    _shardColor[i3 + 0] = _shardColorObj.r;
+    _shardColor[i3 + 1] = _shardColorObj.g;
+    _shardColor[i3 + 2] = _shardColorObj.b;
+
+    _shardSpawnTime[idx] = _shardClock;
+    _shardMaxLife[idx]   = 1.4 + Math.random() * 0.5;
+    _shardScale[idx]     = 0.7 + Math.random() * 0.7;
   }
+  _aOriginAttr.needsUpdate    = true;
+  _aVelocityAttr.needsUpdate  = true;
+  _aAngVelAttr.needsUpdate    = true;
+  _aColorAttr.needsUpdate     = true;
+  _aSpawnAttr.needsUpdate     = true;
+  _aMaxLifeAttr.needsUpdate   = true;
+  _aScaleAttr.needsUpdate     = true;
 
   // Sparkle count also scales with power
-  spawnSparkles(world, color, Math.round(6 * TWEAKS.shatterPower));
+  spawnSparkles(_shardWorld, color, Math.round(6 * TWEAKS.shatterPower));
 }
 
+const _sparkleColorObj = new THREE.Color();
 function spawnSparkles(pos, color, count) {
-  const positions = new Float32Array(count * 3);
+  _sparkleColorObj.set(color);
   for (let i = 0; i < count; i++) {
-    positions[i*3+0] = pos.x;
-    positions[i*3+1] = pos.y;
-    positions[i*3+2] = pos.z;
+    const idx = _sparkleCursor;
+    _sparkleCursor = (_sparkleCursor + 1) % SPARKLE_CAPACITY;
+    const i3 = idx * 3;
+    _sparkleOrigin[i3 + 0]   = pos.x;
+    _sparkleOrigin[i3 + 1]   = pos.y;
+    _sparkleOrigin[i3 + 2]   = pos.z;
+    _sparkleVelocity[i3 + 0] = (Math.random() - 0.5) * 8;
+    _sparkleVelocity[i3 + 1] = (Math.random() - 0.2) * 5;
+    _sparkleVelocity[i3 + 2] = (Math.random() - 0.5) * 8;
+    _sparkleColor[i3 + 0]    = _sparkleColorObj.r;
+    _sparkleColor[i3 + 1]    = _sparkleColorObj.g;
+    _sparkleColor[i3 + 2]    = _sparkleColorObj.b;
+    _sparkleSpawn[idx]       = _shardClock; // share the same clock as shards
+    _sparkleLife[idx]        = 1.2;
   }
-  const geom = new THREE.BufferGeometry();
-  geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-  const mat = new THREE.PointsMaterial({
-    size: 0.3,
-    color,
-    transparent: true,
-    opacity: 1.0,
-    blending: THREE.AdditiveBlending,
-    depthWrite: false,
-    map: makeSparkleTexture(),
-  });
-  const points = new THREE.Points(geom, mat);
-  sparkleGroup.add(points);
-
-  const vels = [];
-  for (let i = 0; i < count; i++) {
-    vels.push(new THREE.Vector3(
-      (Math.random() - 0.5) * 8,
-      (Math.random() - 0.2) * 5,
-      (Math.random() - 0.5) * 8,
-    ));
-  }
-  sparkles.push({ points, vels, life: 0, maxLife: 1.2 });
+  _spOriginAttr.needsUpdate   = true;
+  _spVelocityAttr.needsUpdate = true;
+  _spColorAttr.needsUpdate    = true;
+  _spSpawnAttr.needsUpdate    = true;
+  _spLifeAttr.needsUpdate     = true;
 }
 
 // (makeSparkleTexture is defined earlier near scene setup)
@@ -1645,11 +1946,13 @@ function triggerFlash(rows) {
     caseGroup.add(mesh);
     flashes.push({ mesh, life: 0, maxLife: 0.55 });
 
-    // Add a big point light
-    const light = new THREE.PointLight(0xffffff, 12, 30);
-    light.position.set(0, y, 0);
-    caseGroup.add(light);
-    flashes.push({ light, life: 0, maxLife: 0.5, isLight: true });
+    // Pull a flash light from the static pool — never add/remove at runtime
+    const slot = acquireFlashLight();
+    if (slot) {
+      slot.light.position.set(0, y, 0);
+      slot.light.intensity = 12;
+      flashes.push({ slot, life: 0, maxLife: 0.5, isLight: true });
+    }
 
     // Crossing beam plane
     const geoZ = new THREE.PlaneGeometry(PLAY_W * 1.6, CELL * 1.4);
@@ -1915,12 +2218,18 @@ document.getElementById('goRestart').addEventListener('click', () => {
   stackGroup.clear();
   pieceGroup.clear();
   ghostGroup.clear();
-  shardGroup.clear();
-  sparkleGroup.clear();
-  shards.length = 0;
-  sparkles.length = 0;
   flashes.length = 0;
   cubeAnims.length = 0;
+  // Expire all live shards & sparkles by zeroing their spawn times
+  for (let i = 0; i < SHARD_CAPACITY; i++)   _shardSpawnTime[i] = -1000.0;
+  for (let i = 0; i < SPARKLE_CAPACITY; i++) _sparkleSpawn[i]   = -1000.0;
+  _aSpawnAttr.needsUpdate = true;
+  _spSpawnAttr.needsUpdate = true;
+  // Return any in-flight flash lights to the pool
+  for (const slot of flashLightPool) {
+    slot.light.intensity = 0;
+    slot.busy = false;
+  }
   score = 0;
   lines = 0;
   level = 1;
@@ -2138,61 +2447,12 @@ function animate() {
     if (k >= 1) cubeAnims.splice(i, 1);
   }
 
-  // ---- Shards ----
-  const gravity = -16;
-  for (let i = shards.length - 1; i >= 0; i--) {
-    const s = shards[i];
-    s.life += dt;
-    s.vel.y += gravity * dt;
-    // Air drag
-    s.vel.multiplyScalar(1 - 0.6 * dt);
-    s.mesh.position.addScaledVector(s.vel, dt);
-    s.mesh.rotation.x += s.angVel.x * dt;
-    s.mesh.rotation.y += s.angVel.y * dt;
-    s.mesh.rotation.z += s.angVel.z * dt;
-    // Floor bounce
-    const floorY = -PLAY_H / 2 - 0.45;
-    if (s.mesh.position.y < floorY) {
-      s.mesh.position.y = floorY;
-      s.vel.y *= -0.35;
-      s.vel.x *= 0.6;
-      s.vel.z *= 0.6;
-    }
-    if (s.life > s.maxLife - 0.4) {
-      const fade = (s.maxLife - s.life) / 0.4;
-      // Fade by scale (shared material — can't mutate opacity per-shard)
-      const f = Math.max(0, fade);
-      s.mesh.scale.setScalar((s.baseScale || 1) * f);
-    }
-    if (s.life >= s.maxLife) {
-      shardGroup.remove(s.mesh);
-      // Don't dispose — material is shared, geometry is shared
-      shards.splice(i, 1);
-    }
-  }
-
-  // ---- Sparkles ----
-  for (let i = sparkles.length - 1; i >= 0; i--) {
-    const s = sparkles[i];
-    s.life += dt;
-    const positions = s.points.geometry.attributes.position.array;
-    const N = s.vels.length;
-    for (let j = 0; j < N; j++) {
-      s.vels[j].y += gravity * 0.4 * dt;
-      s.vels[j].multiplyScalar(1 - 0.8 * dt);
-      positions[j*3+0] += s.vels[j].x * dt;
-      positions[j*3+1] += s.vels[j].y * dt;
-      positions[j*3+2] += s.vels[j].z * dt;
-    }
-    s.points.geometry.attributes.position.needsUpdate = true;
-    s.points.material.opacity = Math.max(0, 1.0 - s.life / s.maxLife);
-    if (s.life >= s.maxLife) {
-      sparkleGroup.remove(s.points);
-      s.points.geometry.dispose();
-      s.points.material.dispose();
-      sparkles.splice(i, 1);
-    }
-  }
+  // ---- Shards & Sparkles (both GPU-driven, share _shardClock) ----
+  // Physics, rotation, and lifetime fade all happen in the shaders using
+  // per-instance attributes; CPU just advances the clock uniform.
+  _shardClock += dt;
+  shardMat.uniforms.uTime.value = _shardClock;
+  sparkleMat.uniforms.uTime.value = _shardClock;
 
   // ---- Flashes ----
   for (let i = flashes.length - 1; i >= 0; i--) {
@@ -2200,9 +2460,10 @@ function animate() {
     f.life += dt;
     const k = f.life / f.maxLife;
     if (f.isLight) {
-      f.light.intensity = 12 * (1 - k);
+      f.slot.light.intensity = 12 * (1 - k);
       if (k >= 1) {
-        caseGroup.remove(f.light);
+        f.slot.light.intensity = 0;
+        f.slot.busy = false;
         flashes.splice(i, 1);
       }
     } else {
@@ -2259,7 +2520,7 @@ function animate() {
 
   // Apply shake + punch-zoom
   camera.position.add(shakeOffset).add(zoomOffset);
-  renderer.render(scene, camera);
+  composer.render();
   cssRenderer.render(cssScene, camera);
   // Remove so they don't accumulate
   camera.position.sub(shakeOffset).sub(zoomOffset);
@@ -2274,6 +2535,12 @@ window.addEventListener('resize', () => {
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
   cssRenderer.setSize(window.innerWidth, window.innerHeight);
+  composer.setSize(window.innerWidth, window.innerHeight);
+  bloomPass.setSize(window.innerWidth, window.innerHeight);
+  smaaPass.setSize(
+    window.innerWidth * Math.min(window.devicePixelRatio, 2),
+    window.innerHeight * Math.min(window.devicePixelRatio, 2),
+  );
 });
 
 // =============================================================
