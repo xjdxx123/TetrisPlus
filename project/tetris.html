@@ -1073,15 +1073,18 @@ function getCubeMaterial(color, opts = {}) {
   return mat;
 }
 
-// Edge highlight material — bright thin wireframe along the chamfer
+// Edge highlight material — bright thin wireframe along the chamfer.
+// Locked cubes use opaque normal-blended edges so the seam between two
+// adjacent same-color cubes reads as a discrete bright line, not a soft
+// additive smear. Ghost cubes keep additive blending so they float.
 function getEdgeMaterial(color, ghost) {
-  const ec = new THREE.Color(color).lerp(new THREE.Color(0xffffff), 0.55);
+  const ec = new THREE.Color(color).lerp(new THREE.Color(0xffffff), 0.75);
   return new THREE.LineBasicMaterial({
     color: ec,
-    transparent: true,
-    opacity: ghost ? 0.2 : 0.7,
-    blending: THREE.AdditiveBlending,
-    depthWrite: false,
+    transparent: !!ghost,
+    opacity: ghost ? 0.2 : 1.0,
+    blending: ghost ? THREE.AdditiveBlending : THREE.NormalBlending,
+    depthWrite: !ghost,
   });
 }
 
