@@ -6,8 +6,6 @@
 <title>TetrisPlus — 3D Glass</title>
 <style>
   :root {
-    --bg-0: #05060a;
-    --bg-1: #0b0e18;
     --ink: #f3f5fb;
     --muted: #8b93ad;
     --accent: #6cf0ff;
@@ -19,7 +17,6 @@
     height: 100%;
     width: 100%;
     overflow: hidden;
-    background: #000005;
     color: var(--ink);
     font-family: ui-sans-serif, system-ui, -apple-system, "SF Pro Display", "Helvetica Neue", Arial, sans-serif;
     -webkit-font-smoothing: antialiased;
@@ -29,16 +26,6 @@
     inset: 0;
   }
   canvas { display: block; }
-
-  /* Floor reflection vignette */
-  .floor-glow {
-    position: fixed;
-    left: 0; right: 0; bottom: 0;
-    height: 40%;
-    pointer-events: none;
-    background: linear-gradient(180deg, transparent 0%, rgba(0,0,0,0.55) 80%);
-    z-index: 1;
-  }
 
   /* Top-left brand */
   .brand {
@@ -199,9 +186,10 @@
     100% { transform: translate(-50%, calc(-50% - 110px)) scale(0.92); opacity: 0; }
   }
 
-  .help-toggle, .bg-toggle {
+  .help-toggle {
     position: fixed;
     bottom: 18px;
+    right: 22px;
     z-index: 6;
     width: 32px;
     height: 32px;
@@ -214,10 +202,7 @@
     backdrop-filter: blur(10px);
     transition: color 0.2s, border-color 0.2s;
   }
-  .help-toggle { right: 22px; }
-  .bg-toggle   { right: 62px; font-size: 10px; letter-spacing: 0.08em; font-weight: 600; }
-  .help-toggle:hover, .bg-toggle:hover { color: var(--ink); border-color: rgba(108,240,255,0.5); }
-  .bg-toggle.off { color: rgba(108,240,255,0.9); border-color: rgba(108,240,255,0.5); }
+  .help-toggle:hover { color: var(--ink); border-color: rgba(108,240,255,0.5); }
 
   /* Game over overlay */
   .game-over {
@@ -315,7 +300,6 @@
     <h4 style="margin-top:10px;">Panels</h4>
     <div class="row"><span>Drag in 3D</span><span>Click + drag panel</span></div>
   </div>
-  <button class="bg-toggle" id="bgToggle" title="Toggle background">BG</button>
   <button class="help-toggle" id="helpToggle" title="Toggle controls">?</button>
 
   <div class="levelup" id="levelup"></div>
@@ -346,7 +330,6 @@
   <script type="module">
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 
 // =============================================================
 // Tweaks — three expressive controls that reshape the feel
@@ -358,12 +341,12 @@ const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
 }/*EDITMODE-END*/;
 const TWEAKS = { ...TWEAK_DEFAULTS };
 
-// Mood presets — recolor case glow, rim lights, grid, horizon, fog tint
+// Mood presets — recolor rim/fill lights and case frame
 const MOOD_PRESETS = {
-  neon:  { rim: 0xff4a8a, fill: 0x6cf0ff, frame: 0xaee7ff, grid: 0x6cd0ff, fog: 0x05080f, horizon: [255, 100, 160] },
-  icy:   { rim: 0x6cb0ff, fill: 0xa0e6ff, frame: 0xd0ecff, grid: 0x88d0ff, fog: 0x081420, horizon: [120, 200, 255] },
-  ember: { rim: 0xff6a30, fill: 0xffb060, frame: 0xffd0a0, grid: 0xff9a40, fog: 0x100604, horizon: [255, 140, 60] },
-  void:  { rim: 0xa066ff, fill: 0x4a40c0, frame: 0x8866ff, grid: 0x6644aa, fog: 0x040208, horizon: [160, 80, 240] },
+  neon:  { rim: 0xff4a8a, fill: 0x6cf0ff, frame: 0xaee7ff },
+  icy:   { rim: 0x6cb0ff, fill: 0xa0e6ff, frame: 0xd0ecff },
+  ember: { rim: 0xff6a30, fill: 0xffb060, frame: 0xffd0a0 },
+  void:  { rim: 0xa066ff, fill: 0x4a40c0, frame: 0x8866ff },
 };
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
@@ -442,6 +425,32 @@ const PIECES = {
   ],
 };
 const PIECE_KEYS = Object.keys(PIECES);
+
+// Per-color luminance normalization. The emissive output of a cube is
+// `color * emissiveIntensity`, so without this a yellow O-piece naturally
+// emits ~2× the perceived brightness of a blue J-piece at the same nominal
+// intensity. We scale emissive/core/rim contributions inversely to each
+// color's luma so every piece reads as equally bright.
+const REF_LUMA = (() => {
+  const lumas = Object.values(PIECE_COLORS).map(c => {
+    const r = ((c >> 16) & 0xff) / 255;
+    const g = ((c >> 8) & 0xff) / 255;
+    const b = (c & 0xff) / 255;
+    return 0.299 * r + 0.587 * g + 0.114 * b;
+  });
+  return lumas.reduce((a, b) => a + b, 0) / lumas.length;
+})();
+const _colorLumaScaleCache = new Map();
+function colorLumaScale(hex) {
+  if (_colorLumaScaleCache.has(hex)) return _colorLumaScaleCache.get(hex);
+  const r = ((hex >> 16) & 0xff) / 255;
+  const g = ((hex >> 8) & 0xff) / 255;
+  const b = (hex & 0xff) / 255;
+  const luma = Math.max(0.001, 0.299 * r + 0.587 * g + 0.114 * b);
+  const scale = REF_LUMA / luma;
+  _colorLumaScaleCache.set(hex, scale);
+  return scale;
+}
 
 // =============================================================
 // Renderer / Scene / Camera
@@ -538,107 +547,6 @@ composer.addPass(smaaPass);
 composer.addPass(new OutputPass());
 
 // =============================================================
-// Custom HDR-like environment — procedural cubemap with bokeh
-// matches the reference image's glowing nightclub backdrop and
-// gives every glass surface real, colorful reflections.
-// =============================================================
-function buildEnvCanvas() {
-  const W = 2048, H = 1024;
-  const c = document.createElement('canvas');
-  c.width = W; c.height = H;
-  const ctx = c.getContext('2d');
-
-  // Sky gradient — top dark, horizon warm
-  const sky = ctx.createLinearGradient(0, 0, 0, H);
-  sky.addColorStop(0.0, '#02030a');
-  sky.addColorStop(0.45, '#0a1428');
-  sky.addColorStop(0.55, '#1a1828');
-  sky.addColorStop(0.65, '#2a1820');
-  sky.addColorStop(1.0, '#08080c');
-  ctx.fillStyle = sky;
-  ctx.fillRect(0, 0, W, H);
-
-  // Big soft warm key light high right
-  const k = ctx.createRadialGradient(W*0.78, H*0.18, 0, W*0.78, H*0.18, 380);
-  k.addColorStop(0, 'rgba(255,235,200,1.0)');
-  k.addColorStop(0.4, 'rgba(255,180,120,0.4)');
-  k.addColorStop(1, 'rgba(255,140,80,0)');
-  ctx.fillStyle = k;
-  ctx.fillRect(0, 0, W, H);
-
-  // Cool fill left
-  const f = ctx.createRadialGradient(W*0.18, H*0.32, 0, W*0.18, H*0.32, 320);
-  f.addColorStop(0, 'rgba(180,220,255,0.85)');
-  f.addColorStop(1, 'rgba(60,140,255,0)');
-  ctx.fillStyle = f;
-  ctx.fillRect(0, 0, W, H);
-
-  // Magenta accent
-  const m = ctx.createRadialGradient(W*0.4, H*0.7, 0, W*0.4, H*0.7, 280);
-  m.addColorStop(0, 'rgba(255,120,200,0.8)');
-  m.addColorStop(1, 'rgba(255,80,160,0)');
-  ctx.fillStyle = m;
-  ctx.fillRect(0, 0, W, H);
-
-  // Bokeh lights — many tiny soft bright dots, like the reference image's blurred city
-  const colors = [
-    [255, 180, 80],   // amber
-    [255, 220, 130],  // warm
-    [120, 200, 255],  // cyan
-    [180, 240, 255],  // ice
-    [255, 100, 160],  // pink
-    [180, 120, 255],  // violet
-    [120, 255, 200],  // mint
-    [255, 240, 200],  // cream
-  ];
-  // Distribute mostly in lower 70% (horizon band) like a city skyline
-  for (let i = 0; i < 280; i++) {
-    const x = Math.random() * W;
-    const y = H * (0.35 + Math.pow(Math.random(), 1.4) * 0.6);
-    const r = 6 + Math.pow(Math.random(), 2) * 70;
-    const col = colors[Math.floor(Math.random() * colors.length)];
-    const alpha = 0.5 + Math.random() * 0.5;
-    const g = ctx.createRadialGradient(x, y, 0, x, y, r);
-    g.addColorStop(0, `rgba(${col[0]},${col[1]},${col[2]},${alpha})`);
-    g.addColorStop(0.4, `rgba(${col[0]},${col[1]},${col[2]},${alpha*0.4})`);
-    g.addColorStop(1, `rgba(${col[0]},${col[1]},${col[2]},0)`);
-    ctx.fillStyle = g;
-    ctx.fillRect(x - r, y - r, r * 2, r * 2);
-  }
-
-  // A handful of very bright pin-points for sharp specular hits
-  for (let i = 0; i < 24; i++) {
-    const x = Math.random() * W;
-    const y = H * (0.2 + Math.random() * 0.7);
-    const r = 2 + Math.random() * 4;
-    ctx.fillStyle = 'rgba(255,255,255,0.95)';
-    ctx.beginPath();
-    ctx.arc(x, y, r, 0, Math.PI * 2);
-    ctx.fill();
-  }
-
-  // Floor band — slightly lighter strip for ground reflection
-  const floorBand = ctx.createLinearGradient(0, H*0.85, 0, H);
-  floorBand.addColorStop(0, 'rgba(40,30,60,0.0)');
-  floorBand.addColorStop(0.5, 'rgba(80,60,80,0.15)');
-  floorBand.addColorStop(1, 'rgba(20,20,30,0.4)');
-  ctx.fillStyle = floorBand;
-  ctx.fillRect(0, H*0.85, W, H*0.15);
-
-  return c;
-}
-const envCanvas = buildEnvCanvas();
-const envTex2D = new THREE.CanvasTexture(envCanvas);
-envTex2D.mapping = THREE.EquirectangularReflectionMapping;
-envTex2D.colorSpace = THREE.SRGBColorSpace;
-
-const pmrem = new THREE.PMREMGenerator(renderer);
-pmrem.compileEquirectangularShader();
-const envTex = pmrem.fromEquirectangular(envTex2D).texture;
-scene.environment = envTex;
-// Don't set scene.background — keep CSS bokeh background visible
-
-// =============================================================
 // Lighting — three-point with colored rim lights for the cubes
 // =============================================================
 const hemi = new THREE.HemisphereLight(0xb8d0ff, 0x0a0a14, 0.35);
@@ -662,102 +570,7 @@ const topAccent = new THREE.PointLight(0xffd080, 1.4, 40, 2.0);
 topAccent.position.set(0, PLAY_H * 0.7, 8);
 scene.add(topAccent);
 
-// =============================================================
-// Floor — wet reflective marble look (matches reference)
-// =============================================================
-function buildFloorTexture() {
-  const W = 1024, H = 1024;
-  const c = document.createElement('canvas');
-  c.width = W; c.height = H;
-  const ctx = c.getContext('2d');
-  ctx.fillStyle = '#06070c';
-  ctx.fillRect(0, 0, W, H);
-  // Very subtle marble veins
-  for (let i = 0; i < 80; i++) {
-    ctx.strokeStyle = `rgba(${20+Math.random()*40},${30+Math.random()*50},${50+Math.random()*60},${0.02+Math.random()*0.04})`;
-    ctx.lineWidth = 0.4 + Math.random() * 0.8;
-    ctx.beginPath();
-    ctx.moveTo(Math.random()*W, Math.random()*H);
-    for (let j = 0; j < 4; j++) {
-      ctx.lineTo(Math.random()*W, Math.random()*H);
-    }
-    ctx.stroke();
-  }
-  // Fine noise for variety
-  const imgData = ctx.getImageData(0, 0, W, H);
-  for (let i = 0; i < imgData.data.length; i += 4) {
-    const n = (Math.random() - 0.5) * 8;
-    imgData.data[i]   = Math.max(0, Math.min(255, imgData.data[i]   + n));
-    imgData.data[i+1] = Math.max(0, Math.min(255, imgData.data[i+1] + n));
-    imgData.data[i+2] = Math.max(0, Math.min(255, imgData.data[i+2] + n));
-  }
-  ctx.putImageData(imgData, 0, 0);
-  const t = new THREE.CanvasTexture(c);
-  t.wrapS = t.wrapT = THREE.RepeatWrapping;
-  t.repeat.set(6, 6);
-  t.colorSpace = THREE.SRGBColorSpace;
-  return t;
-}
-const floorTex = buildFloorTexture();
-floorTex.anisotropy = 8;
-
-// Roughness map for floor — varying wet patches
-function buildFloorRoughness() {
-  const W = 512, H = 512;
-  const c = document.createElement('canvas');
-  c.width = W; c.height = H;
-  const ctx = c.getContext('2d');
-  ctx.fillStyle = '#1a1a1a';
-  ctx.fillRect(0, 0, W, H);
-  for (let i = 0; i < 30; i++) {
-    const x = Math.random() * W;
-    const y = Math.random() * H;
-    const r = 30 + Math.random() * 120;
-    const g = ctx.createRadialGradient(x, y, 0, x, y, r);
-    g.addColorStop(0, 'rgba(0,0,0,0.6)');
-    g.addColorStop(1, 'rgba(0,0,0,0)');
-    ctx.fillStyle = g;
-    ctx.fillRect(x - r, y - r, r * 2, r * 2);
-  }
-  const t = new THREE.CanvasTexture(c);
-  t.wrapS = t.wrapT = THREE.RepeatWrapping;
-  t.repeat.set(4, 4);
-  return t;
-}
-const floorRough = buildFloorRoughness();
-
-const floorGeo = new THREE.PlaneGeometry(160, 160);
-const floorMat = new THREE.MeshPhysicalMaterial({
-  color: 0x05070d,
-  roughness: 0.25,
-  roughnessMap: floorRough,
-  metalness: 0.85,
-  map: floorTex,
-  envMapIntensity: 1.2,
-  clearcoat: 0.6,
-  clearcoatRoughness: 0.2,
-});
-const floor = new THREE.Mesh(floorGeo, floorMat);
-floor.rotation.x = -Math.PI / 2;
-floor.position.y = -PLAY_H / 2 - 0.5;
-scene.add(floor);
-
-// Faint floor glow ring directly under the case (light bleed from neon edges)
-const ringGeo = new THREE.RingGeometry(PLAY_W * 0.4, PLAY_W * 1.3, 64);
-const ringMat = new THREE.MeshBasicMaterial({
-  color: 0x4070cc,
-  transparent: true,
-  opacity: 0.08,
-  blending: THREE.AdditiveBlending,
-  side: THREE.DoubleSide,
-  depthWrite: false,
-});
-const floorRing = new THREE.Mesh(ringGeo, ringMat);
-floorRing.rotation.x = -Math.PI / 2;
-floorRing.position.y = -PLAY_H / 2 - 0.49;
-scene.add(floorRing);
-
-// Sparkle texture (used by stars and shatter sparkles)
+// Sparkle texture (used by shatter sparkles)
 let _sparkleTex = null;
 function makeSparkleTexture() {
   if (_sparkleTex) return _sparkleTex;
@@ -773,309 +586,6 @@ function makeSparkleTexture() {
   _sparkleTex = new THREE.CanvasTexture(c);
   return _sparkleTex;
 }
-
-// =============================================================
-// Futuristic environment — cyberpunk cityscape backdrop
-// =============================================================
-// Atmospheric fog — tight band so the case sits in clear air but the city
-// hazes out behind it. Provides depth separation so the playfield reads first.
-scene.fog = new THREE.Fog(0x05080f, 25, 65);
-
-const cityGroup = new THREE.Group();
-scene.add(cityGroup);
-
-// ---- Distant skyline (instanced tall blocks with neon window strips) ----
-// Window-strip texture: vertical bands of bright emissive dots
-function buildBuildingTexture(seed) {
-  const W = 128, H = 512;
-  const c = document.createElement('canvas');
-  c.width = W; c.height = H;
-  const ctx = c.getContext('2d');
-  // Dark base
-  ctx.fillStyle = '#02040a';
-  ctx.fillRect(0, 0, W, H);
-  // Vertical column bands
-  const cols = 8;
-  const colW = W / cols;
-  for (let cx = 0; cx < cols; cx++) {
-    // Each column: vertical line of windows
-    const x = cx * colW + colW * 0.25;
-    const lit = 0.7;  // probability a window is on
-    const tint = [
-      [120, 200, 255], // cyan
-      [255, 180, 80],  // amber
-      [255, 100, 200], // pink
-      [180, 240, 255], // ice
-      [255, 240, 200], // cream
-      [120, 255, 200], // mint
-    ][Math.floor((Math.sin(seed*7.13 + cx*1.7) * 0.5 + 0.5) * 6)];
-    const rows = Math.floor(28 + (Math.sin(seed*3 + cx)*0.5+0.5)*12);
-    const rh = H / rows;
-    for (let r = 0; r < rows; r++) {
-      if (Math.random() > lit) continue;
-      const y = r * rh + rh * 0.2;
-      const a = 0.3 + Math.random() * 0.7;
-      ctx.fillStyle = `rgba(${tint[0]},${tint[1]},${tint[2]},${a})`;
-      ctx.fillRect(x, y, colW * 0.5, rh * 0.6);
-      // Bright core
-      ctx.fillStyle = `rgba(255,255,255,${a*0.6})`;
-      ctx.fillRect(x + colW*0.1, y + rh*0.15, colW * 0.3, rh * 0.3);
-    }
-  }
-  const t = new THREE.CanvasTexture(c);
-  t.colorSpace = THREE.SRGBColorSpace;
-  t.minFilter = THREE.LinearFilter;
-  t.magFilter = THREE.LinearFilter;
-  return t;
-}
-// Build a few unique building textures and reuse across instances
-const buildingTextures = [];
-for (let i = 0; i < 6; i++) buildingTextures.push(buildBuildingTexture(i + 0.5));
-
-// Place ~80 buildings in a ring around the play area, varying heights
-const buildingCount = 80;
-for (let i = 0; i < buildingCount; i++) {
-  const angle = (i / buildingCount) * Math.PI * 2 + (Math.random() - 0.5) * 0.08;
-  // Skew distribution to avoid blocking the camera-front (front is ~+Z)
-  const radius = 38 + Math.random() * 24;
-  const x = Math.cos(angle) * radius;
-  const z = Math.sin(angle) * radius;
-  // Skip the front quadrant (closer to camera) for clear viewing
-  // Camera looks from +X+Z roughly toward origin; keep buildings everywhere
-  // but make front ones shorter so they don't crowd the case
-  const isFront = (Math.cos(angle) > 0.3 && Math.sin(angle) > 0.3);
-  const heightBase = isFront ? 6 + Math.random() * 8 : 14 + Math.random() * 26;
-  const w = 2 + Math.random() * 3.5;
-  const d = 2 + Math.random() * 3.5;
-  const h = heightBase;
-
-  const tex = buildingTextures[Math.floor(Math.random() * buildingTextures.length)];
-  // Dark base with window texture — emissive intensity dropped so the city
-  // doesn't compete with the case for attention. Bloom in post will lift the
-  // brightest windows back up without saturating the whole skyline.
-  const mat = new THREE.MeshStandardMaterial({
-    color: 0x080a14,
-    roughness: 0.9,
-    metalness: 0.1,
-    emissive: 0xffffff,
-    emissiveMap: tex,
-    emissiveIntensity: 0.6,
-    fog: true,
-  });
-  const geo = new THREE.BoxGeometry(w, h, d);
-  const m = new THREE.Mesh(geo, mat);
-  m.position.set(x, -PLAY_H/2 + h/2, z);
-  // Random rotation to vary skyline silhouette
-  m.rotation.y = Math.random() * Math.PI * 2;
-  cityGroup.add(m);
-
-  // Add a faint top light/antenna on tall buildings
-  if (h > 22 && Math.random() > 0.4) {
-    const tipMat = new THREE.MeshBasicMaterial({
-      color: Math.random() > 0.5 ? 0xff3a5a : 0xff8a30,
-      transparent: true,
-      opacity: 0.9,
-    });
-    const tip = new THREE.Mesh(new THREE.SphereGeometry(0.18, 6, 6), tipMat);
-    tip.position.set(x, -PLAY_H/2 + h + 0.2, z);
-    tip.userData.isBlinker = true;
-    tip.userData.phase = Math.random() * Math.PI * 2;
-    tip.userData.speed = 1.5 + Math.random() * 2;
-    cityGroup.add(tip);
-  }
-}
-
-// ---- Holographic ground grid extending to horizon ----
-function buildGridTexture() {
-  const S = 1024;
-  const c = document.createElement('canvas');
-  c.width = c.height = S;
-  const ctx = c.getContext('2d');
-  ctx.fillStyle = 'rgba(0,0,0,0)';
-  ctx.fillRect(0, 0, S, S);
-  // Major grid every 64px, minor every 16
-  ctx.strokeStyle = 'rgba(80, 200, 255, 0.7)';
-  ctx.lineWidth = 1.2;
-  for (let i = 0; i <= S; i += 64) {
-    ctx.beginPath(); ctx.moveTo(i, 0); ctx.lineTo(i, S); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(0, i); ctx.lineTo(S, i); ctx.stroke();
-  }
-  ctx.strokeStyle = 'rgba(60, 140, 200, 0.18)';
-  ctx.lineWidth = 0.5;
-  for (let i = 0; i <= S; i += 16) {
-    if (i % 64 === 0) continue;
-    ctx.beginPath(); ctx.moveTo(i, 0); ctx.lineTo(i, S); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(0, i); ctx.lineTo(S, i); ctx.stroke();
-  }
-  const t = new THREE.CanvasTexture(c);
-  t.wrapS = t.wrapT = THREE.RepeatWrapping;
-  t.repeat.set(8, 8);
-  return t;
-}
-const gridTex = buildGridTexture();
-const gridGeo = new THREE.PlaneGeometry(220, 220);
-const gridMat = new THREE.MeshBasicMaterial({
-  map: gridTex,
-  color: 0x6cd0ff,
-  transparent: true,
-  opacity: 0.25,
-  blending: THREE.AdditiveBlending,
-  depthWrite: false,
-  fog: true,
-});
-const gridPlane = new THREE.Mesh(gridGeo, gridMat);
-gridPlane.rotation.x = -Math.PI / 2;
-gridPlane.position.y = -PLAY_H / 2 - 0.45;
-cityGroup.add(gridPlane);
-
-// ---- Vertical neon light pillars in the distance ----
-const pillars = [];
-for (let i = 0; i < 6; i++) {
-  const angle = (i / 6) * Math.PI * 2 + Math.random() * 0.3;
-  const r = 30 + Math.random() * 12;
-  const px = Math.cos(angle) * r;
-  const pz = Math.sin(angle) * r;
-  const colors = [0xff3a8a, 0x6cf0ff, 0xffd070, 0xa066ff, 0x66ff9a, 0xff7733];
-  const col = colors[i % colors.length];
-  // Beam — additive cylinder
-  const beamGeo = new THREE.CylinderGeometry(0.15, 0.05, 50, 8, 1, true);
-  const beamMat = new THREE.MeshBasicMaterial({
-    color: col,
-    transparent: true,
-    opacity: 0.4,
-    blending: THREE.AdditiveBlending,
-    depthWrite: false,
-    side: THREE.DoubleSide,
-    fog: true,
-  });
-  const beam = new THREE.Mesh(beamGeo, beamMat);
-  beam.position.set(px, -PLAY_H/2 + 25, pz);
-  cityGroup.add(beam);
-  pillars.push({ mesh: beam, basePhase: Math.random() * Math.PI * 2 });
-}
-
-// ---- Star field in upper sky ----
-{
-  const N = 600;
-  const positions = new Float32Array(N * 3);
-  const colors = new Float32Array(N * 3);
-  for (let i = 0; i < N; i++) {
-    // Distribute on a hemisphere overhead
-    const theta = Math.random() * Math.PI * 2;
-    const phi = Math.acos(1 - Math.random() * 1.3); // bias upward
-    const r = 90 + Math.random() * 20;
-    positions[i*3+0] = Math.sin(phi) * Math.cos(theta) * r;
-    positions[i*3+1] = Math.cos(phi) * r * 0.8 + 6;
-    positions[i*3+2] = Math.sin(phi) * Math.sin(theta) * r;
-    const tint = Math.random();
-    if (tint < 0.6) { colors[i*3+0]=1; colors[i*3+1]=1; colors[i*3+2]=1; }
-    else if (tint < 0.8) { colors[i*3+0]=0.7; colors[i*3+1]=0.85; colors[i*3+2]=1; }
-    else { colors[i*3+0]=1; colors[i*3+1]=0.85; colors[i*3+2]=0.7; }
-  }
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-  geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-  const mat = new THREE.PointsMaterial({
-    size: 0.8,
-    sizeAttenuation: true,
-    vertexColors: true,
-    transparent: true,
-    opacity: 0.9,
-    blending: THREE.AdditiveBlending,
-    depthWrite: false,
-    fog: false,
-    map: makeSparkleTexture(),
-  });
-  const stars = new THREE.Points(geo, mat);
-  cityGroup.add(stars);
-}
-
-// ---- Sky dome — gradient backdrop behind everything ----
-function buildSkyTexture() {
-  const W = 16, H = 1024;
-  const c = document.createElement('canvas');
-  c.width = W; c.height = H;
-  const ctx = c.getContext('2d');
-  const g = ctx.createLinearGradient(0, 0, 0, H);
-  g.addColorStop(0.0, '#02030a');
-  g.addColorStop(0.4, '#0a0e22');
-  g.addColorStop(0.6, '#1a0e2c');
-  g.addColorStop(0.78, '#2a0e30');
-  g.addColorStop(0.9, '#3a1438');
-  g.addColorStop(1.0, '#080820');
-  ctx.fillStyle = g;
-  ctx.fillRect(0, 0, W, H);
-  const t = new THREE.CanvasTexture(c);
-  t.colorSpace = THREE.SRGBColorSpace;
-  return t;
-}
-const skyTex = buildSkyTexture();
-const skyGeo = new THREE.SphereGeometry(110, 32, 24);
-const skyMat = new THREE.MeshBasicMaterial({
-  map: skyTex,
-  side: THREE.BackSide,
-  fog: false,
-  depthWrite: false,
-});
-const sky = new THREE.Mesh(skyGeo, skyMat);
-scene.add(sky);
-
-// Atmospheric horizon glow (a subtle ring)
-const horizon = (() => {
-  const c2 = document.createElement('canvas');
-  c2.width = 512; c2.height = 64;
-  const ctx2 = c2.getContext('2d');
-  const grad = ctx2.createLinearGradient(0, 0, 0, 64);
-  grad.addColorStop(0, 'rgba(255,80,160,0)');
-  grad.addColorStop(0.5, 'rgba(255,100,160,0.5)');
-  grad.addColorStop(0.75, 'rgba(120,80,255,0.3)');
-  grad.addColorStop(1, 'rgba(40,40,80,0)');
-  ctx2.fillStyle = grad;
-  ctx2.fillRect(0, 0, 512, 64);
-  const tex = new THREE.CanvasTexture(c2);
-  const mat = new THREE.MeshBasicMaterial({
-    map: tex, transparent: true, opacity: 0.6,
-    blending: THREE.AdditiveBlending, depthWrite: false,
-    side: THREE.DoubleSide, fog: false,
-  });
-  const hgeo = new THREE.CylinderGeometry(80, 80, 18, 64, 1, true);
-  const mesh = new THREE.Mesh(hgeo, mat);
-  mesh.position.y = -PLAY_H/2 + 4;
-  scene.add(mesh);
-  return mesh;
-})();
-
-// ---- Animated scanning light cones (slow sweep) ----
-const scanCones = [];
-for (let i = 0; i < 3; i++) {
-  const geo = new THREE.ConeGeometry(8, 60, 24, 1, true);
-  const mat = new THREE.MeshBasicMaterial({
-    color: i === 0 ? 0x6cf0ff : (i === 1 ? 0xff5a9a : 0xffd070),
-    transparent: true,
-    opacity: 0.06,
-    blending: THREE.AdditiveBlending,
-    depthWrite: false,
-    side: THREE.DoubleSide,
-    fog: true,
-  });
-  const cone = new THREE.Mesh(geo, mat);
-  // Originate from far building tops, point upward & outward
-  const angle = (i / 3) * Math.PI * 2 + Math.random();
-  const r = 32;
-  cone.position.set(Math.cos(angle) * r, -PLAY_H/2 + 30, Math.sin(angle) * r);
-  cone.rotation.z = Math.PI;
-  cityGroup.add(cone);
-  scanCones.push({
-    mesh: cone,
-    basePos: cone.position.clone(),
-    speed: 0.2 + Math.random() * 0.3,
-    phase: Math.random() * Math.PI * 2,
-  });
-}
-
-// ---- Reposition floor ring with futuristic energy ----
-floorRing.material.color.setHex(0x6cf0ff);
-floorRing.material.opacity = 0.18;
 
 // =============================================================
 // Orbit Controls
@@ -1160,7 +670,7 @@ function getCubeMaterial(color, opts = {}) {
     opacity: opts.ghost ? 0.12 : 1.0,
     envMapIntensity: 1.0,
     emissive: c,
-    emissiveIntensity: opts.ghost ? 0.15 : (opts.active ? 0.95 : 0.65),
+    emissiveIntensity: (opts.ghost ? 0.15 : (opts.active ? 0.95 : 0.65)) * colorLumaScale(color),
     side: THREE.FrontSide,
     depthWrite: true,
   });
@@ -1188,33 +698,214 @@ function getCoreMaterial(color) {
   return new THREE.MeshBasicMaterial({
     color,
     transparent: true,
-    opacity: 0.55,
+    opacity: 0.55 * colorLumaScale(color),
     blending: THREE.AdditiveBlending,
     depthWrite: false,
   });
 }
 
+// =============================================================
+// Energized highlight — fresnel rim shell for the active piece
+// (and for cubes still cooling down right after lock).
+// =============================================================
+// View-space fresnel: bright at grazing silhouette, fades on flat faces.
+// Additive blending + depthWrite=false → composes cleanly over the glass
+// transmission pass and is bloom-compatible without saturating.
+const FRESNEL_VERT = /* glsl */`
+  varying vec3 vNormalW;
+  varying vec3 vViewDirW;
+  void main() {
+    vec4 wp = modelMatrix * vec4(position, 1.0);
+    vNormalW = normalize(mat3(modelMatrix) * normal);
+    vViewDirW = normalize(cameraPosition - wp.xyz);
+    gl_Position = projectionMatrix * viewMatrix * wp;
+  }
+`;
+const FRESNEL_FRAG = /* glsl */`
+  uniform vec3 uColor;
+  uniform float uIntensity;
+  uniform float uPower;
+  uniform float uFloor;
+  varying vec3 vNormalW;
+  varying vec3 vViewDirW;
+  void main() {
+    float ndv = clamp(dot(normalize(vNormalW), normalize(vViewDirW)), 0.0, 1.0);
+    float fres = pow(1.0 - ndv, uPower);
+    // uFloor adds a faint body so the rim has weight, not just a hairline.
+    float a = (uFloor + (1.0 - uFloor) * fres) * uIntensity;
+    gl_FragColor = vec4(uColor * a, a);
+  }
+`;
+const _fresnelShellGeo = cubeGeometry; // share geometry; scale the mesh
+const fresnelMaterialCache = new Map();
+function getActiveFresnelMaterial(color) {
+  if (fresnelMaterialCache.has(color)) return fresnelMaterialCache.get(color);
+  const c = new THREE.Color(color);
+  const mat = new THREE.ShaderMaterial({
+    uniforms: {
+      uColor: { value: c.clone().lerp(new THREE.Color(0xffffff), 0.35) },
+      uIntensity: { value: 1.0 },
+      uPower: { value: 2.6 },
+      uFloor: { value: 0.06 },
+    },
+    vertexShader: FRESNEL_VERT,
+    fragmentShader: FRESNEL_FRAG,
+    transparent: true,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+    side: THREE.FrontSide,
+  });
+  fresnelMaterialCache.set(color, mat);
+  return mat;
+}
+function makeFresnelMaterialClone(color, intensity = 1.0) {
+  const c = new THREE.Color(color);
+  return new THREE.ShaderMaterial({
+    uniforms: {
+      uColor: { value: c.clone().lerp(new THREE.Color(0xffffff), 0.35) },
+      uIntensity: { value: intensity },
+      uPower: { value: 2.6 },
+      uFloor: { value: 0.06 },
+    },
+    vertexShader: FRESNEL_VERT,
+    fragmentShader: FRESNEL_FRAG,
+    transparent: true,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+    side: THREE.FrontSide,
+  });
+}
+function makeFresnelShell(material) {
+  const shell = new THREE.Mesh(_fresnelShellGeo, material);
+  shell.scale.setScalar(1.045);
+  shell.renderOrder = 4;
+  return shell;
+}
+
+// =============================================================
+// Glass material — fresnel-driven alpha for the case walls / bottom.
+// =============================================================
+// Real glass is nearly invisible head-on and brightens at grazing edges
+// where the surface curvature catches reflections. With no env map to
+// sample, MeshPhysicalMaterial can't reproduce that — it either flashes
+// at single reflection angles (metallic) or tints uniformly (rough), the
+// latter reading as plastic. This shader bakes the fresnel directly:
+// face-on alpha is tiny, rim alpha is high, with a smooth ramp between.
+const GLASS_FRAG = /* glsl */`
+  uniform vec3 uTint;
+  uniform vec3 uRimColor;
+  uniform float uTintAlpha;
+  uniform float uRimAlpha;
+  uniform float uPower;
+  varying vec3 vNormalW;
+  varying vec3 vViewDirW;
+  void main() {
+    // abs() so back-side fragments (DoubleSide off here, but harmless) and
+    // any normal flips read symmetrically.
+    float ndv = clamp(abs(dot(normalize(vNormalW), normalize(vViewDirW))), 0.0, 1.0);
+    float fres = pow(1.0 - ndv, uPower);
+    vec3 col = mix(uTint, uRimColor, fres);
+    float a = uTintAlpha + (uRimAlpha - uTintAlpha) * fres;
+    gl_FragColor = vec4(col, a);
+  }
+`;
+function makeGlassMaterial({ tint = 0xc8e6ff, rim = 0xffffff,
+                             tintAlpha = 0.05, rimAlpha = 0.55,
+                             power = 3.5 } = {}) {
+  return new THREE.ShaderMaterial({
+    uniforms: {
+      uTint:      { value: new THREE.Color(tint) },
+      uRimColor:  { value: new THREE.Color(rim) },
+      uTintAlpha: { value: tintAlpha },
+      uRimAlpha:  { value: rimAlpha },
+      uPower:     { value: power },
+    },
+    vertexShader: FRESNEL_VERT, // shares the existing world-space N + V varyings
+    fragmentShader: GLASS_FRAG,
+    transparent: true,
+    depthWrite: false,
+    side: THREE.FrontSide, // single visible face per wall — no double-tint stacking
+  });
+}
+
+// Active-piece tunables — shared base values that the per-frame pulse rides on.
+const ACTIVE_EMISSIVE_BASE = 0.95;   // matches getCubeMaterial's active value
+const LOCKED_EMISSIVE_BASE = 0.65;   // matches getCubeMaterial's locked value
+const ACTIVE_EDGE_OPACITY  = 1.0;
+const ACTIVE_CORE_OPACITY  = 0.85;   // hotter than the locked 0.55
+const LOCKED_CORE_OPACITY  = 0.55;
+const SETTLE_DURATION      = 0.95;   // seconds, in the requested 0.5–1.5 band
+
+// Cubes that are mid-fade after locking. Each entry owns *cloned* materials
+// so its emissive/opacity can be tweened independently of the shared cache.
+const settlingCubes = [];
+
 function makeCube(color, opts = {}) {
   const group = new THREE.Group();
-  const mesh = new THREE.Mesh(cubeGeometry, getCubeMaterial(color, opts));
+
+  // For settling cubes we clone the locked material so emissiveIntensity can
+  // be animated without affecting other locked cubes that share the cache.
+  let mainMat;
+  if (opts.settling) {
+    mainMat = getCubeMaterial(color, {}).clone();
+    mainMat.emissive = new THREE.Color(color); // ensure unique Color instance
+    mainMat.emissiveIntensity = ACTIVE_EMISSIVE_BASE * colorLumaScale(color);
+  } else {
+    mainMat = getCubeMaterial(color, opts);
+  }
+  const mesh = new THREE.Mesh(cubeGeometry, mainMat);
   // Cubes render BEFORE the case walls so transparent-pass sort places
   // them behind the walls correctly regardless of camera angle.
   mesh.renderOrder = opts.ghost ? 1 : 2;
   group.add(mesh);
 
   // Edge highlight — picks out the bevel
-  const edges = new THREE.LineSegments(edgeGeometry, getEdgeMaterial(color, opts.ghost));
+  const edgeMat = getEdgeMaterial(color, opts.ghost);
+  if (opts.settling || opts.active) {
+    // Make edges transparent so opacity tween reads; locked cubes keep
+    // opaque normal-blended edges by going through the standard path.
+    edgeMat.transparent = true;
+    edgeMat.opacity = ACTIVE_EDGE_OPACITY;
+  }
+  const edges = new THREE.LineSegments(edgeGeometry, edgeMat);
   edges.renderOrder = 3;
   group.add(edges);
 
   // Inner glow core — for emissive volumetric look
+  let coreMat = null;
   if (!opts.ghost) {
-    const core = new THREE.Mesh(innerGeometry, getCoreMaterial(color));
+    coreMat = getCoreMaterial(color);
+    if (opts.settling || opts.active) coreMat.opacity = ACTIVE_CORE_OPACITY * colorLumaScale(color);
+    const core = new THREE.Mesh(innerGeometry, coreMat);
     core.renderOrder = 3;
     group.add(core);
   }
 
+  // Fresnel rim shell — adds the energized halo.
+  let fresnelMat = null;
+  if (opts.active) {
+    fresnelMat = getActiveFresnelMaterial(color); // shared, animated globally
+    group.add(makeFresnelShell(fresnelMat));
+  } else if (opts.settling) {
+    fresnelMat = makeFresnelMaterialClone(color, 1.0); // per-cube fade
+    group.add(makeFresnelShell(fresnelMat));
+  }
+
   group.userData.color = color;
+
+  if (opts.settling) {
+    settlingCubes.push({
+      group,
+      mainMat,
+      edgeMat,
+      coreMat,
+      fresnelMat,
+      color,
+      energy: 1.0,
+      duration: SETTLE_DURATION,
+    });
+  }
+
   return group;
 }
 
@@ -1224,38 +915,28 @@ function makeCube(color, opts = {}) {
 const caseGroup = new THREE.Group();
 scene.add(caseGroup);
 
-// Glass shell — built as 4 individual side walls + bottom (no top, like reference)
-// Walls use ALPHA blending (no `transmission`) so glass cubes inside the case
-// show through correctly. Three.js's transmission buffer only contains opaque
-// objects — both transmissive and alpha-transparent cubes are excluded from
-// that buffer, which is why a refractive wall would render with nothing
-// visible inside. The "glass" feel here comes from clearcoat highlights,
-// strong fresnel, env-map reflections, and a faint blue tint.
+// Glass shell — built as 4 individual side walls + bottom (no top, like reference).
+// Uses the custom fresnel-driven glass shader (above): nearly invisible at
+// face-on view, bright glassy rim at grazing angles. This is what gives the
+// wall a true-glass read instead of a uniformly-tinted plastic slab.
 const wallThickness = 0.06;
-const wallMat = new THREE.MeshPhysicalMaterial({
-  color: 0xb8dcff,
-  metalness: 1.0,
-  roughness: 0.05,
-  ior: 1.5,
-  clearcoat: 1.0,
-  clearcoatRoughness: 0.04,
-  specularIntensity: 1.0,
-  reflectivity: 0.5,
-  transparent: true,
-  opacity: 0.18,
-  envMapIntensity: 1.6,
-  emissive: 0x9ec8ff,
-  emissiveIntensity: 0.05,
-  side: THREE.DoubleSide,
-  depthWrite: false,
+const wallMat = makeGlassMaterial({
+  tint: 0xc8e6ff,     // very faint cyan body tint
+  rim:  0xffffff,     // clean white edge catch
+  tintAlpha: 0.04,    // body is almost fully transparent
+  rimAlpha:  0.55,    // edges read clearly so the case shape stays defined
+  power:     3.5,
 });
 function addWall(w, h, d, x, y, z) {
   const g = new THREE.BoxGeometry(w, h, d);
   const m = new THREE.Mesh(g, wallMat);
   m.position.set(x, y, z);
-  // Walls render AFTER cubes so the transmission shader samples a buffer
-  // that already contains the cubes — fixes "blocks disappearing through walls"
-  m.renderOrder = 10;
+  // Render walls FIRST in the transparent pass (before additive cube cores,
+  // fresnel rim shells, and particle effects) so those overlays composite on
+  // top of the wall instead of being dimmed by its alpha blend. Otherwise,
+  // looking through the front wall washes out the energized-piece glow that
+  // is clearly visible from above (where no wall is in the line of sight).
+  m.renderOrder = -1;
   caseGroup.add(m);
   return m;
 }
@@ -1264,29 +945,20 @@ addWall(PLAY_W + wallThickness*2, PLAY_H, wallThickness, 0, 0,  PLAY_D/2 + wallT
 addWall(PLAY_W + wallThickness*2, PLAY_H, wallThickness, 0, 0, -PLAY_D/2 - wallThickness/2);
 addWall(wallThickness, PLAY_H, PLAY_D, -PLAY_W/2 - wallThickness/2, 0, 0);
 addWall(wallThickness, PLAY_H, PLAY_D,  PLAY_W/2 + wallThickness/2, 0, 0);
-// Bottom — same alpha-blended glass treatment, slightly more opaque so the
-// stack visually rests on something
-const bottomMat = new THREE.MeshPhysicalMaterial({
-  color: 0xb8dcff,
-  metalness: 0.0,
-  roughness: 0.05,
-  ior: 1.5,
-  clearcoat: 1.0,
-  clearcoatRoughness: 0.04,
-  specularIntensity: 1.0,
-  reflectivity: 0.5,
-  transparent: true,
-  opacity: 0.28,
-  envMapIntensity: 1.6,
-  emissive: 0x9ec8ff,
-  emissiveIntensity: 0.05,
-  side: THREE.DoubleSide,
-  depthWrite: false,
+// Bottom — same fresnel glass treatment, with a slightly heavier body so the
+// stack still reads as resting on something solid.
+const bottomMat = makeGlassMaterial({
+  tint: 0xc8e6ff,
+  rim:  0xffffff,
+  tintAlpha: 0.10,
+  rimAlpha:  0.55,
+  power:     3.0,
 });
 const bottomGeo = new THREE.BoxGeometry(PLAY_W + wallThickness*2, 0.12, PLAY_D + wallThickness*2);
 const bottom = new THREE.Mesh(bottomGeo, bottomMat);
 bottom.position.y = -PLAY_H/2 - 0.06;
-bottom.renderOrder = 10;
+// Same rationale as walls: render before transparent overlays.
+bottom.renderOrder = -1;
 caseGroup.add(bottom);
 
 // Edge frame — bright glowing wires around the entire case (top rim, vertical edges, bottom rim)
@@ -1771,10 +1443,12 @@ function lockPiece() {
       return;
     }
     board[row][col] = activePiece.color;
-    // Build mesh slices for this cell (one cube per depth slice)
+    // Build mesh slices for this cell (one cube per depth slice). Each cube
+    // starts in a "settling" state — energized like the active piece, then
+    // smoothly cools to the locked look over SETTLE_DURATION.
     const slices = [];
     for (let d = 0; d < DEPTH; d++) {
-      const cube = makeCube(activePiece.color);
+      const cube = makeCube(activePiece.color, { settling: true });
       cube.position.copy(cellToWorld(col, row, d));
       stackGroup.add(cube);
       slices.push(cube);
@@ -2543,6 +2217,13 @@ document.getElementById('goRestart').addEventListener('click', () => {
   flashes.length = 0;
   cubeAnims.length = 0;
   lockAnims.length = 0;
+  // Dispose any in-flight settling cubes' cloned materials (their cubes were
+  // already removed above when stackGroup was cleared).
+  for (const s of settlingCubes) {
+    s.mainMat.dispose();
+    s.fresnelMat.dispose();
+  }
+  settlingCubes.length = 0;
   // Expire all live shards & sparkles by zeroing their spawn times
   for (let i = 0; i < SHARD_CAPACITY; i++)   _shardSpawnTime[i] = -1000.0;
   for (let i = 0; i < SPARKLE_CAPACITY; i++) _sparkleSpawn[i]   = -1000.0;
@@ -2803,27 +2484,6 @@ function animate() {
   }
   const dtGame = dt * gameTimeScale;
 
-  // ---- Futuristic environment animations ----
-  // Blinker antennas
-  for (const child of cityGroup.children) {
-    if (child.userData && child.userData.isBlinker) {
-      const v = (Math.sin(envTime * child.userData.speed + child.userData.phase) * 0.5 + 0.5);
-      child.material.opacity = 0.3 + v * 0.7;
-      child.scale.setScalar(0.7 + v * 0.6);
-    }
-  }
-  // Pillar pulse
-  for (const p of pillars) {
-    p.mesh.material.opacity = 0.25 + (Math.sin(envTime * 0.8 + p.basePhase) * 0.5 + 0.5) * 0.35;
-  }
-  // Scan cones — slow rotational sweep around their base
-  for (const s of scanCones) {
-    s.mesh.rotation.y = envTime * s.speed + s.phase;
-    s.mesh.rotation.x = Math.PI + Math.sin(envTime * 0.3 + s.phase) * 0.25;
-  }
-  // Drift the grid texture for forward-motion feel
-  gridTex.offset.y = (envTime * 0.04) % 1;
-
   // ---- DAS / ARR for held arrows ----
   if (!gameOver && !paused && activePiece) {
     if (keyState.left) {
@@ -2883,6 +2543,90 @@ function animate() {
 
   pieceGroup.position.copy(pieceVisualOffset);
   pieceGroup.rotation.z = pieceRotVisual * 0.15;
+
+  // ---- Active-piece energized highlight ----
+  // Slow breathing pulse + brief boost when the piece is moving fast.
+  // Shared materials are updated once per color, regardless of how many
+  // cubes the active piece occupies — bounded ≤ 7 writes per frame.
+  {
+    const pulse = 0.9 +  0.4 *Math.sin(envTime * 7);
+    const moveSpeed = Math.sqrt(
+      pieceVel.x * pieceVel.x +
+      pieceVel.y * pieceVel.y +
+      pieceVel.z * pieceVel.z,
+    );
+    const rotSpeed = Math.abs(pieceRotVel);
+    // Map movement to a 0..1 boost; clamp so it can't run away on hard drops.
+    const moveBoost = Math.min(1.0, moveSpeed * 0.18 + rotSpeed * 0.06);
+    const emissiveMul = pulse * (1.0 + 0.45 * moveBoost);
+    const fresnelMul  = pulse * (1.0 + 0.85 * moveBoost);
+    for (const color of Object.values(PIECE_COLORS)) {
+      const lumaScale = colorLumaScale(color);
+      const aMat = materialCache.get(color + ':a');
+      if (aMat) aMat.emissiveIntensity = ACTIVE_EMISSIVE_BASE * emissiveMul * lumaScale;
+      const fMat = fresnelMaterialCache.get(color);
+      if (fMat) fMat.uniforms.uIntensity.value = fresnelMul * lumaScale;
+    }
+  }
+
+  // ---- Settling cubes — energized → cooled glass over ~SETTLE_DURATION ----
+  // Each cube owns cloned materials so its fade is independent. When done,
+  // release the clones and swap the main mesh back onto the cached locked
+  // material so identical settled cubes share state again.
+  for (let i = settlingCubes.length - 1; i >= 0; i--) {
+    const s = settlingCubes[i];
+    // If the cube was removed from the scene (e.g. line-cleared mid-fade),
+    // drop the entry and free its cloned materials.
+    if (!s.group.parent) {
+      s.mainMat.dispose();
+      s.fresnelMat.dispose();
+      settlingCubes.splice(i, 1);
+      continue;
+    }
+    s.energy -= dtGame / s.duration;
+    if (s.energy <= 0) {
+      // Finalize: hand the main mesh back to the shared locked material so
+      // we don't keep paying for a unique MeshPhysicalMaterial per stack
+      // cube. Edges/cores were already created per-cube by the existing
+      // code so they keep their (now low-emissive) clones in place.
+      const settledMat = getCubeMaterial(s.color, {});
+      const mainMesh = s.group.children[0];
+      mainMesh.material = settledMat;
+      s.mainMat.dispose();
+      // Remove and dispose the fresnel rim shell (last child added).
+      let shellIdx = -1;
+      for (let j = s.group.children.length - 1; j >= 0; j--) {
+        if (s.group.children[j].material === s.fresnelMat) { shellIdx = j; break; }
+      }
+      if (shellIdx >= 0) {
+        const shell = s.group.children[shellIdx];
+        s.group.remove(shell);
+      }
+      s.fresnelMat.dispose();
+      // Snap edges/core to locked look.
+      if (s.edgeMat) {
+        s.edgeMat.opacity = 1.0;
+        s.edgeMat.transparent = false;
+      }
+      if (s.coreMat) s.coreMat.opacity = LOCKED_CORE_OPACITY * colorLumaScale(s.color);
+      settlingCubes.splice(i, 1);
+      continue;
+    }
+    // easeOutCubic on energy → smooth, cinematic decay
+    const e = 1 - Math.pow(1 - s.energy, 3);
+    const lumaScale = colorLumaScale(s.color);
+    s.mainMat.emissiveIntensity =
+      (LOCKED_EMISSIVE_BASE + (ACTIVE_EMISSIVE_BASE - LOCKED_EMISSIVE_BASE) * e) * lumaScale;
+    if (s.coreMat) {
+      s.coreMat.opacity =
+        (LOCKED_CORE_OPACITY + (ACTIVE_CORE_OPACITY - LOCKED_CORE_OPACITY) * e) * lumaScale;
+    }
+    if (s.edgeMat) {
+      // Fade edge transparency from full → opaque locked look.
+      s.edgeMat.opacity = 1.0; // edges keep brightness; the rim shell carries the cooldown
+    }
+    s.fresnelMat.uniforms.uIntensity.value = e * lumaScale;
+  }
 
   // ---- Cube settle anims ----
   for (let i = cubeAnims.length - 1; i >= 0; i--) {
@@ -3085,33 +2829,13 @@ helpToggle.addEventListener('click', () => {
 });
 
 // =============================================================
-// Background toggle — hide cityscape/sky/floor so just the case is visible
-// =============================================================
-const bgToggle = document.getElementById('bgToggle');
-let bgVisible = true;
-let savedFog = scene.fog;
-bgToggle.addEventListener('click', () => {
-  bgVisible = !bgVisible;
-  cityGroup.visible = bgVisible;
-  sky.visible       = bgVisible;
-  horizon.visible   = bgVisible;
-  floor.visible     = bgVisible;
-  floorRing.visible = bgVisible;
-  scene.fog         = bgVisible ? savedFog : null;
-  bgToggle.classList.toggle('off', !bgVisible);
-});
-
-// =============================================================
-// Mood — recolor lights, frame, grid, horizon based on TWEAKS.mood
+// Mood — recolor rim/fill lights and case frame based on TWEAKS.mood
 // =============================================================
 function applyMood() {
   const m = MOOD_PRESETS[TWEAKS.mood] || MOOD_PRESETS.neon;
   rimLight.color.setHex(m.rim);
   fillLight.color.setHex(m.fill);
   frameMat.color.setHex(m.frame);
-  gridMat.color.setHex(m.grid);
-  if (scene.fog) scene.fog.color.setHex(m.fog);
-  document.body.style.background = '#' + m.fog.toString(16).padStart(6,'0');
 }
 
 // =============================================================
