@@ -155,6 +155,50 @@
     100% { transform: translate(-50%, -50%) scale(0.95); opacity: 0; }
   }
 
+  /* Multi-line clear callout (DOUBLE/TRIPLE/TETRIS) */
+  .clear-callout {
+    position: fixed;
+    top: 36%;
+    left: 50%;
+    z-index: 7;
+    transform: translate(-50%, -50%) scale(0.6);
+    pointer-events: none;
+    font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
+    font-weight: 900;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    color: #fff;
+    opacity: 0;
+  }
+  .clear-callout.show { animation: clear-callout 0.85s cubic-bezier(0.2, 0.7, 0.2, 1) forwards; }
+  @keyframes clear-callout {
+    0%   { transform: translate(-50%, -50%) scale(0.6); opacity: 0; }
+    14%  { transform: translate(-50%, -50%) scale(1.12); opacity: 1; }
+    28%  { transform: translate(-50%, -50%) scale(1.0);  opacity: 1; }
+    72%  { transform: translate(-50%, -50%) scale(1.0);  opacity: 1; }
+    100% { transform: translate(-50%, calc(-50% - 28px)) scale(0.92); opacity: 0; }
+  }
+
+  /* Floating score popup (+800 etc) */
+  .score-popup {
+    position: fixed;
+    z-index: 7;
+    pointer-events: none;
+    font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
+    font-size: 38px;
+    font-weight: 800;
+    letter-spacing: 0.04em;
+    color: #fff;
+    opacity: 0;
+    transform: translate(-50%, -50%);
+  }
+  .score-popup.show { animation: score-popup 1.0s cubic-bezier(0.15, 0.7, 0.2, 1) forwards; }
+  @keyframes score-popup {
+    0%   { transform: translate(-50%, -50%) scale(0.6); opacity: 0; }
+    14%  { transform: translate(-50%, calc(-50% - 16px)) scale(1.05); opacity: 1; }
+    100% { transform: translate(-50%, calc(-50% - 110px)) scale(0.92); opacity: 0; }
+  }
+
   .help-toggle, .bg-toggle {
     position: fixed;
     bottom: 18px;
@@ -275,6 +319,8 @@
   <button class="help-toggle" id="helpToggle" title="Toggle controls">?</button>
 
   <div class="levelup" id="levelup"></div>
+  <div class="clear-callout" id="clearCallout"></div>
+  <div class="score-popup" id="scorePopup"></div>
 
   <div class="game-over" id="gameOver">
     <div class="panel">
@@ -1334,7 +1380,7 @@ caseGroup.add(innerFloor);
 // Adding/removing PointLights at runtime forces Three.js to recompile every
 // material that responds to lights, causing the multi-line-clear stutter.
 // Keep them parented permanently with intensity:0 and animate intensity only.
-const FLASH_LIGHT_POOL_SIZE = 4; // max rows in a single clear (Tetris)
+const FLASH_LIGHT_POOL_SIZE = 5; // 4 for a Tetris + 1 for hard-drop impact
 const flashLightPool = [];
 for (let i = 0; i < FLASH_LIGHT_POOL_SIZE; i++) {
   const fl = new THREE.PointLight(0xffffff, 0, 30);
@@ -1347,6 +1393,136 @@ function acquireFlashLight() {
     if (!slot.busy) { slot.busy = true; return slot; }
   }
   return null; // all in use; skip this flash light (visual: still has plane flash)
+}
+
+// Static flash-slab pool — 4 horizontal + 4 vertical PlaneGeometry meshes
+// pre-allocated. Tetris clear = 4 rows × (1 H + 1 V) = 8 slabs needed.
+// Each slab fades white-hot → row-color over its lifetime so the clear
+// keeps the visual identity of the cleared piece colors.
+const FLASH_SLAB_POOL_SIZE = 400;
+const _flashSlabGeo = new THREE.PlaneGeometry(PLAY_W * 1.6, CELL * 1.4);
+const flashSlabPoolH = [];
+const flashSlabPoolV = [];
+for (let i = 0; i < FLASH_SLAB_POOL_SIZE; i++) {
+  for (const isVertical of [false, true]) {
+    const mat = new THREE.MeshBasicMaterial({
+      color: 0xffffff,
+      transparent: true,
+      opacity: 0,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
+    const mesh = new THREE.Mesh(_flashSlabGeo, mat);
+    if (isVertical) mesh.rotation.y = Math.PI / 2;
+    mesh.visible = false;
+    caseGroup.add(mesh);
+    (isVertical ? flashSlabPoolV : flashSlabPoolH).push({ mesh, busy: false });
+  }
+}
+function acquireFlashSlab(vertical) {
+  const pool = vertical ? flashSlabPoolV : flashSlabPoolH;
+  for (const slot of pool) if (!slot.busy) { slot.busy = true; return slot; }
+  return null;
+}
+
+// Impact effect — multi-component burst when a hard drop locks. Three
+// concentric rings expand at different rates + a vertical light pillar
+// shoots up from the impact point + ground sparks + a tinted flash light.
+// All meshes pre-allocated; only matrices/opacity animate.
+function _makeImpactRing(innerR, outerR) {
+  const geo = new THREE.RingGeometry(innerR, outerR, 56);
+  const mat = new THREE.MeshBasicMaterial({
+    color: 0xffffff,
+    transparent: true,
+    opacity: 0,
+    blending: THREE.AdditiveBlending,
+    side: THREE.DoubleSide,
+    depthWrite: false,
+  });
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.rotation.x = -Math.PI / 2;
+  mesh.visible = false;
+  caseGroup.add(mesh);
+  return { mesh, mat };
+}
+const _impactRing1 = _makeImpactRing(1.40, 1.52); // thin sharp leader
+const _impactRing2 = _makeImpactRing(1.32, 1.48); // medium follow-up
+const _impactRing3 = _makeImpactRing(1.18, 1.46); // thick slow disc
+
+// Hard-drop trail — semi-transparent cube boxes stretched along each piece
+// cell's drop path. Pool-allocated so repeated drops don't churn GC. Boxes
+// share one unit-height geometry; per-spawn we scale Y to the drop distance
+// and place the mesh at the midpoint of the path.
+const TRAIL_POOL_SIZE = 24;
+const _trailGeo = new THREE.BoxGeometry(CELL * 0.85, 1, CELL * 0.85);
+const trailPool = [];
+for (let i = 0; i < TRAIL_POOL_SIZE; i++) {
+  const mat = new THREE.MeshBasicMaterial({
+    color: 0xffffff,
+    transparent: true,
+    opacity: 0,
+    depthWrite: false,
+  });
+  const mesh = new THREE.Mesh(_trailGeo, mat);
+  mesh.visible = false;
+  caseGroup.add(mesh);
+  trailPool.push({ mesh, busy: false });
+}
+const trailFx = []; // {slot, life, maxLife, startOpacity}
+
+const impactFx = { active: false, t: 0, dur: 0.6 };
+const _impactPos = new THREE.Vector3();
+function triggerImpactRing(x, y, color) {
+  // Ground rings at the lock row's floor, centered under the piece
+  for (const r of [_impactRing1, _impactRing2, _impactRing3]) {
+    r.mesh.position.set(x, y + 0.02, 0);
+    r.mat.color.setHex(color);
+    r.mesh.scale.setScalar(0.4);
+    r.mat.opacity = 0;
+    r.mesh.visible = true;
+  }
+
+  impactFx.t = 0;
+  impactFx.active = true;
+
+  // Ground sparks — reuse the existing GPU sparkle pool
+  _impactPos.set(x, y + 0.1, 0);
+  spawnSparkles(_impactPos, color, 32);
+
+  // Tinted flash light at the impact point — pulled from the same pool the
+  // line-clear flash uses, so a hard-drop-into-clear flow shares slots.
+  const ls = acquireFlashLight();
+  if (ls) {
+    ls.light.position.set(x, y + 0.6, 0);
+    ls.light.color.setHex(color);
+    ls.light.intensity = 14;
+    flashes.push({ slot: ls, life: 0, maxLife: 0.35, kind: 'light' });
+  }
+}
+
+// Spawn a semi-transparent cube trail along each piece cell's drop path.
+// `cells` are the lock-position cells; `dropRows` is how far the piece fell.
+// Trail span per cell = (dropRows + 1) * CELL — covers from the start cell
+// down through the end cell so the streak reads as the path the piece swept.
+function spawnHardDropTrail(cells, dropRows, color) {
+  if (dropRows <= 0) return;
+  const trailHeight = (dropRows + 1) * CELL;
+  for (const { col, row } of cells) {
+    let slot = null;
+    for (const s of trailPool) if (!s.busy) { slot = s; break; }
+    if (!slot) break;
+    slot.busy = true;
+    const x = -PLAY_W / 2 + (col + 0.5) * CELL;
+    const yEndCenter = -PLAY_H / 2 + (row + 0.5) * CELL;
+    const yMid = yEndCenter + (dropRows * CELL) / 2;
+    slot.mesh.position.set(x, yMid, 0);
+    slot.mesh.scale.set(1, trailHeight, 1);
+    slot.mesh.material.color.setHex(color);
+    slot.mesh.material.opacity = 0.5;
+    slot.mesh.visible = true;
+    trailFx.push({ slot, life: 0, maxLife: 0.45, startOpacity: 0.5 });
+  }
 }
 
 // =============================================================
@@ -1564,6 +1740,22 @@ function hardDrop() {
   // Brief screen kick scaled by drop distance — keeps multi-line clears
   // clearly louder than routine hard drops.
   shakeIntensity = Math.max(shakeIntensity, 0.15 + dropped * 0.02);
+  // Impact ring at the lock row's floor, centered horizontally on the
+  // piece's bottom-most cells (was previously fixed at playfield center).
+  const cells = getPieceCells(activePiece);
+  let minRow = Infinity;
+  for (const cell of cells) if (cell.row < minRow) minRow = cell.row;
+  let xSum = 0, xCount = 0;
+  for (const cell of cells) {
+    if (cell.row === minRow) {
+      xSum += -PLAY_W / 2 + (cell.col + 0.5) * CELL;
+      xCount++;
+    }
+  }
+  const ringX = xSum / xCount;
+  const ringY = -PLAY_H / 2 + minRow * CELL;
+  triggerImpactRing(ringX, ringY, activePiece.color);
+  spawnHardDropTrail(cells, dropped, activePiece.color);
   lockPiece();
 }
 
@@ -1586,6 +1778,7 @@ function lockPiece() {
       cube.position.copy(cellToWorld(col, row, d));
       stackGroup.add(cube);
       slices.push(cube);
+      startLockAnim(cube);
     }
     cellMeshes[row][col] = slices;
   }
@@ -1608,13 +1801,43 @@ function clearLines(rows) {
   rows.sort((a, b) => b - a);
   // Score per Tetris standard
   const lineScore = [0, 100, 300, 500, 800][rows.length] || 800;
-  score += lineScore * level;
+  const scoreDelta = lineScore * level;
+  score += scoreDelta;
   lines += rows.length;
   const newLevel = Math.floor(lines / 10) + 1;
   if (newLevel > level) {
     level = newLevel;
     triggerLevelUp(newLevel);
   }
+
+  // Compute per-row average colors BEFORE shattering — the loop below
+  // nulls cellMeshes[r][c] so we'd lose color identity if we read after.
+  const rowColors = rows.map(r => {
+    let rs = 0, gs = 0, bs = 0, n = 0;
+    for (let c = 0; c < COLS; c++) {
+      const slices = cellMeshes[r] && cellMeshes[r][c];
+      if (slices && slices.length) {
+        const hex = slices[0].userData.color;
+        rs += (hex >> 16) & 0xff;
+        gs += (hex >> 8) & 0xff;
+        bs += hex & 0xff;
+        n++;
+      }
+    }
+    if (n === 0) return 0xffffff;
+    return ((Math.round(rs/n) & 0xff) << 16) |
+           ((Math.round(gs/n) & 0xff) << 8)  |
+            (Math.round(bs/n) & 0xff);
+  });
+  // Overall average for callout + popup colors
+  let ar = 0, ag = 0, ab = 0;
+  for (const c of rowColors) {
+    ar += (c >> 16) & 0xff; ag += (c >> 8) & 0xff; ab += c & 0xff;
+  }
+  const overallColor =
+    ((Math.round(ar/rowColors.length) & 0xff) << 16) |
+    ((Math.round(ag/rowColors.length) & 0xff) << 8)  |
+     (Math.round(ab/rowColors.length) & 0xff);
 
   // Shatter effect for all cleared cells
   for (const r of rows) {
@@ -1629,8 +1852,17 @@ function clearLines(rows) {
       }
     }
   }
-  // Big flash
-  triggerFlash(rows);
+  // Color-tinted flash slabs (G1)
+  triggerFlash(rows, rowColors);
+
+  // Multi-line callout (G6) and floating score popup (G5)
+  if (rows.length >= 2) triggerCallout(rows.length, overallColor);
+  // Anchor popup to the lowest cleared row (rows is sorted top-down, so
+  // the last entry is the bottom-most).
+  triggerScorePopup(scoreDelta, rows[rows.length - 1], overallColor);
+
+  // Slow-mo on triple/tetris clears (G3)
+  triggerSlowmo(rows.length);
 
   // Camera shake — scales with rows AND shatter power
   shakeIntensity = Math.min(1.6, (0.25 + rows.length * 0.22) * TWEAKS.shatterPower);
@@ -1671,6 +1903,18 @@ function animateCubeTo(cube, target) {
     t: 0,
     dur: 0.35,
   });
+}
+
+// Squash & stretch on lock — cubes are stretched/compressed at lock time
+// then spring back to (1,1,1) with overshoot.
+const lockAnims = [];
+function startLockAnim(cube) {
+  cube.scale.set(1.18, 0.82, 1.18);
+  lockAnims.push({ cube, t: 0, dur: 0.22 });
+}
+function easeOutBack(t) {
+  const c1 = 1.70158, c3 = c1 + 1;
+  return 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2);
 }
 
 // =============================================================
@@ -1977,49 +2221,48 @@ function spawnSparkles(pos, color, count) {
 
 // (makeSparkleTexture is defined earlier near scene setup)
 
-// Flash plane on cleared rows
-const flashes = []; // {mesh, life, maxLife}
-function triggerFlash(rows) {
-  // Big light blast at the row positions
-  for (const r of rows) {
+// Flash on cleared rows — fully pooled. Each row triggers an H slab + V slab
+// + a pooled point light. Slab color tweens from white-hot → row color so
+// the clear keeps the cleared piece's color identity instead of a generic
+// white blast. Zero allocations per call.
+const flashes = []; // pool slots in flight: {slot, life, maxLife, kind, targetColor}
+const _flashTargetA = new THREE.Color();
+const _flashTargetB = new THREE.Color();
+function triggerFlash(rows, rowColors) {
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i];
     const y = -PLAY_H / 2 + (r + 0.5) * CELL;
-    const geo = new THREE.PlaneGeometry(PLAY_W * 1.6, CELL * 1.4);
-    const mat = new THREE.MeshBasicMaterial({
-      color: 0xffffff,
-      transparent: true,
-      opacity: 1.0,
-      blending: THREE.AdditiveBlending,
-      depthWrite: false,
-      side: THREE.DoubleSide,
-    });
-    const mesh = new THREE.Mesh(geo, mat);
-    mesh.position.set(0, y, 0);
-    caseGroup.add(mesh);
-    flashes.push({ mesh, life: 0, maxLife: 0.55 });
+    const rowColor = (rowColors && rowColors[i] != null) ? rowColors[i] : 0xffffff;
 
-    // Pull a flash light from the static pool — never add/remove at runtime
-    const slot = acquireFlashLight();
-    if (slot) {
-      slot.light.position.set(0, y, 0);
-      slot.light.intensity = 12;
-      flashes.push({ slot, life: 0, maxLife: 0.5, isLight: true });
+    const slotH = acquireFlashSlab(false);
+    if (slotH) {
+      slotH.mesh.position.set(0, y, 0);
+      slotH.mesh.scale.set(1, 1, 1);
+      slotH.mesh.material.color.setHex(0xffffff);
+      slotH.mesh.material.opacity = 1.0;
+      slotH.mesh.visible = true;
+      flashes.push({ slot: slotH, life: 0, maxLife: 0.55, kind: 'slab', targetColor: rowColor });
     }
 
-    // Crossing beam plane
-    const geoZ = new THREE.PlaneGeometry(PLAY_W * 1.6, CELL * 1.4);
-    const matZ = new THREE.MeshBasicMaterial({
-      color: 0xffd0a0,
-      transparent: true,
-      opacity: 0.8,
-      blending: THREE.AdditiveBlending,
-      depthWrite: false,
-      side: THREE.DoubleSide,
-    });
-    const meshZ = new THREE.Mesh(geoZ, matZ);
-    meshZ.rotation.y = Math.PI / 2;
-    meshZ.position.set(0, y, 0);
-    caseGroup.add(meshZ);
-    flashes.push({ mesh: meshZ, life: 0, maxLife: 0.45 });
+    const slotV = acquireFlashSlab(true);
+    if (slotV) {
+      slotV.mesh.position.set(0, y, 0);
+      slotV.mesh.scale.set(1, 1, 1);
+      slotV.mesh.material.color.setHex(0xffffff);
+      slotV.mesh.material.opacity = 0.85;
+      slotV.mesh.visible = true;
+      flashes.push({ slot: slotV, life: 0, maxLife: 0.45, kind: 'slab', targetColor: rowColor });
+    }
+
+    const lightSlot = acquireFlashLight();
+    if (lightSlot) {
+      lightSlot.light.position.set(0, y, 0);
+      // Light is white-tinted toward row color so it doesn't lose punch.
+      _flashTargetA.setHex(rowColor).lerp(_flashTargetB.setHex(0xffffff), 0.5);
+      lightSlot.light.color.copy(_flashTargetA);
+      lightSlot.light.intensity = 12;
+      flashes.push({ slot: lightSlot, life: 0, maxLife: 0.5, kind: 'light' });
+    }
   }
 }
 
@@ -2299,19 +2542,37 @@ document.getElementById('goRestart').addEventListener('click', () => {
   ghostGroup.clear();
   flashes.length = 0;
   cubeAnims.length = 0;
+  lockAnims.length = 0;
   // Expire all live shards & sparkles by zeroing their spawn times
   for (let i = 0; i < SHARD_CAPACITY; i++)   _shardSpawnTime[i] = -1000.0;
   for (let i = 0; i < SPARKLE_CAPACITY; i++) _sparkleSpawn[i]   = -1000.0;
   _aSpawnAttr.needsUpdate = true;
   _spSpawnAttr.needsUpdate = true;
-  // Return any in-flight flash lights to the pool
+  // Return any in-flight flash lights and slabs to their pools
   for (const slot of flashLightPool) {
     slot.light.intensity = 0;
     slot.busy = false;
   }
+  for (const slot of flashSlabPoolH) { slot.mesh.visible = false; slot.busy = false; }
+  for (const slot of flashSlabPoolV) { slot.mesh.visible = false; slot.busy = false; }
+  // Reset gameplay-effect state so a fresh game starts clean
+  _impactRing1.mesh.visible = false;
+  _impactRing2.mesh.visible = false;
+  _impactRing3.mesh.visible = false;
+  for (const slot of trailPool) { slot.mesh.visible = false; slot.busy = false; }
+  trailFx.length = 0;
+  impactFx.active = false;
+  slowmo.active = false;
+  gameTimeScale = 1.0;
+  levelUp.active = false;
+  levelUpEl.classList.remove('show');
+  clearCalloutEl.classList.remove('show');
+  scorePopupEl.classList.remove('show');
   score = 0;
   lines = 0;
   level = 1;
+  _prevScore = 0;
+  _prevLines = 0;
   gameOver = false;
   paused = false;
   activePiece = null;
@@ -2426,6 +2687,24 @@ function triggerPunchZoom(rowCount) {
 }
 
 // =============================================================
+// Slow-mo on multi-line clears — global game-time scale (rendering and
+// input stay real-time; only game logic + effect lifetimes get scaled).
+// =============================================================
+let gameTimeScale = 1.0;
+const slowmo = { active: false, t: 0, holdScale: 1.0, holdDur: 0, releaseDur: 0 };
+function triggerSlowmo(rowCount) {
+  if (rowCount === 4) {
+    slowmo.holdScale = 0.35; slowmo.holdDur = 0.28; slowmo.releaseDur = 0.22;
+  } else if (rowCount === 3) {
+    slowmo.holdScale = 0.55; slowmo.holdDur = 0.18; slowmo.releaseDur = 0.20;
+  } else {
+    return; // 1- or 2-line clears stay real-time
+  }
+  slowmo.t = 0;
+  slowmo.active = true;
+}
+
+// =============================================================
 // Level-up flash — frame color pulse + brief bloom bump + HTML callout
 // =============================================================
 const levelUpEl = document.getElementById('levelup');
@@ -2445,6 +2724,43 @@ function triggerLevelUp(newLevel) {
   levelUpEl.classList.remove('show');
   void levelUpEl.offsetWidth;
   levelUpEl.classList.add('show');
+}
+
+// Multi-line callout (DOUBLE / TRIPLE / TETRIS)
+const clearCalloutEl = document.getElementById('clearCallout');
+const CLEAR_WORDS = { 2: 'Double', 3: 'Triple', 4: 'Tetris' };
+const CLEAR_FONT_SIZE = { 2: 56, 3: 72, 4: 96 };
+function triggerCallout(rowCount, color) {
+  const word = CLEAR_WORDS[rowCount];
+  if (!word) return;
+  clearCalloutEl.textContent = word + (rowCount === 4 ? '!' : '');
+  const hex = '#' + color.toString(16).padStart(6, '0');
+  clearCalloutEl.style.fontSize = CLEAR_FONT_SIZE[rowCount] + 'px';
+  clearCalloutEl.style.color = hex;
+  clearCalloutEl.style.textShadow = `0 0 28px ${hex}, 0 0 80px ${hex}`;
+  clearCalloutEl.classList.remove('show');
+  void clearCalloutEl.offsetWidth;
+  clearCalloutEl.classList.add('show');
+}
+
+// Floating score popup — anchored to a world position projected to screen
+const scorePopupEl = document.getElementById('scorePopup');
+const _popupProj = new THREE.Vector3();
+function triggerScorePopup(amount, rowIndex, color) {
+  // Project clear-row world position onto screen
+  const worldY = -PLAY_H / 2 + (rowIndex + 0.5) * CELL;
+  _popupProj.set(0, worldY, 0).project(camera);
+  const sx = (_popupProj.x * 0.5 + 0.5) * window.innerWidth;
+  const sy = (-_popupProj.y * 0.5 + 0.5) * window.innerHeight;
+  scorePopupEl.textContent = `+${amount.toLocaleString()}`;
+  const hex = '#' + color.toString(16).padStart(6, '0');
+  scorePopupEl.style.left = `${sx}px`;
+  scorePopupEl.style.top  = `${sy}px`;
+  scorePopupEl.style.color = hex;
+  scorePopupEl.style.textShadow = `0 0 18px ${hex}, 0 0 48px ${hex}`;
+  scorePopupEl.classList.remove('show');
+  void scorePopupEl.offsetWidth;
+  scorePopupEl.classList.add('show');
 }
 
 // =============================================================
@@ -2470,6 +2786,22 @@ function animate() {
   const dt = Math.min(0.05, (now - lastTime) / 1000);
   lastTime = now;
   envTime += dt;
+
+  // Slow-mo tick — drives gameTimeScale. dtGame is what game logic and
+  // effect lifetimes consume; rendering and input use real-time dt.
+  if (slowmo.active) {
+    slowmo.t += dt;
+    if (slowmo.t < slowmo.holdDur) {
+      gameTimeScale = slowmo.holdScale;
+    } else {
+      const k = Math.min(1, (slowmo.t - slowmo.holdDur) / slowmo.releaseDur);
+      gameTimeScale = slowmo.holdScale + (1 - slowmo.holdScale) * k;
+      if (k >= 1) { gameTimeScale = 1.0; slowmo.active = false; }
+    }
+  } else {
+    gameTimeScale = 1.0;
+  }
+  const dtGame = dt * gameTimeScale;
 
   // ---- Futuristic environment animations ----
   // Blinker antennas
@@ -2519,9 +2851,9 @@ function animate() {
 
     // Soft-drop
     if (keyState.down) {
-      fallTimer += dt * 12;
+      fallTimer += dtGame * 12;
     }
-    fallTimer += dt;
+    fallTimer += dtGame;
     if (fallTimer > fallInterval()) {
       fallTimer = 0;
       if (!tryMove(0, -1)) {
@@ -2538,12 +2870,12 @@ function animate() {
   const accel = new THREE.Vector3()
     .copy(pieceVisualOffset).multiplyScalar(-stiffness)
     .add(pieceVel.clone().multiplyScalar(-damping));
-  pieceVel.addScaledVector(accel, dt);
-  pieceVisualOffset.addScaledVector(pieceVel, dt);
+  pieceVel.addScaledVector(accel, dtGame);
+  pieceVisualOffset.addScaledVector(pieceVel, dtGame);
 
   // Rotation wobble
-  pieceRotVel += (-pieceRotVisual * 80 - pieceRotVel * 9) * dt;
-  pieceRotVisual += pieceRotVel * dt;
+  pieceRotVel += (-pieceRotVisual * 80 - pieceRotVel * 9) * dtGame;
+  pieceRotVisual += pieceRotVel * dtGame;
 
   // Scale offset down to keep within visible bounds
   const maxOff = 0.45;
@@ -2555,54 +2887,122 @@ function animate() {
   // ---- Cube settle anims ----
   for (let i = cubeAnims.length - 1; i >= 0; i--) {
     const a = cubeAnims[i];
-    a.t += dt;
+    a.t += dtGame;
     const k = Math.min(1, a.t / a.dur);
     const ease = 1 - Math.pow(1 - k, 3);
     a.cube.position.lerpVectors(a.from, a.to, ease);
     if (k >= 1) cubeAnims.splice(i, 1);
   }
 
+  // ---- Lock squash-and-stretch ----
+  for (let i = lockAnims.length - 1; i >= 0; i--) {
+    const a = lockAnims[i];
+    a.t += dtGame;
+    const k = Math.min(1, a.t / a.dur);
+    const ease = easeOutBack(k);
+    // Lerp from initial-stretch (1.18, 0.82, 1.18) to (1, 1, 1) with overshoot.
+    a.cube.scale.x = 1.18 + (1 - 1.18) * ease;
+    a.cube.scale.y = 0.82 + (1 - 0.82) * ease;
+    a.cube.scale.z = 1.18 + (1 - 1.18) * ease;
+    if (k >= 1) {
+      a.cube.scale.set(1, 1, 1);
+      lockAnims.splice(i, 1);
+    }
+  }
+
+  // ---- Impact effect (hard-drop) ----
+  if (impactFx.active) {
+    impactFx.t += dtGame;
+    const k = Math.min(1, impactFx.t / impactFx.dur);
+
+    // Ring 1 — sharp leader: fastest, biggest, fades early
+    const k1 = Math.min(1, k * 1.7);
+    const e1 = 1 - Math.pow(1 - k1, 3);
+    _impactRing1.mesh.scale.setScalar(0.4 + e1 * 2.6);
+    _impactRing1.mat.opacity = Math.pow(1 - k1, 1.3) * 1.0;
+
+    // Ring 2 — medium follow-up, slight delay, mid expansion
+    const k2 = Math.max(0, Math.min(1, (k - 0.06) * 1.4));
+    const e2 = 1 - Math.pow(1 - k2, 2.5);
+    _impactRing2.mesh.scale.setScalar(0.4 + e2 * 1.8);
+    _impactRing2.mat.opacity = Math.pow(1 - k2, 1.6) * 0.85;
+
+    // Ring 3 — thick disc, slow, hangs the longest
+    const k3 = k;
+    const e3 = 1 - Math.pow(1 - k3, 2);
+    _impactRing3.mesh.scale.setScalar(0.4 + e3 * 1.0);
+    _impactRing3.mat.opacity = Math.pow(1 - k3, 2) * 0.7;
+
+    if (k >= 1) {
+      _impactRing1.mesh.visible = false;
+      _impactRing2.mesh.visible = false;
+      _impactRing3.mesh.visible = false;
+      impactFx.active = false;
+    }
+  }
+
+  // ---- Hard-drop cube trail — fade semi-transparent boxes & return slots ----
+  for (let i = trailFx.length - 1; i >= 0; i--) {
+    const t = trailFx[i];
+    t.life += dtGame;
+    const k = Math.min(1, t.life / t.maxLife);
+    t.slot.mesh.material.opacity = t.startOpacity * Math.pow(1 - k, 1.6);
+    if (k >= 1) {
+      t.slot.mesh.visible = false;
+      t.slot.busy = false;
+      trailFx.splice(i, 1);
+    }
+  }
+
   // ---- Shards & Sparkles (both GPU-driven, share _shardClock) ----
   // Physics, rotation, and lifetime fade all happen in the shaders using
   // per-instance attributes; CPU just advances the clock uniform.
-  _shardClock += dt;
+  _shardClock += dtGame;
   shardMat.uniforms.uTime.value = _shardClock;
   sparkleMat.uniforms.uTime.value = _shardClock;
 
   // ---- Flashes ----
   for (let i = flashes.length - 1; i >= 0; i--) {
     const f = flashes[i];
-    f.life += dt;
+    f.life += dtGame;
     const k = f.life / f.maxLife;
-    if (f.isLight) {
+    if (f.kind === 'light') {
       f.slot.light.intensity = 12 * (1 - k);
       if (k >= 1) {
         f.slot.light.intensity = 0;
         f.slot.busy = false;
         flashes.splice(i, 1);
       }
-    } else {
-      f.mesh.material.opacity = Math.max(0, 1 - k);
-      f.mesh.scale.x = 1 + k * 0.5;
-      f.mesh.scale.y = 1 + k * 3;
+    } else { // 'slab'
+      const m = f.slot.mesh.material;
+      // White-hot at start, lerp to row color over first half of life.
+      _flashTargetA.setHex(0xffffff);
+      _flashTargetB.setHex(f.targetColor);
+      m.color.copy(_flashTargetA).lerp(_flashTargetB, Math.min(1, k * 2));
+      m.opacity = Math.max(0, 1 - k);
+      f.slot.mesh.scale.x = 1 + k * 0.5;
+      f.slot.mesh.scale.y = 1 + k * 3;
       if (k >= 1) {
-        caseGroup.remove(f.mesh);
-        f.mesh.material.dispose();
+        f.slot.mesh.visible = false;
+        f.slot.busy = false;
         flashes.splice(i, 1);
       }
     }
   }
 
   // ---- Camera shake ----
+  // Note: shakeClock advances at real time so the noise *frequency* stays
+  // constant across slow-mo. Only the decay slows with game time so the
+  // shake stretches over a longer wall-clock during a Tetris.
   if (shakeIntensity > 0.001) {
     shakeClock += dt;
-    const t = shakeClock * 22; // Hz of the underlying sines
+    const t = shakeClock * 22;
     shakeOffset.set(
       shakeNoise(t)             * shakeIntensity,
       shakeNoise(t + 100)       * shakeIntensity,
       shakeNoise(t + 200)       * shakeIntensity * 0.5,
     );
-    shakeIntensity *= Math.pow(0.001, dt);
+    shakeIntensity *= Math.pow(0.001, dtGame);
   } else {
     shakeOffset.set(0,0,0);
   }
@@ -2619,7 +3019,7 @@ function animate() {
 
   // ---- Level-up flash (frame color + bloom bump) ----
   if (levelUp.active) {
-    levelUp.t += dt;
+    levelUp.t += dtGame;
     const k = Math.min(1, levelUp.t / levelUp.dur);
     // Bell envelope: 0 → 1 → 0
     const env = k < 0.35 ? (k / 0.35) : Math.pow(1 - (k - 0.35) / 0.65, 2);
@@ -2635,7 +3035,7 @@ function animate() {
   // ---- Punch-zoom ----
   let zoomOffset = new THREE.Vector3();
   if (punchZoom.active) {
-    punchZoom.t += dt;
+    punchZoom.t += dtGame;
     const k = Math.min(1, punchZoom.t / punchZoom.dur);
     // Bell-shape: fast in, slow out (peak at t≈0.25)
     const env = k < 0.25
