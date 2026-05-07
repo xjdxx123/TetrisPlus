@@ -2375,9 +2375,9 @@ let gameTimeScale = 1.0;
 const slowmo = { active: false, t: 0, holdScale: 1.0, holdDur: 0, releaseDur: 0 };
 function triggerSlowmo(rowCount) {
   if (rowCount === 4) {
-    slowmo.holdScale = 0.35; slowmo.holdDur = 0.28; slowmo.releaseDur = 0.22;
+    slowmo.holdScale = 0.35; slowmo.holdDur = 0.75; slowmo.releaseDur = 0.55;
   } else if (rowCount === 3) {
-    slowmo.holdScale = 0.55; slowmo.holdDur = 0.18; slowmo.releaseDur = 0.20;
+    slowmo.holdScale = 0.55; slowmo.holdDur = 0.50; slowmo.releaseDur = 0.45;
   } else {
     return; // 1- or 2-line clears stay real-time
   }
