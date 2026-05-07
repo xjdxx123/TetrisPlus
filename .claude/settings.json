@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:www.unrealengine.com)",
+      "WebFetch(domain:www.youtube.com)",
+      "WebFetch(domain:wccftech.com)",
+      "WebFetch(domain:www.brothers-in-gaming.com)",
+      "WebFetch(domain:variety.com)",
+      "WebFetch(domain:splice.com)",
+      "WebFetch(domain:www.engadget.com)",
+      "WebFetch(domain:www.videogameschronicle.com)",
+      "WebFetch(domain:www.tetriseffect.game)",
+      "WebFetch(domain:tetris.fandom.com)",
+      "WebFetch(domain:www.shacknews.com)",
+      "WebFetch(domain:four.lol)",
+      "WebFetch(domain:tetris.wiki)",
+      "Bash(git -C /Users/clintongao/coding/TetrisPlus status --short)",
+      "Bash(git -C /Users/clintongao/coding/TetrisPlus log --oneline -10)",
+      "Bash(node -e ' *)",
+      "Bash(node --check /tmp/tetris_check.mjs)"
+    ]
+  }
+}

@@ -809,6 +809,300 @@ const ambientField = (() => {
 })();
 
 // =============================================================
+// Line-clear effect — §1.6 of plan_particle_1.md
+// -------------------------------------------------------------
+// Tetris Effect's clear isn't one big burst — it's 5–7 layered subsystems
+// stacked under disciplined color rules (see §1.6.2). The existing game
+// already covers:
+//   Layer 1 — Cube fragments        : shatter()                 (block color)
+//   Layer 3 — Shockwave ring        : triggerShockwave()        (block color)
+//   Layer 5 — Flash / row slabs     : triggerFlash()            (white→block)
+// The pieces this module adds, per the rev-3 plan:
+//   Layer 2 — Stage-palette sparkle : emitLineClearBurst        (stage, lingering)
+//   Layer 6 — Camera-space veil     : triggerLineClearVeil      (Tetris+ only)
+//   §1.3   — Attention-budget dim  : ambient temporarily makes room
+//
+// Why a *stage-palette* sparkle when fragments + shockwave + flash already
+// inherit the block color? Per §1.6.2 rule 2 (Hydelic interview + gameplay
+// observation): Tetris Effect's sparkle layer reads as the *room* responding,
+// not as the piece exploding. Without a layer that uses the room's hue,
+// every clear feels like a generic confetti pop instead of the stage
+// reacting to the player. This is the cheapest single change toward the
+// target aesthetic.
+// =============================================================
+
+// Stage palette resolver. MOOD_PRESETS gives us {rim, fill, frame}; we map
+// frame → sparkle hue (the lighter accent that lives in the ambient hue
+// arc) and rim → veil/accent hue (the saturated highlight bloom amplifies).
+function _stagePalette() {
+  const m = MOOD_PRESETS[TWEAKS.mood] || MOOD_PRESETS.neon;
+  return { sparkleHex: m.frame, accentHex: m.rim };
+}
+
+// -------------------------------------------------------------
+// Layer 2 — Stage-palette sparkle pool
+// -------------------------------------------------------------
+// 2000-particle additive billboard pool, free-slot allocator with ring-cursor
+// fallback. Tier-scaled spawn count: a Tetris is *visibly* a different event
+// than a single (per §1.6.3 exit criterion), not just a louder one.
+// Color rule: 75 % stage palette + 25 % block tint, HDR-boosted ×1.5 so
+// bloom amplifies without pushing the sparkle past the bloom threshold's
+// muddy-white ceiling.
+const CLEAR_SPARKLE_COUNT = 2000;
+const clearSparkle = (() => {
+  const N = CLEAR_SPARKLE_COUNT;
+  const positions  = new Float32Array(N * 3);
+  const velocities = new Float32Array(N * 3);
+  const ages       = new Float32Array(N);
+  const lives      = new Float32Array(N);   // 0 = free slot
+  const sizes      = new Float32Array(N);
+  const colors     = new Float32Array(N * 3);
+  const alphas     = new Float32Array(N);
+  let allocCursor = 0;
+  // Park free slots offscreen so a stale GPU draw never paints them.
+  for (let i = 0; i < N; i++) positions[i*3+1] = 1e6;
+
+  function alloc() {
+    for (let probe = 0; probe < N; probe++) {
+      const idx = (allocCursor + probe) % N;
+      if (lives[idx] <= 0) { allocCursor = (idx + 1) % N; return idx; }
+    }
+    const idx = allocCursor;
+    allocCursor = (allocCursor + 1) % N;
+    return idx;
+  }
+
+  function spawn(spec) {
+    const i = alloc();
+    positions[i*3+0]  = spec.x;
+    positions[i*3+1]  = spec.y;
+    positions[i*3+2]  = spec.z;
+    velocities[i*3+0] = spec.vx;
+    velocities[i*3+1] = spec.vy;
+    velocities[i*3+2] = spec.vz;
+    lives[i] = spec.life;
+    ages[i]  = 0;
+    sizes[i] = spec.size;
+    colors[i*3+0] = spec.r;
+    colors[i*3+1] = spec.g;
+    colors[i*3+2] = spec.b;
+    alphas[i] = 0;
+  }
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geo.setAttribute('aColor',   new THREE.BufferAttribute(colors, 3));
+  geo.setAttribute('aSize',    new THREE.BufferAttribute(sizes, 1));
+  geo.setAttribute('aAlpha',   new THREE.BufferAttribute(alphas, 1));
+  geo.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 1e6);
+
+  const mat = new THREE.ShaderMaterial({
+    uniforms: {
+      uTexture:    { value: makeAmbientTexture() }, // soft radial — same look as ambient
+      uPointScale: { value: window.innerHeight * 0.5 },
+    },
+    vertexShader: /* glsl */`
+      attribute vec3 aColor;
+      attribute float aSize;
+      attribute float aAlpha;
+      uniform float uPointScale;
+      varying vec3 vColor;
+      varying float vAlpha;
+      void main() {
+        vColor = aColor; vAlpha = aAlpha;
+        vec4 mv = modelViewMatrix * vec4(position, 1.0);
+        gl_Position = projectionMatrix * mv;
+        float sz = aSize * uPointScale / max(0.5, -mv.z);
+        gl_PointSize = clamp(sz, 1.0, 80.0);
+      }
+    `,
+    fragmentShader: /* glsl */`
+      uniform sampler2D uTexture;
+      varying vec3 vColor;
+      varying float vAlpha;
+      void main() {
+        vec4 t = texture2D(uTexture, gl_PointCoord);
+        // HDR > 1.0 in vColor is intentional — additive + bloom does the rest.
+        vec3 rgb = vColor * t.a * vAlpha;
+        if (rgb.r + rgb.g + rgb.b < 0.003) discard;
+        gl_FragColor = vec4(rgb, 1.0);
+      }
+    `,
+    transparent: true, depthWrite: false, depthTest: true,
+    blending: THREE.AdditiveBlending,
+  });
+  const points = new THREE.Points(geo, mat);
+  points.frustumCulled = false;
+  scene.add(points);
+
+  function update(dt) {
+    const posAttr   = geo.attributes.position;
+    const colAttr   = geo.attributes.aColor;
+    const sizeAttr  = geo.attributes.aSize;
+    const alphaAttr = geo.attributes.aAlpha;
+
+    for (let i = 0; i < N; i++) {
+      if (lives[i] <= 0) continue;
+      ages[i] += dt;
+      if (ages[i] >= lives[i]) {
+        lives[i] = 0; alphas[i] = 0;
+        positions[i*3+1] = 1e6; // park offscreen
+        continue;
+      }
+      // Buoyant: light drag, mild gravity. The "lingering" feel from §1.6
+      // comes from low drag + lifetime extending past one beat.
+      const dragK = Math.pow(0.97, dt * 60);
+      velocities[i*3+0] *= dragK;
+      velocities[i*3+1] = velocities[i*3+1] * dragK - 0.5 * dt; // gravity 0.5 (very light)
+      velocities[i*3+2] *= dragK;
+      positions[i*3+0] += velocities[i*3+0] * dt;
+      positions[i*3+1] += velocities[i*3+1] * dt;
+      positions[i*3+2] += velocities[i*3+2] * dt;
+      // Triangular envelope: fast attack (0..15 % of life), long fade.
+      const u = ages[i] / lives[i];
+      alphas[i] = u < 0.15 ? (u / 0.15) : Math.pow(1 - (u - 0.15) / 0.85, 1.4);
+    }
+    posAttr.needsUpdate   = true;
+    colAttr.needsUpdate   = true;
+    sizeAttr.needsUpdate  = true;
+    alphaAttr.needsUpdate = true;
+  }
+  function setPointScaleFromHeight(h) { mat.uniforms.uPointScale.value = h * 0.5; }
+  return { spawn, update, setPointScaleFromHeight, material: mat, points };
+})();
+
+// emitLineClearBurst — the public entry. rowIndices is the array of cleared
+// row indices (board space, 0 = bottom); rowColors[i] is the average hex
+// color of rowIndices[i]'s cells before the row got nulled.
+function emitLineClearBurst(rowIndices, rowColors) {
+  const rowCount = rowIndices.length;
+  if (rowCount === 0) return;
+  // §1.6.3 tier scaling — linear in row count, with a Tetris bonus so 4
+  // doesn't read as just "more 3". Order of magnitude follows the §1.2
+  // "500–3k per event" target, with the per-row baseline tuned down once
+  // we account for shatter() + spawnScorePopupBurst already firing.
+  const PER_ROW_BASE = 120;
+  const tetrisBonus  = rowCount === 4 ? 1.5 : 1.0;
+  const PER_ROW = Math.round(PER_ROW_BASE * tetrisBonus);
+
+  const pal = _stagePalette();
+  const stageR = ((pal.sparkleHex >> 16) & 0xff) / 255;
+  const stageG = ((pal.sparkleHex >> 8)  & 0xff) / 255;
+  const stageB = ( pal.sparkleHex        & 0xff) / 255;
+  // §1.6.2 rule 4 ("core skews block, periphery skews stage") at the cohort
+  // level: 75 % stage palette, 25 % block tint. HDR ×1.5 keeps bloom hot.
+  const STAGE_W = 0.75;
+  const HDR = 1.5;
+
+  for (let ri = 0; ri < rowCount; ri++) {
+    const r = rowIndices[ri];
+    const blockHex = rowColors && rowColors[ri] != null ? rowColors[ri] : 0xffffff;
+    const blockR = ((blockHex >> 16) & 0xff) / 255;
+    const blockG = ((blockHex >> 8)  & 0xff) / 255;
+    const blockB = ( blockHex        & 0xff) / 255;
+    const cr = (stageR * STAGE_W + blockR * (1 - STAGE_W)) * HDR;
+    const cg = (stageG * STAGE_W + blockG * (1 - STAGE_W)) * HDR;
+    const cb = (stageB * STAGE_W + blockB * (1 - STAGE_W)) * HDR;
+    const yWorld = -PLAY_H / 2 + (r + 0.5) * CELL;
+
+    for (let i = 0; i < PER_ROW; i++) {
+      const xWorld = -PLAY_W / 2 + Math.random() * PLAY_W;
+      const zWorld = -PLAY_D / 2 + Math.random() * PLAY_D;
+      const yJitter = (Math.random() - 0.5) * CELL * 0.7;
+      // Gentle radial + upward bias. Calm-stage motion model from §1.6
+      // Layer 2 — the "energetic" radial spread is reserved for stages
+      // that swap in a different recipe in Phase 7.
+      const ang = Math.random() * Math.PI * 2;
+      const radial = 1.5 + Math.random() * 3.5;
+      clearSparkle.spawn({
+        x: xWorld, y: yWorld + yJitter, z: zWorld,
+        vx: Math.cos(ang) * radial,
+        vy: 1.5 + Math.random() * 3.0,
+        vz: Math.sin(ang) * radial * 0.5,
+        life: 0.9 + Math.random() * 0.7,        // 0.9–1.6 s lingering
+        size: 0.6 + Math.random() * 0.9,
+        r: cr, g: cg, b: cb,
+      });
+    }
+  }
+  // Trigger the §1.3 attention-budget dim — ambient temporarily makes
+  // room. Strength scales with row count.
+  triggerAttentionDim(rowCount);
+}
+
+// -------------------------------------------------------------
+// Layer 6 — Camera-space veil (Tetris+ only)
+// -------------------------------------------------------------
+// Brief full-screen tint in the dominant palette hue. Implemented as a
+// fixed-position div with mix-blend-mode:screen so the tint adds to the
+// scene rather than overlaying on top of it (preserves bloom). Opacity
+// tweens fast-attack/slow-release. CSS overlay (rather than a fullscreen
+// quad) keeps it independent of the scene's render target switching and
+// gives us free SDR→sRGB handling.
+const _veilEl = (() => {
+  const el = document.createElement('div');
+  el.style.cssText = `
+    position: fixed; inset: 0; z-index: 4;
+    pointer-events: none; opacity: 0;
+    mix-blend-mode: screen;
+    background: rgba(160, 100, 255, 1);
+    will-change: opacity, background-color;
+  `;
+  document.body.appendChild(el);
+  return el;
+})();
+const _veilFx = { active: false, t: 0, dur: 0.42, peak: 0.0 };
+function triggerLineClearVeil(rowCount) {
+  if (rowCount < 4) return; // Tetris+ only per §1.6.3
+  const pal = _stagePalette();
+  const r = (pal.accentHex >> 16) & 0xff;
+  const g = (pal.accentHex >> 8)  & 0xff;
+  const b = (pal.accentHex      ) & 0xff;
+  _veilEl.style.backgroundColor = `rgb(${r}, ${g}, ${b})`;
+  _veilFx.active = true;
+  _veilFx.t = 0;
+  _veilFx.dur  = 0.42;
+  _veilFx.peak = 0.42;     // peak opacity — tuned to feel like a "pulse" not a flash
+}
+function updateLineClearVeil(dt) {
+  if (!_veilFx.active) return;
+  _veilFx.t += dt;
+  const k = Math.min(1, _veilFx.t / _veilFx.dur);
+  // Bell envelope: fast attack (0..0.18), long release (0.18..1.0)
+  const env = k < 0.18
+    ? (k / 0.18)
+    : Math.pow(1 - (k - 0.18) / 0.82, 1.5);
+  _veilEl.style.opacity = String(_veilFx.peak * env);
+  if (k >= 1) {
+    _veilFx.active = false;
+    _veilEl.style.opacity = '0';
+  }
+}
+
+// -------------------------------------------------------------
+// §1.3 — Attention-budget dim
+// -------------------------------------------------------------
+// When a clear fires, the ambient layer's emission temporarily dims so the
+// event has visual headroom. The plan calls this "the single biggest
+// contributor to polish." Implementation: a 0..1 multiplier the ambient
+// shader's uIntensity reads. Drops on clear, recovers over ~0.7 s.
+let _clearAttentionMul = 1.0;
+function triggerAttentionDim(rowCount) {
+  // Tetris cuts intensity to ~50 %, single drops to ~85 %. Multiple in-
+  // flight clears stack via min().
+  const target = Math.max(0.5, 1.0 - 0.12 * Math.min(rowCount, 4));
+  _clearAttentionMul = Math.min(_clearAttentionMul, target);
+}
+function tickAttentionRecovery(dt) {
+  if (_clearAttentionMul < 1.0) {
+    // Recovery time constant ~0.7 s — slower than the dim attack so the
+    // dim reads as "made room" not "flickered."
+    _clearAttentionMul = Math.min(1.0, _clearAttentionMul + dt / 0.7);
+    ambientField.material.uniforms.uIntensity.value = _clearAttentionMul;
+  }
+}
+
+// =============================================================
 // Orbit Controls
 // =============================================================
 const controls = new OrbitControls(camera, renderer.domElement);
@@ -1798,6 +2092,13 @@ function clearLines(rows) {
       }
     }
   }
+  // §1.6 line-clear effect — Layer 2 sparkle (stage palette) + Layer 6
+  // veil (Tetris+ only) + §1.3 attention-budget dim. Fires before
+  // triggerFlash so the sparkle's slow envelope is already developing
+  // when the in-board flash slabs and shockwave punch through it.
+  emitLineClearBurst(rows, rowColors);
+  triggerLineClearVeil(rows.length);
+
   // Color-tinted flash slabs (G1)
   triggerFlash(rows, rowColors);
 
@@ -3044,6 +3345,14 @@ function animate() {
   // feel; it's environment, not gameplay.
   ambientField.update(dt, envTime);
 
+  // §1.6 line-clear layers — sparkle pool sim, veil opacity tween,
+  // attention-budget recovery. All real-time so they survive slow-mo
+  // (the slow-mo on Tetris is meant to *let you see* the effect, not
+  // slow the effect itself).
+  clearSparkle.update(dt);
+  if (_veilFx.active) updateLineClearVeil(dt);
+  tickAttentionRecovery(dt);
+
   // Slow-mo tick — drives gameTimeScale. dtGame is what game logic and
   // effect lifetimes consume; rendering and input use real-time dt.
   if (slowmo.active) {
@@ -3429,6 +3738,7 @@ window.addEventListener('resize', () => {
     window.innerHeight * Math.min(window.devicePixelRatio, 2),
   );
   ambientField.setPointScaleFromHeight(window.innerHeight);
+  clearSparkle.setPointScaleFromHeight(window.innerHeight);
 });
 
 // =============================================================
