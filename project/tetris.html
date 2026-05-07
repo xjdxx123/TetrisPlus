@@ -186,10 +186,9 @@
     100% { transform: translate(-50%, calc(-50% - 110px)) scale(0.92); opacity: 0; }
   }
 
-  .help-toggle {
+  .help-toggle, .audio-toggle {
     position: fixed;
     bottom: 18px;
-    right: 22px;
     z-index: 6;
     width: 32px;
     height: 32px;
@@ -201,8 +200,12 @@
     font-size: 13px;
     backdrop-filter: blur(10px);
     transition: color 0.2s, border-color 0.2s;
+    line-height: 1;
   }
-  .help-toggle:hover { color: var(--ink); border-color: rgba(108,240,255,0.5); }
+  .help-toggle  { right: 22px; }
+  .audio-toggle { right: 62px; font-size: 14px; }
+  .help-toggle:hover, .audio-toggle:hover { color: var(--ink); border-color: rgba(108,240,255,0.5); }
+  .audio-toggle.muted { color: rgba(255,140,140,0.9); border-color: rgba(255,140,140,0.45); }
 
   /* Game over overlay */
   .game-over {
@@ -300,7 +303,9 @@
     <h4 style="margin-top:10px;">Panels</h4>
     <div class="row"><span>Drag in 3D</span><span>Click + drag panel</span></div>
   </div>
+  <button class="audio-toggle" id="audioToggle" title="Mute / unmute audio">🔊</button>
   <button class="help-toggle" id="helpToggle" title="Toggle controls">?</button>
+  <audio id="bgmAudio" src="asset/sounds/bgm_vaporwave.m4a" loop preload="auto"></audio>
 
   <div class="levelup" id="levelup"></div>
   <div class="clear-callout" id="clearCallout"></div>
@@ -1466,6 +1471,9 @@ function lockPiece() {
   }
   if (fullRows.length > 0) {
     clearLines(fullRows);
+    announceLineClear(fullRows.length);
+  } else {
+    noteNoClearLock();
   }
   spawnPiece();
 }
@@ -2199,6 +2207,7 @@ function triggerGameOver() {
   document.getElementById('goLines').textContent = lines;
   document.getElementById('goLevel').textContent = level;
   document.getElementById('gameOver').classList.add('show');
+  playVoice('manbaout');
 }
 document.getElementById('goRestart').addEventListener('click', () => {
   // Reset
@@ -2259,6 +2268,7 @@ document.getElementById('goRestart').addEventListener('click', () => {
   activePiece = null;
   holdPiece = null;
   nextQueue = [];
+  resetAnnouncerForNewGame();
   document.getElementById('gameOver').classList.remove('show');
   spawnPiece();
 });
@@ -2818,6 +2828,195 @@ window.addEventListener('resize', () => {
     window.innerHeight * Math.min(window.devicePixelRatio, 2),
   );
 });
+
+// =============================================================
+// Audio — UT-style announcer voices + looping vaporwave BGM
+// =============================================================
+// Voices use Web Audio (decoded into AudioBuffers — small clips, ~500KB each,
+// cheap to keep in memory) so we can interrupt the previous voice when a new
+// one fires (announcer chain never overlaps itself). BGM is a 49 MB m4a; we
+// stream it through an HTMLAudioElement to avoid keeping the whole decoded
+// PCM in memory.
+const VOICE_FILES = {
+  freshmeat:    'asset/sounds/freshmeat.wav',
+  rempage:      'asset/sounds/rempage.wav',
+  dominating:   'asset/sounds/dominating.wav',
+  unstoppable:  'asset/sounds/unstoppable.wav',
+  godlike:      'asset/sounds/godlike.wav',
+  wreckingsick: 'asset/sounds/wreckingsick.wav',
+  megakill:     'asset/sounds/megakill.wav',
+  ultrakill:    'asset/sounds/ultrakill.wav',
+  monsterkill:  'asset/sounds/monsterkill.wav',
+  holyshit:     'asset/sounds/holyshit.wav',
+  manbaout:     'asset/sounds/manbaout.mp3',
+  man:          'asset/sounds/man.mp3',
+};
+const sfx = {
+  ctx: null,
+  master: null,
+  voiceGain: null,
+  voices: Object.create(null), // name -> AudioBuffer
+  current: null,               // currently-playing voice source (BufferSource)
+  bgmEl: document.getElementById('bgmAudio'),
+  ready: false,
+  muted: false,
+  voiceVolume: 0.95,
+  bgmVolume:   0.32,
+};
+async function initAudio() {
+  if (sfx.ctx) return;
+  const Ctx = window.AudioContext || window.webkitAudioContext;
+  if (!Ctx) return;
+  sfx.ctx = new Ctx();
+  sfx.master = sfx.ctx.createGain();
+  sfx.master.gain.value = sfx.muted ? 0 : 1;
+  sfx.master.connect(sfx.ctx.destination);
+  sfx.voiceGain = sfx.ctx.createGain();
+  sfx.voiceGain.gain.value = sfx.voiceVolume;
+  sfx.voiceGain.connect(sfx.master);
+  // Decode all voice clips in parallel; tolerate individual failures.
+  await Promise.all(Object.entries(VOICE_FILES).map(async ([name, url]) => {
+    try {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error('http ' + res.status);
+      const buf = await res.arrayBuffer();
+      sfx.voices[name] = await sfx.ctx.decodeAudioData(buf);
+    } catch (e) {
+      console.warn('[audio] failed to load', name, e);
+    }
+  }));
+  sfx.ready = true;
+  // BGM via HTMLAudioElement — already loop=true / preload=auto in markup.
+  if (sfx.bgmEl) {
+    sfx.bgmEl.volume = sfx.muted ? 0 : sfx.bgmVolume;
+    sfx.bgmEl.play().catch(() => { /* gesture may still be required on some browsers */ });
+  }
+}
+function playVoice(name) {
+  if (!sfx.ready || sfx.muted || !sfx.voices[name]) return;
+  // Resume after tab-switch suspensions.
+  if (sfx.ctx.state === 'suspended') sfx.ctx.resume();
+  // Cancel the previous announcer line so two voices never overlap.
+  if (sfx.current) {
+    try { sfx.current.stop(); } catch (e) { /* already finished */ }
+    sfx.current = null;
+  }
+  const src = sfx.ctx.createBufferSource();
+  src.buffer = sfx.voices[name];
+  src.connect(sfx.voiceGain);
+  src.onended = () => { if (sfx.current === src) sfx.current = null; };
+  src.start();
+  sfx.current = src;
+}
+function setMuted(b) {
+  sfx.muted = !!b;
+  if (sfx.master) sfx.master.gain.value = sfx.muted ? 0 : 1;
+  if (sfx.bgmEl)  sfx.bgmEl.volume = sfx.muted ? 0 : sfx.bgmVolume;
+  audioToggleBtn.classList.toggle('muted', sfx.muted);
+  audioToggleBtn.textContent = sfx.muted ? '🔇' : '🔊';
+}
+const audioToggleBtn = document.getElementById('audioToggle');
+audioToggleBtn.addEventListener('click', (e) => {
+  // Click also serves as the unlock gesture if audio hasn't started yet.
+  if (!sfx.ctx) initAudio();
+  setMuted(!sfx.muted);
+  e.currentTarget.blur();
+});
+// First user gesture (key or pointer) unlocks audio. Browsers gate
+// AudioContext + media playback until this happens.
+const _audioBoot = () => {
+  initAudio();
+  window.removeEventListener('keydown', _audioBoot);
+  window.removeEventListener('pointerdown', _audioBoot);
+};
+window.addEventListener('keydown', _audioBoot);
+window.addEventListener('pointerdown', _audioBoot);
+
+// ---- Announcer state machine ------------------------------------------------
+// Streak = total LINES cleared across consecutive clearing locks (not just
+// 1-line clears). Resets only on a piece locking without clearing. Tiers
+// fire when the cumulative line count crosses each threshold for the first
+// time in this streak — so a Tetris contributes 4, a double contributes 2,
+// etc. This makes the ladder reachable in normal play.
+//
+// Priority on each clear (highest wins):
+//   1. Back-to-back Tetris → holyshit (fires once per streak)
+//   2. Crossed a new streak tier → that ladder voice
+//   3. Cluster size voice (monsterkill / ultrakill / megakill)
+//   4. Single-line, no tier crossing → silent
+const STREAK_TIERS = [
+  { at: 3,  voice: 'rempage' },      // first milestone — a single Tetris hits this
+  { at: 5,  voice: 'dominating' },
+  { at: 8,  voice: 'unstoppable' },
+  { at: 12, voice: 'godlike' },
+  { at: 18, voice: 'wreckingsick' },
+];
+const STREAK_GRACE = 8; // non-clearing locks tolerated before the streak breaks
+let streakLines = 0;
+let lastTier = -1;          // highest tier index voiced so far this streak
+let prevWasTetris = false;
+let holyshitUsed = false;   // back-to-back-tetris voice fires once per streak
+let firstClearSeen = false;
+let missedLocks = 0;        // non-clearing locks since the last clear
+
+function announceLineClear(rowCount) {
+  // Any clear forgives a filler piece — don't break the chain on near-misses.
+  missedLocks = 0;
+  // First-ever clear in this game gets the welcome regardless of size.
+  if (!firstClearSeen) {
+    firstClearSeen = true;
+    playVoice('freshmeat');
+    streakLines = rowCount;
+    prevWasTetris = (rowCount === 4);
+    return;
+  }
+  const oldStreak = streakLines;
+  streakLines = oldStreak + rowCount;
+  // Find the highest tier crossed by this clear that hasn't fired yet.
+  let crossed = -1;
+  for (let i = lastTier + 1; i < STREAK_TIERS.length; i++) {
+    if (oldStreak < STREAK_TIERS[i].at && streakLines >= STREAK_TIERS[i].at) {
+      crossed = i;
+    }
+  }
+  const isBackToBackTetris = (rowCount === 4 && prevWasTetris);
+  prevWasTetris = (rowCount === 4);
+  // Back-to-back Tetris — fire once per streak so chains of 3+ tetrises don't
+  // just say "holyshit" forever; subsequent ones fall through to the ladder.
+  if (isBackToBackTetris && !holyshitUsed) {
+    playVoice('holyshit');
+    holyshitUsed = true;
+    if (crossed >= 0) lastTier = crossed; // still record the tier as consumed
+    return;
+  }
+  if (crossed >= 0) {
+    playVoice(STREAK_TIERS[crossed].voice);
+    lastTier = crossed;
+    return;
+  }
+  if (rowCount === 4) playVoice('monsterkill');
+  else if (rowCount === 3) playVoice('ultrakill');
+  else if (rowCount === 2) playVoice('megakill');
+  // Single-line with no tier crossing = silent (avoids constant chatter).
+}
+// Called on every non-clearing lock. The streak tolerates STREAK_GRACE filler
+// pieces in a row before it actually breaks — a beginner usually needs one or
+// two non-clearing pieces to set up the next clear.
+function noteNoClearLock() {
+  missedLocks += 1;
+  if (missedLocks > STREAK_GRACE) resetAnnouncerStreak();
+}
+function resetAnnouncerStreak() {
+  streakLines = 0;
+  lastTier = -1;
+  prevWasTetris = false;
+  holyshitUsed = false;
+  missedLocks = 0;
+}
+function resetAnnouncerForNewGame() {
+  resetAnnouncerStreak();
+  firstClearSeen = false;
+}
 
 // =============================================================
 // Help toggle
