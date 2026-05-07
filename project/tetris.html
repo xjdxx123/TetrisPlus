@@ -619,6 +619,196 @@ function makeSparkleTexture() {
 }
 
 // =============================================================
+// Ambient particle field — Phase 1 of plan_particle_1.md
+//   500 CPU-driven, additively-billboarded sprites that drift around the
+//   playfield. Single THREE.Points draw call. All per-particle state lives
+//   in pre-allocated Float32Arrays — no per-frame allocations on the hot
+//   path. The motion is intentionally simple sinusoidal drift; Phase 3 will
+//   replace the integrator with a curl-noise field on the GPU and Phase 4
+//   will wire emission rate to audio bands. The interface is therefore
+//   designed so those upgrades are localized to update().
+// =============================================================
+const AMBIENT_COUNT = 500;
+const AMBIENT_VOL = { x: 32, y: 28, z: 18, zOffset: -6 };
+
+function makeAmbientTexture() {
+  const c = document.createElement('canvas');
+  c.width = c.height = 64;
+  const ctx = c.getContext('2d');
+  const g = ctx.createRadialGradient(32, 32, 0, 32, 32, 32);
+  // Tight bright core for bloom + long soft falloff to avoid hard edges.
+  g.addColorStop(0.00, 'rgba(255,255,255,1.0)');
+  g.addColorStop(0.15, 'rgba(255,255,255,0.80)');
+  g.addColorStop(0.45, 'rgba(255,255,255,0.22)');
+  g.addColorStop(1.00, 'rgba(255,255,255,0.0)');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, 64, 64);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
+const ambientField = (() => {
+  const N = AMBIENT_COUNT;
+  const positions = new Float32Array(N * 3);
+  const velocities = new Float32Array(N * 3);
+  const ages = new Float32Array(N);
+  const lives = new Float32Array(N);
+  const sizes = new Float32Array(N);
+  const colors = new Float32Array(N * 3);
+  const alphas = new Float32Array(N);
+  const phases = new Float32Array(N);
+
+  function spawn(i, randomizeAge) {
+    positions[i*3+0] = (Math.random()*2-1) * AMBIENT_VOL.x;
+    positions[i*3+1] = (Math.random()*2-1) * AMBIENT_VOL.y;
+    positions[i*3+2] = (Math.random()*2-1) * AMBIENT_VOL.z + AMBIENT_VOL.zOffset;
+    velocities[i*3+0] = (Math.random()*2-1) * 0.25;
+    velocities[i*3+1] = 0.15 + Math.random() * 0.5;
+    velocities[i*3+2] = (Math.random()*2-1) * 0.18;
+    lives[i] = 7.0 + Math.random() * 6.0;
+    ages[i] = randomizeAge ? Math.random() * lives[i] : 0;
+    sizes[i] = 0.35 + Math.random() * 1.1;
+    phases[i] = Math.random() * Math.PI * 2;
+    // Disciplined palette: cyan-blue-violet arc (hue 0.50..0.72), avoiding the
+    // saturated reds/greens that would clash with active piece highlights.
+    const hue = 0.50 + Math.random() * 0.22;
+    const sat = 0.55 + Math.random() * 0.25;
+    const lum = 0.55 + Math.random() * 0.20;
+    const tmp = new THREE.Color().setHSL(hue, sat, lum);
+    colors[i*3+0] = tmp.r;
+    colors[i*3+1] = tmp.g;
+    colors[i*3+2] = tmp.b;
+  }
+  for (let i = 0; i < N; i++) spawn(i, true);
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geo.setAttribute('aColor',   new THREE.BufferAttribute(colors, 3));
+  geo.setAttribute('aSize',    new THREE.BufferAttribute(sizes, 1));
+  geo.setAttribute('aAlpha',   new THREE.BufferAttribute(alphas, 1));
+  // Frustum culling is unhelpful here — particles cover a large volume around
+  // the camera and the bounding sphere would always pass anyway. Skip the
+  // matrix work.
+  geo.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 1e6);
+
+  const mat = new THREE.ShaderMaterial({
+    uniforms: {
+      uTexture:    { value: makeAmbientTexture() },
+      uPointScale: { value: window.innerHeight * 0.5 },
+      uIntensity:  { value: 1.0 }, // exposed for later phases (audio reactivity)
+    },
+    vertexShader: /* glsl */`
+      attribute vec3 aColor;
+      attribute float aSize;
+      attribute float aAlpha;
+      uniform float uPointScale;
+      varying vec3 vColor;
+      varying float vAlpha;
+      void main() {
+        vColor = aColor;
+        vAlpha = aAlpha;
+        vec4 mv = modelViewMatrix * vec4(position, 1.0);
+        gl_Position = projectionMatrix * mv;
+        // Distance-attenuated screen-space size. Clamp to avoid massive
+        // overdraw on particles that drift very close to the camera.
+        float sz = aSize * uPointScale / max(0.5, -mv.z);
+        gl_PointSize = clamp(sz, 1.0, 64.0);
+      }
+    `,
+    fragmentShader: /* glsl */`
+      uniform sampler2D uTexture;
+      uniform float uIntensity;
+      varying vec3 vColor;
+      varying float vAlpha;
+      void main() {
+        vec4 t = texture2D(uTexture, gl_PointCoord);
+        // Additive output: alpha channel of the sprite is the spatial mask;
+        // vAlpha is the temporal envelope; vColor is the per-particle hue.
+        vec3 rgb = vColor * t.a * vAlpha * uIntensity;
+        if (rgb.r + rgb.g + rgb.b < 0.003) discard;
+        gl_FragColor = vec4(rgb, 1.0);
+      }
+    `,
+    transparent: true,
+    depthWrite: false,
+    depthTest: true,
+    blending: THREE.AdditiveBlending,
+  });
+
+  const points = new THREE.Points(geo, mat);
+  points.frustumCulled = false;
+  scene.add(points);
+
+  // Brief envelope: fade in over first 12% of life, fade out over last 35%.
+  // Keeps spawns and deaths from popping; this is what later phases will
+  // augment with anticipatory ramps tied to predicted beats.
+  function envelope(k) {
+    const fadeIn = 0.12;
+    const fadeOut = 0.65; // start fading at 65% of life
+    if (k < fadeIn)  return k / fadeIn;
+    if (k > fadeOut) return Math.max(0, 1 - (k - fadeOut) / (1 - fadeOut));
+    return 1.0;
+  }
+
+  function update(dt, time) {
+    const posAttr   = geo.attributes.position;
+    const alphaAttr = geo.attributes.aAlpha;
+
+    for (let i = 0; i < N; i++) {
+      ages[i] += dt;
+      if (ages[i] >= lives[i]) { spawn(i, false); }
+
+      // Sinusoidal wobble — placeholder for the curl-noise field that Phase 3
+      // will introduce. Two octaves with per-particle phase keep neighboring
+      // particles from moving in lockstep.
+      const ph = phases[i];
+      const t  = time * 0.6 + ph;
+      const wx = Math.sin(t)            * 0.18;
+      const wz = Math.cos(t * 0.83)     * 0.18;
+      const wy = Math.sin(t * 0.47 + 1) * 0.06;
+
+      let vx = velocities[i*3+0] + wx * dt;
+      let vy = velocities[i*3+1] + wy * dt;
+      let vz = velocities[i*3+2] + wz * dt;
+      // Gentle damping keeps velocities bounded over long lifetimes.
+      vx *= 0.995; vy *= 0.998; vz *= 0.995;
+      velocities[i*3+0] = vx;
+      velocities[i*3+1] = vy;
+      velocities[i*3+2] = vz;
+
+      let px = positions[i*3+0] + vx * dt;
+      let py = positions[i*3+1] + vy * dt;
+      let pz = positions[i*3+2] + vz * dt;
+
+      // Toroidal wrap on Y so particles always feel like they're rising past
+      // the camera. X/Z wrap softly to keep the volume populated.
+      if (py >  AMBIENT_VOL.y) py -= AMBIENT_VOL.y * 2;
+      if (py < -AMBIENT_VOL.y) py += AMBIENT_VOL.y * 2;
+      if (px >  AMBIENT_VOL.x) px -= AMBIENT_VOL.x * 2;
+      if (px < -AMBIENT_VOL.x) px += AMBIENT_VOL.x * 2;
+      if (pz - AMBIENT_VOL.zOffset >  AMBIENT_VOL.z) pz -= AMBIENT_VOL.z * 2;
+      if (pz - AMBIENT_VOL.zOffset < -AMBIENT_VOL.z) pz += AMBIENT_VOL.z * 2;
+
+      positions[i*3+0] = px;
+      positions[i*3+1] = py;
+      positions[i*3+2] = pz;
+
+      alphas[i] = envelope(ages[i] / lives[i]);
+    }
+
+    posAttr.needsUpdate = true;
+    alphaAttr.needsUpdate = true;
+  }
+
+  function setPointScaleFromHeight(h) {
+    mat.uniforms.uPointScale.value = h * 0.5;
+  }
+
+  return { update, setPointScaleFromHeight, material: mat, points };
+})();
+
+// =============================================================
 // Orbit Controls
 // =============================================================
 const controls = new OrbitControls(camera, renderer.domElement);
@@ -2849,6 +3039,11 @@ function animate() {
   lastTime = now;
   envTime += dt;
 
+  // Ambient particle field (Phase 1: CPU-driven drift). Uses real-time dt so
+  // the field keeps breathing during pause / slow-mo — that's the intended
+  // feel; it's environment, not gameplay.
+  ambientField.update(dt, envTime);
+
   // Slow-mo tick — drives gameTimeScale. dtGame is what game logic and
   // effect lifetimes consume; rendering and input use real-time dt.
   if (slowmo.active) {
@@ -3233,6 +3428,7 @@ window.addEventListener('resize', () => {
     window.innerWidth * Math.min(window.devicePixelRatio, 2),
     window.innerHeight * Math.min(window.devicePixelRatio, 2),
   );
+  ambientField.setPointScaleFromHeight(window.innerHeight);
 });
 
 // =============================================================
