@@ -698,6 +698,25 @@ function getEdgeMaterial(color, ghost) {
   });
 }
 
+// Ghost body material — a faint additive fill so the landing preview reads
+// as a *volume* instead of a hairline wireframe. Additive blending keeps it
+// visually obvious that this is a hologram, not a real cube. Cached per
+// color since the ghost is rebuilt on every move.
+const _ghostBodyCache = new Map();
+function getGhostBodyMaterial(color) {
+  if (_ghostBodyCache.has(color)) return _ghostBodyCache.get(color);
+  const mat = new THREE.MeshBasicMaterial({
+    color: new THREE.Color(color),
+    transparent: true,
+    opacity: 0.12,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+    side: THREE.FrontSide,
+  });
+  _ghostBodyCache.set(color, mat);
+  return mat;
+}
+
 // Inner glowing core material — additive hot spot (the "molten" core)
 function getCoreMaterial(color) {
   return new THREE.MeshBasicMaterial({
@@ -848,6 +867,32 @@ const settlingCubes = [];
 function makeCube(color, opts = {}) {
   const group = new THREE.Group();
 
+  // Ghost piece: a hologram of where the active piece will land. A faint
+  // additive body fill plus a bright outer wireframe and a 88%-inset
+  // secondary wire — combination reads as "translucent preview" without
+  // becoming invisible (pure-wireframe ghosts dropped below the visibility
+  // floor against the case + bloom background, plan_fix_3 G16 revised).
+  if (opts.ghost) {
+    const body = new THREE.Mesh(cubeGeometry, getGhostBodyMaterial(color));
+    body.renderOrder = 1;
+    group.add(body);
+    const edgeMat = getEdgeMaterial(color, true);
+    edgeMat.opacity = 0.7; // boost from default 0.2 — line width is locked at
+                           // 1px in WebGL so opacity is the only way to push
+                           // visibility.
+    const outerEdges = new THREE.LineSegments(edgeGeometry, edgeMat);
+    outerEdges.renderOrder = 3;
+    group.add(outerEdges);
+    const innerMat = edgeMat.clone();
+    innerMat.opacity = 0.35;
+    const innerEdges = new THREE.LineSegments(edgeGeometry, innerMat);
+    innerEdges.scale.setScalar(0.88);
+    innerEdges.renderOrder = 3;
+    group.add(innerEdges);
+    group.userData.color = color;
+    return group;
+  }
+
   // For settling cubes we clone the locked material so emissiveIntensity can
   // be animated without affecting other locked cubes that share the cache.
   let mainMat;
@@ -861,11 +906,11 @@ function makeCube(color, opts = {}) {
   const mesh = new THREE.Mesh(cubeGeometry, mainMat);
   // Cubes render BEFORE the case walls so transparent-pass sort places
   // them behind the walls correctly regardless of camera angle.
-  mesh.renderOrder = opts.ghost ? 1 : 2;
+  mesh.renderOrder = 2;
   group.add(mesh);
 
   // Edge highlight — picks out the bevel
-  const edgeMat = getEdgeMaterial(color, opts.ghost);
+  const edgeMat = getEdgeMaterial(color, false);
   if (opts.settling || opts.active) {
     // Make edges transparent so opacity tween reads; locked cubes keep
     // opaque normal-blended edges by going through the standard path.
@@ -1356,10 +1401,6 @@ function rebuildGhostMesh() {
     for (let d = 0; d < DEPTH; d++) {
       const cube = makeCube(activePiece.color, { ghost: true });
       cube.position.copy(cellToWorld(col, row, d));
-      // Make ghost a thin wireframe-y look
-      cube.children.forEach(child => {
-        if (child.material) child.material.transparent = true;
-      });
       ghostGroup.add(cube);
     }
   }
@@ -1614,7 +1655,13 @@ function easeOutBack(t) {
 // CPU work is just "write attribute slots and bump needsUpdate." A 4-line
 // Tetris with shatterPower=2.5 used to allocate 2,400 Mesh objects + spike GC.
 // Now: zero allocations, one draw call regardless of shard count.
-const SHARD_CAPACITY = 2048;
+// Bumped 2048 → 4096 (plan_fix_3 G20): a top-out cascade can shatter up to
+// 600 cubes in ~250ms; even at the 1× shatterPower default that's 4800
+// shards. The ring buffer recycles old slots so we don't *need* the full
+// count on screen at once, but extra headroom keeps the leading rows of the
+// cascade alive long enough to read as a wave instead of a snap. Float32
+// allocation cost: ~80KB per attribute, fine.
+const SHARD_CAPACITY = 4096;
 const _baseShardGeo = new THREE.TetrahedronGeometry(0.22, 0);
 const shardGeo = new THREE.InstancedBufferGeometry();
 shardGeo.index = _baseShardGeo.index;
@@ -1851,16 +1898,34 @@ function shatter(cube) {
     _shardOrigin[i3 + 1] = _shardWorld.y + (Math.random() - 0.5) * 0.3;
     _shardOrigin[i3 + 2] = _shardWorld.z + (Math.random() - 0.5) * 0.3;
 
-    const angle = Math.random() * Math.PI * 2;
-    const speed = (4 + Math.random() * 6) * TWEAKS.shatterPower;
-    const vy = (2 + Math.random() * 4) * TWEAKS.shatterPower;
-    _shardVelocity[i3 + 0] = Math.cos(angle) * speed;
+    // Row-axis biased burst (plan_fix_3 G2): the row "explodes outward"
+    // along its long axis (X), arcs upward (Y), and biases positive Z so
+    // shards arc into the camera's space rather than disappearing behind
+    // the case. Outward magnitude in X scales with column distance from
+    // the row's center so a cell at the far edge throws shards harder
+    // than one at center — gives each row a coherent "blooming" silhouette
+    // instead of every cell exploding identically.
+    const xCenterOffset = _shardWorld.x; // case is centered at x=0
+    const xDir = xCenterOffset >= 0 ? 1 : -1;
+    const xOutwardBase = Math.abs(xCenterOffset) * 0.9;
+    const speedScale = TWEAKS.shatterPower;
+    const vx = (xDir * (xOutwardBase + 2 + Math.random() * 4)
+                + (Math.random() - 0.5) * 1.5) * speedScale;
+    const vy = (3 + Math.random() * 4) * speedScale;
+    const vz = (1.5 + Math.random() * 3.5) * speedScale; // bias toward camera (+Z)
+    _shardVelocity[i3 + 0] = vx;
     _shardVelocity[i3 + 1] = vy;
-    _shardVelocity[i3 + 2] = Math.sin(angle) * speed * 0.6;
+    _shardVelocity[i3 + 2] = vz;
 
-    _shardAngVel[i3 + 0] = (Math.random() - 0.5) * 12;
-    _shardAngVel[i3 + 1] = (Math.random() - 0.5) * 12;
-    _shardAngVel[i3 + 2] = (Math.random() - 0.5) * 12;
+    // Angular velocity aligned with linear motion — shards tumble end-over-end
+    // along the burst axis instead of spinning randomly in place. The tumble
+    // axis is roughly perpendicular to (v, world-up); we approximate with
+    // (-vz, 0, vx) so each shard rolls around its own travel direction.
+    const speed = Math.hypot(vx, vy, vz);
+    const tumble = (8 + Math.random() * 8) * (speed > 0.001 ? 1 / speed : 0);
+    _shardAngVel[i3 + 0] = -vz * tumble + (Math.random() - 0.5) * 3;
+    _shardAngVel[i3 + 1] = (Math.random() - 0.5) * 6;
+    _shardAngVel[i3 + 2] =  vx * tumble + (Math.random() - 0.5) * 3;
 
     _shardColor[i3 + 0] = _shardColorObj.r;
     _shardColor[i3 + 1] = _shardColorObj.g;
@@ -1984,10 +2049,11 @@ function makePanelEl(html, opts={}) {
   return el;
 }
 
-function panelHTML(label, value, sub) {
+function panelHTML(label, value, sub, valueClass = '') {
+  const cls = valueClass ? ` class="${valueClass}"` : '';
   return `<div class="panel-inner">
     <div style="font-size:10px; letter-spacing:0.22em; color:#8b93ad; text-transform:uppercase; font-weight:600;">${label}</div>
-    <div style="font-size:28px; font-weight:700; letter-spacing:0.02em; margin-top:4px; color:#fff; text-shadow: 0 0 18px rgba(108,240,255,0.3);">${value}</div>
+    <div${cls} style="font-size:28px; font-weight:700; letter-spacing:0.02em; margin-top:4px; color:#fff; text-shadow: 0 0 18px rgba(108,240,255,0.3);">${value}</div>
     ${sub ? `<div style="font-size:11px; letter-spacing:0.16em; color:#8b93ad; text-transform:uppercase; margin-top:6px;">${sub}</div>` : ''}
   </div>`;
 }
@@ -2140,6 +2206,10 @@ function renderMiniPiece(container, key) {
 }
 
 let _prevScore = 0;
+// Score-tick tween (G19): the panel shows _displayedScore which lerps toward
+// the real score on big deltas. Tick lives in the animate loop.
+let _displayedScore = 0;
+const scoreTween = { active: false, from: 0, to: 0, t: 0, dur: 0.4 };
 let _prevLines = 0;
 function pulsePanel(el, intensity) {
   // Animate the .panel-inner wrapper, NOT the outer element — CSS3DRenderer
@@ -2156,7 +2226,21 @@ function pulsePanel(el, intensity) {
 function updateHUD() {
   const dScore = score - _prevScore;
   const dLines = lines - _prevLines;
-  scoreEl.innerHTML = panelHTML('Score', score.toLocaleString(), `Level ${level}`);
+  // Big score deltas (line clears) tween from displayed → target over 0.4s
+  // so the HUD reads as a scoreboard ticking up rather than swapping text
+  // instantly. Soft-drop +1s skip the tween — they'd never finish before the
+  // next +1 anyway, and the constant tween reset would just look like jitter.
+  if (dScore >= 100) {
+    scoreTween.from = _displayedScore;
+    scoreTween.to = score;
+    scoreTween.t = 0;
+    scoreTween.active = true;
+  } else {
+    scoreTween.active = false;
+    _displayedScore = score;
+  }
+  scoreEl.innerHTML = panelHTML('Score', _displayedScore.toLocaleString(),
+                                `Level ${level}`, 'score-value');
   linesEl.innerHTML = panelHTML('Lines', lines, `Faces cleared`);
   // Re-bind drag (innerHTML wipes children but element reference is preserved)
   // Need to also re-render previews
@@ -2213,8 +2297,48 @@ function triggerGameOver() {
   document.getElementById('goScore').textContent = score.toLocaleString();
   document.getElementById('goLines').textContent = lines;
   document.getElementById('goLevel').textContent = level;
-  document.getElementById('gameOver').classList.add('show');
   playVoice('manbaout');
+
+  // G20: shatter the entire stack as a top-down cascade so the case visibly
+  // breaks before the overlay covers it. 12ms per row → a 20-row stack peaks
+  // in ~240ms, comfortably within the SHARD_CAPACITY budget. The shatter()
+  // call itself reuses the existing GPU pool, so no allocation per cube.
+  const ROW_STAGGER_MS = 12;
+  let scheduledRows = 0;
+  for (let r = ROWS - 1; r >= 0; r--) {
+    let rowHasCubes = false;
+    for (let c = 0; c < COLS; c++) {
+      if (cellMeshes[r][c]) { rowHasCubes = true; break; }
+    }
+    if (!rowHasCubes) continue;
+    const delay = scheduledRows * ROW_STAGGER_MS;
+    scheduledRows++;
+    setTimeout(() => {
+      for (let c = 0; c < COLS; c++) {
+        const slices = cellMeshes[r][c];
+        if (!slices) continue;
+        for (const cube of slices) {
+          shatter(cube);
+          stackGroup.remove(cube);
+        }
+        cellMeshes[r][c] = null;
+        board[r][c] = null;
+      }
+    }, delay);
+  }
+  // Catastrophic camera reaction — Tetris-strength shake + a transient bloom
+  // bump, both on the real (unscaled) renderer because the game over moment
+  // is dramatic by itself; we don't want to be in slow-mo while it plays.
+  shakeIntensity = Math.min(1.6, 1.6 * TWEAKS.shatterPower);
+  _bloomBaseStrength = bloomPass.strength;
+  bloomPass.strength = _bloomBaseStrength + 0.6;
+  setTimeout(() => { bloomPass.strength = _bloomBaseStrength; }, 700);
+
+  // Overlay reveals after the cascade has visibly broken the stack.
+  const overlayDelay = Math.max(400, scheduledRows * ROW_STAGGER_MS + 250);
+  setTimeout(() => {
+    document.getElementById('gameOver').classList.add('show');
+  }, overlayDelay);
 }
 document.getElementById('goRestart').addEventListener('click', () => {
   // Reset
@@ -2270,6 +2394,8 @@ document.getElementById('goRestart').addEventListener('click', () => {
   level = 1;
   _prevScore = 0;
   _prevLines = 0;
+  _displayedScore = 0;
+  scoreTween.active = false;
   gameOver = false;
   paused = false;
   activePiece = null;
@@ -2776,6 +2902,23 @@ function animate() {
     camera.position.lerpVectors(camTween.from, camTween.to, ease);
     controls.target.lerpVectors(camTween.fromTarget, camTween.toTarget, ease);
     if (k >= 1) camTween.active = false;
+  }
+
+  // ---- Score-tick tween (G19) ----
+  // Real-time (dt, not dtGame) so the count-up still finishes during slow-mo
+  // — slow-motion is a visual flourish on the *world*, the HUD should keep
+  // tracking real wall-clock so the player isn't waiting for it.
+  if (scoreTween.active) {
+    scoreTween.t += dt;
+    const k = Math.min(1, scoreTween.t / scoreTween.dur);
+    const ease = 1 - Math.pow(1 - k, 3); // easeOutCubic
+    _displayedScore = Math.round(scoreTween.from + (scoreTween.to - scoreTween.from) * ease);
+    const valEl = scoreEl.querySelector('.score-value');
+    if (valEl) valEl.textContent = _displayedScore.toLocaleString();
+    if (k >= 1) {
+      scoreTween.active = false;
+      _displayedScore = scoreTween.to;
+    }
   }
 
   // ---- Level-up flash (frame color + bloom bump) ----
