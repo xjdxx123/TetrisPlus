@@ -166,25 +166,52 @@
     100% { transform: translate(-50%, calc(-50% - 28px)) scale(0.92); opacity: 0; }
   }
 
-  /* Floating score popup (+800 etc) */
-  .score-popup {
-    position: fixed;
-    z-index: 7;
+  /* Score burst — replaces the old 2D popup. The OUTER element receives the
+     CSS3DRenderer transform every frame, so we animate the INNER wrapper
+     (scale, color, shake, blur) without fighting the renderer. The text
+     overshoots aggressively, jitters for ~120ms, then dissolves outward
+     while the particle burst takes over. */
+  .score-burst-outer {
     pointer-events: none;
-    font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
-    font-size: 38px;
-    font-weight: 800;
+    user-select: none;
+    will-change: transform;
+  }
+  .score-burst-inner {
+    font-family: 'SF Mono', ui-monospace, Menlo, Consolas, monospace;
+    font-size: 56px;
+    font-weight: 900;
     letter-spacing: 0.04em;
-    color: #fff;
+    white-space: nowrap;
+    transform-origin: center;
     opacity: 0;
-    transform: translate(-50%, -50%);
+    color: #ffffff;
+    /* color via inline style; text-shadow inline too so we can color-tint */
   }
-  .score-popup.show { animation: score-popup 1.0s cubic-bezier(0.15, 0.7, 0.2, 1) forwards; }
-  @keyframes score-popup {
-    0%   { transform: translate(-50%, -50%) scale(0.6); opacity: 0; }
-    14%  { transform: translate(-50%, calc(-50% - 16px)) scale(1.05); opacity: 1; }
-    100% { transform: translate(-50%, calc(-50% - 110px)) scale(0.92); opacity: 0; }
+  .score-burst-inner.show {
+    animation: score-burst 1.0s cubic-bezier(0.16, 0.7, 0.2, 1) forwards;
   }
+  /* Phase A (0–0.10s): explosive spawn — overshoot to 1.7×, peak brightness.
+     Phase B (0.10–0.22s): shake left/right 4 frames while shrinking back.
+     Phase C (0.22–0.40s): pull back to 1.0×, hold full opacity briefly.
+     Phase D (0.40–1.00s): dissolve — scale UP again, blur, fade to 0.
+     The final upscale during fade reinforces the "exploding into pieces"
+     read as the particle burst takes over. */
+  @keyframes score-burst {
+    0%   { transform: scale(0.45); opacity: 0; filter: blur(10px) brightness(2.4); }
+    8%   { transform: scale(1.7);  opacity: 1; filter: blur(0)    brightness(2.0); }
+    12%  { transform: scale(1.55) translate(-4px, 1px);  opacity: 1; filter: blur(0) brightness(1.7); }
+    15%  { transform: scale(1.55) translate( 4px,-2px);  opacity: 1; filter: blur(0) brightness(1.6); }
+    18%  { transform: scale(1.5)  translate(-3px, 2px);  opacity: 1; filter: blur(0) brightness(1.5); }
+    21%  { transform: scale(1.5)  translate( 2px,-1px);  opacity: 1; filter: blur(0) brightness(1.45); }
+    35%  { transform: scale(1.0);  opacity: 1; filter: blur(0)    brightness(1.2); }
+    50%  { transform: scale(1.15); opacity: 0.85; filter: blur(2px) brightness(1.3); }
+    100% { transform: scale(2.4);  opacity: 0; filter: blur(14px) brightness(0.8); }
+  }
+  /* Bigger, hotter burst for double/triple/tetris — same keyframe but
+     prefixed scales for higher intensity. */
+  .score-burst-inner.tier-2 { font-size: 68px; }
+  .score-burst-inner.tier-3 { font-size: 84px; }
+  .score-burst-inner.tier-4 { font-size: 104px; }
 
   .help-toggle, .audio-toggle {
     position: fixed;
@@ -309,7 +336,6 @@
 
   <div class="levelup" id="levelup"></div>
   <div class="clear-callout" id="clearCallout"></div>
-  <div class="score-popup" id="scorePopup"></div>
 
   <div class="game-over" id="gameOver">
     <div class="panel">
@@ -2388,7 +2414,9 @@ document.getElementById('goRestart').addEventListener('click', () => {
   levelUp.active = false;
   levelUpEl.classList.remove('show');
   clearCalloutEl.classList.remove('show');
-  scorePopupEl.classList.remove('show');
+  // Cancel any in-flight score bursts so a quick restart doesn't leave
+  // animations playing over the new game.
+  resetScoreBursts();
   score = 0;
   lines = 0;
   level = 1;
@@ -2567,24 +2595,234 @@ function triggerCallout(rowCount, color) {
   clearCalloutEl.classList.add('show');
 }
 
-// Floating score popup — anchored to a world position projected to screen
-const scorePopupEl = document.getElementById('scorePopup');
-const _popupProj = new THREE.Vector3();
+// =============================================================
+// Score burst — explosive 3D-anchored popup + particle dissolve.
+// =============================================================
+// Three composed effects fire on each line clear:
+//
+//   1. CSS3D text popup (.score-burst-outer / .score-burst-inner) anchored
+//      at the row's world center. The keyframe animation overshoots, jitters,
+//      then dissolves; the inner-element animation doesn't fight the
+//      CSS3DRenderer transform on the outer.
+//
+//   2. Particle burst into the existing shard + sparkle GPU pools — voxel
+//      fragments + neon dust radiating outward, color-tinted to the row
+//      average. Tangential bias on the velocity gives curved trajectories;
+//      bloom-on-bright-additive does the motion-blur work without a
+//      stretched-billboard shader.
+//
+//   3. Shockwave ring (3+ row clears only) — a thin additive torus that
+//      scales from 0.4 → ~6 with opacity 0.9 → 0 over 0.55s. Pooled, two
+//      slots so back-to-back triples don't cut each other off.
+//
+// Counts and energies scale with rowCount. A Tetris is roughly 4× the dust
+// of a single — exponential, not linear, so the read jumps in tier.
+
+// ---- CSS3D popup pool ------------------------------------------------------
+const POPUP_POOL_SIZE = 4;
+const popupPool = [];
+for (let i = 0; i < POPUP_POOL_SIZE; i++) {
+  const outer = document.createElement('div');
+  outer.className = 'score-burst-outer';
+  const inner = document.createElement('div');
+  inner.className = 'score-burst-inner';
+  inner.textContent = '';
+  outer.appendChild(inner);
+  const obj = new CSS3DObject(outer);
+  obj.scale.setScalar(0.025);     // matches HUD panel world scale
+  obj.visible = false;
+  cssScene.add(obj);
+  popupPool.push({ obj, outer, inner, busy: false, endsAt: 0 });
+}
+function acquireScorePopup() {
+  for (const slot of popupPool) if (!slot.busy) return slot;
+  // Pool exhausted (rare — 4 simultaneous clears within 1s) — recycle the
+  // oldest by end-time so we never silently drop a popup.
+  let oldest = popupPool[0];
+  for (const slot of popupPool) if (slot.endsAt < oldest.endsAt) oldest = slot;
+  return oldest;
+}
+function resetScoreBursts() {
+  for (const slot of popupPool) {
+    slot.inner.classList.remove('show');
+    slot.obj.visible = false;
+    slot.busy = false;
+    slot.endsAt = 0;
+  }
+}
+
+// ---- Shockwave ring pool (3+ rows) -----------------------------------------
+const _shockwaveGeo = new THREE.RingGeometry(0.92, 1.0, 64, 1);
+const SHOCKWAVE_POOL_SIZE = 2;
+const shockwavePool = [];
+for (let i = 0; i < SHOCKWAVE_POOL_SIZE; i++) {
+  const mat = new THREE.MeshBasicMaterial({
+    color: 0xffffff,
+    transparent: true,
+    opacity: 0,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+  });
+  const mesh = new THREE.Mesh(_shockwaveGeo, mat);
+  mesh.visible = false;
+  // Face the camera at trigger time; render after walls so it isn't dimmed
+  mesh.renderOrder = 5;
+  scene.add(mesh);
+  shockwavePool.push({ mesh, mat, busy: false });
+}
+const shockwaveFx = []; // {slot, t, dur, startScale, peakScale, color}
+const _shockNormal = new THREE.Vector3();
+function triggerShockwave(worldPos, color, intensity) {
+  let slot = null;
+  for (const s of shockwavePool) if (!s.busy) { slot = s; break; }
+  if (!slot) slot = shockwavePool[0]; // recycle oldest if both busy
+  slot.busy = true;
+  slot.mesh.position.copy(worldPos);
+  // Orient ring so its plane faces the camera (look-at the camera position)
+  slot.mesh.lookAt(camera.position);
+  slot.mat.color.setHex(color);
+  slot.mat.opacity = 0.9;
+  slot.mesh.scale.setScalar(0.4);
+  slot.mesh.visible = true;
+  shockwaveFx.push({
+    slot,
+    t: 0,
+    dur: 0.55,
+    peakScale: 4 + intensity * 1.4, // tetris pushes ~9.5× radius
+  });
+}
+
+// ---- Particle burst from popup origin --------------------------------------
+const _burstColor = new THREE.Color();
+function spawnScorePopupBurst(worldPos, color, intensity) {
+  // intensity = rowCount (1..4). Tier the densities so a Tetris reads as a
+  // distinctly bigger event than a single, not just a louder one.
+  const SHARD_COUNT   = Math.round((20 + intensity * 22) * TWEAKS.shatterPower);
+  const SPARKLE_COUNT = Math.round((50 + intensity * 70) * TWEAKS.shatterPower);
+  const SPEED_BASE    = 5 + intensity * 1.3;  // m/s
+  _burstColor.set(color);
+
+  // ---- voxel/glass shards ----
+  for (let i = 0; i < SHARD_COUNT; i++) {
+    const idx = _shardCursor;
+    _shardCursor = (_shardCursor + 1) % SHARD_CAPACITY;
+    const i3 = idx * 3;
+    // Uniform-random direction on a sphere
+    const theta = Math.random() * Math.PI * 2;
+    const u = 2 * Math.random() - 1;
+    const s = Math.sqrt(Math.max(0, 1 - u * u));
+    const dx = s * Math.cos(theta);
+    const dy = u;
+    const dz = s * Math.sin(theta);
+    const speed = SPEED_BASE * (0.6 + Math.random() * 0.8);
+    // Tangential component for curved trajectories — perpendicular to the
+    // outward direction, varying sign per particle so the burst has a
+    // swirl rather than a uniform helical bias.
+    const tangX = -dz, tangZ = dx;
+    const curve = (Math.random() - 0.5) * speed * 0.6;
+    _shardOrigin[i3 + 0] = worldPos.x + (Math.random() - 0.5) * 0.3;
+    _shardOrigin[i3 + 1] = worldPos.y + (Math.random() - 0.5) * 0.3;
+    _shardOrigin[i3 + 2] = worldPos.z + (Math.random() - 0.5) * 0.3;
+    _shardVelocity[i3 + 0] = dx * speed + tangX * curve;
+    _shardVelocity[i3 + 1] = dy * speed + 1.2;          // slight upward bias
+    _shardVelocity[i3 + 2] = dz * speed + tangZ * curve + 1.5; // toward camera
+    _shardAngVel[i3 + 0] = (Math.random() - 0.5) * 18;
+    _shardAngVel[i3 + 1] = (Math.random() - 0.5) * 18;
+    _shardAngVel[i3 + 2] = (Math.random() - 0.5) * 18;
+    _shardColor[i3 + 0] = _burstColor.r;
+    _shardColor[i3 + 1] = _burstColor.g;
+    _shardColor[i3 + 2] = _burstColor.b;
+    _shardSpawnTime[idx] = _shardClock;
+    _shardMaxLife[idx]   = 0.7 + Math.random() * 0.5;
+    _shardScale[idx]     = 0.45 + Math.random() * 0.55;
+  }
+  _aOriginAttr.needsUpdate    = true;
+  _aVelocityAttr.needsUpdate  = true;
+  _aAngVelAttr.needsUpdate    = true;
+  _aColorAttr.needsUpdate     = true;
+  _aSpawnAttr.needsUpdate     = true;
+  _aMaxLifeAttr.needsUpdate   = true;
+  _aScaleAttr.needsUpdate     = true;
+
+  // ---- neon dust (sparkles) — denser, faster, shorter-lived than shards.
+  // High speed + short life + bloom = streak/motion-blur read at no shader
+  // cost. Each sparkle is a billboarded Point with the existing additive
+  // material.
+  for (let i = 0; i < SPARKLE_COUNT; i++) {
+    const idx = _sparkleCursor;
+    _sparkleCursor = (_sparkleCursor + 1) % SPARKLE_CAPACITY;
+    const i3 = idx * 3;
+    const theta = Math.random() * Math.PI * 2;
+    const u = 2 * Math.random() - 1;
+    const s = Math.sqrt(Math.max(0, 1 - u * u));
+    const dx = s * Math.cos(theta);
+    const dy = u;
+    const dz = s * Math.sin(theta);
+    const speed = SPEED_BASE * (0.9 + Math.random() * 1.1);
+    _sparkleOrigin[i3 + 0]   = worldPos.x + (Math.random() - 0.5) * 0.2;
+    _sparkleOrigin[i3 + 1]   = worldPos.y + (Math.random() - 0.5) * 0.2;
+    _sparkleOrigin[i3 + 2]   = worldPos.z + (Math.random() - 0.5) * 0.2;
+    _sparkleVelocity[i3 + 0] = dx * speed;
+    _sparkleVelocity[i3 + 1] = dy * speed + 2.0;
+    _sparkleVelocity[i3 + 2] = dz * speed + 1.8;
+    _sparkleColor[i3 + 0]    = _burstColor.r;
+    _sparkleColor[i3 + 1]    = _burstColor.g;
+    _sparkleColor[i3 + 2]    = _burstColor.b;
+    _sparkleSpawn[idx]       = _shardClock;
+    _sparkleLife[idx]        = 0.5 + Math.random() * 0.5;
+  }
+  _spOriginAttr.needsUpdate   = true;
+  _spVelocityAttr.needsUpdate = true;
+  _spColorAttr.needsUpdate    = true;
+  _spSpawnAttr.needsUpdate    = true;
+  _spLifeAttr.needsUpdate     = true;
+}
+
+// ---- Public entry: replaces the legacy 2D popup ----------------------------
+const _popupWorldPos = new THREE.Vector3();
 function triggerScorePopup(amount, rowIndex, color) {
-  // Project clear-row world position onto screen
+  // Anchor the burst at the cleared row's world center, slightly toward
+  // camera so it pops in front of cubes.
   const worldY = -PLAY_H / 2 + (rowIndex + 0.5) * CELL;
-  _popupProj.set(0, worldY, 0).project(camera);
-  const sx = (_popupProj.x * 0.5 + 0.5) * window.innerWidth;
-  const sy = (-_popupProj.y * 0.5 + 0.5) * window.innerHeight;
-  scorePopupEl.textContent = `+${amount.toLocaleString()}`;
+  _popupWorldPos.set(0, worldY, 1.5);
+
+  // (1) Text popup
+  const slot = acquireScorePopup();
+  slot.busy = true;
+  slot.endsAt = performance.now() + 1000;
+  slot.obj.position.copy(_popupWorldPos);
+  // Always face the camera — billboarded text reads at any orbit angle.
+  slot.obj.lookAt(camera.position);
+  const intensity = Math.max(1, Math.min(4, amount >= 800 ? 4 : amount >= 500 ? 3 : amount >= 300 ? 2 : 1));
+  slot.inner.className = 'score-burst-inner tier-' + intensity;
+  slot.inner.textContent = `+${amount.toLocaleString()}`;
   const hex = '#' + color.toString(16).padStart(6, '0');
-  scorePopupEl.style.left = `${sx}px`;
-  scorePopupEl.style.top  = `${sy}px`;
-  scorePopupEl.style.color = hex;
-  scorePopupEl.style.textShadow = `0 0 18px ${hex}, 0 0 48px ${hex}`;
-  scorePopupEl.classList.remove('show');
-  void scorePopupEl.offsetWidth;
-  scorePopupEl.classList.add('show');
+  slot.inner.style.color = hex;
+  // Hot rim glow that bloom can lift further on top of additive particles.
+  slot.inner.style.textShadow =
+    `0 0 8px ${hex}, 0 0 22px ${hex}, 0 0 60px ${hex}, 0 0 96px rgba(255,255,255,0.55)`;
+  slot.obj.visible = true;
+  // Restart the animation: remove + force reflow + add.
+  slot.inner.classList.remove('show');
+  void slot.inner.offsetWidth;
+  slot.inner.classList.add('show');
+  // Free the slot after the keyframe duration. Use real wall-clock so the
+  // free doesn't get stretched by slow-mo (the CSS animation is wall-clock
+  // too, so they stay in sync).
+  setTimeout(() => {
+    slot.busy = false;
+    slot.obj.visible = false;
+  }, 1000);
+
+  // (2) Particle burst — fires immediately; the text sits on top in screen
+  // space and dissolves into the (already-spreading) particles.
+  spawnScorePopupBurst(_popupWorldPos, color, intensity);
+
+  // (3) Shockwave ring on triple/tetris.
+  if (intensity >= 3) {
+    triggerShockwave(_popupWorldPos, color, intensity);
+  }
 }
 
 // =============================================================
@@ -2825,6 +3063,24 @@ function animate() {
       _impactRing2.mesh.visible = false;
       _impactRing3.mesh.visible = false;
       impactFx.active = false;
+    }
+  }
+
+  // ---- Score-burst shockwave rings (3+ row clears) ----
+  for (let i = shockwaveFx.length - 1; i >= 0; i--) {
+    const fx = shockwaveFx[i];
+    fx.t += dtGame;
+    const k = Math.min(1, fx.t / fx.dur);
+    // easeOutQuart on scale — fast initial expansion, gentle settle.
+    const eS = 1 - Math.pow(1 - k, 4);
+    fx.slot.mesh.scale.setScalar(0.4 + eS * fx.peakScale);
+    // Opacity fades on a steeper curve so the ring vanishes before its outline
+    // gets pixelated by tone mapping.
+    fx.slot.mat.opacity = Math.pow(1 - k, 1.4) * 0.9;
+    if (k >= 1) {
+      fx.slot.mesh.visible = false;
+      fx.slot.busy = false;
+      shockwaveFx.splice(i, 1);
     }
   }
 
