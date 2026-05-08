@@ -27,10 +27,10 @@ export const STAGES = {
     palette:    [0xaee7ff, 0xff8acb, 0xc8b3ff, 0x6cf0ff],
     nebulaPalette: 'deep-cyan',
     clearRecipe: {
-      single: { sparkle: true, flash: false, shockwave: false, veil: false },
-      double: { sparkle: true, flash: false, shockwave: false, veil: false },
-      triple: { sparkle: true, flash: false, shockwave: true,  veil: false },
-      tetris: { sparkle: true, flash: true,  shockwave: true,  veil: true  },
+      single: { sparkle: true, flash: false, shockwave: false, veil: false, envReaction: false },
+      double: { sparkle: true, flash: false, shockwave: false, veil: false, envReaction: false },
+      triple: { sparkle: true, flash: false, shockwave: true,  veil: false, envReaction: false },
+      tetris: { sparkle: true, flash: true,  shockwave: true,  veil: true,  envReaction: false },
     },
   },
 
@@ -41,13 +41,18 @@ export const STAGES = {
     palette:    [0xffb060, 0xff8a3c, 0xff5018, 0xffd0a0],
     nebulaPalette: 'ember',
     clearRecipe: {
-      single: { sparkle: true, flash: false, shockwave: false, veil: false },
-      double: { sparkle: true, flash: false, shockwave: false, veil: false },
-      triple: { sparkle: true, flash: false, shockwave: true,  veil: false },
-      tetris: { sparkle: true, flash: true,  shockwave: true,  veil: true  },
+      single: { sparkle: true, flash: false, shockwave: false, veil: false, envReaction: false },
+      double: { sparkle: true, flash: false, shockwave: false, veil: false, envReaction: false },
+      triple: { sparkle: true, flash: false, shockwave: true,  veil: false, envReaction: false },
+      tetris: { sparkle: true, flash: true,  shockwave: true,  veil: true,  envReaction: false },
     },
   },
 
+  // Stage 8c — `aurora.tetris.envReaction = true` is the seed env-reaction
+  // gate. Vertical light streaks rise above the case on Tetris, in the
+  // stage accent (sky blue). Per `plan_particle_2.md` §9.5: pick one stage
+  // to demonstrate the layer; per-stage env reactions (water ripple for
+  // sea, sand kick for desert) are content work that comes later.
   'aurora': {
     label: 'Aurora',
     sparkleHex: 0xa0e6ff,                 // pale blue
@@ -55,10 +60,10 @@ export const STAGES = {
     palette:    [0xa0e6ff, 0x6cb0ff, 0xb0ffd0, 0xd0ecff],
     nebulaPalette: 'aurora',
     clearRecipe: {
-      single: { sparkle: true, flash: false, shockwave: false, veil: false },
-      double: { sparkle: true, flash: false, shockwave: false, veil: false },
-      triple: { sparkle: true, flash: false, shockwave: true,  veil: false },
-      tetris: { sparkle: true, flash: true,  shockwave: true,  veil: true  },
+      single: { sparkle: true, flash: false, shockwave: false, veil: false, envReaction: false },
+      double: { sparkle: true, flash: false, shockwave: false, veil: false, envReaction: false },
+      triple: { sparkle: true, flash: false, shockwave: true,  veil: false, envReaction: false },
+      tetris: { sparkle: true, flash: true,  shockwave: true,  veil: true,  envReaction: true  },
     },
   },
 };

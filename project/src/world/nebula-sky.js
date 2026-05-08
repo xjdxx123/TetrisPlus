@@ -16,7 +16,7 @@
 import * as THREE from 'three';
 import VERT from '../shaders/nebula.vert.glsl?raw';
 import FRAG from '../shaders/nebula.frag.glsl?raw';
-import { getPalette, PALETTE_NAMES } from '../config/palettes.js';
+import { getPalette, PALETTE_NAMES, getPaletteForHue } from '../config/palettes.js';
 
 export function createNebulaSky({
   radius = 120,
@@ -57,6 +57,10 @@ export function createNebulaSky({
 
   let currentName = initialPalette;
   let nextName = initialPalette;
+  // Track hue independently — set by `crossfadeToHue` callers, null when
+  // the current palette is name-based (set via `crossfadeTo`). Lets the
+  // level-up logic know what hue to flash *away* from.
+  let currentHue = null;
   let crossfadeStart = 0;
   let crossfadeDuration = 0;
 
@@ -102,11 +106,36 @@ export function createNebulaSky({
       crossfadeStart = mat.uniforms.uTime.value;
       crossfadeDuration = durationSec;
       nextName = name;
+      currentHue = null; // name-based path clears the hue tracker
+    },
+
+    /**
+     * Crossfade to a hue-generated palette. Same machinery as `crossfadeTo`,
+     * just with a procedurally generated DataTexture from `getPaletteForHue`.
+     * `currentHue` getter exposes the hue post-fade so the level-up wash
+     * knows what to flash *away* from.
+     */
+    crossfadeToHue(hue, durationSec = 2.5) {
+      const tex = getPaletteForHue(hue);
+      if (mat.uniforms.uPaletteB.value === tex && crossfadeDuration === 0) return;
+      if (crossfadeDuration > 0) {
+        mat.uniforms.uPaletteA.value = mat.uniforms.uPaletteB.value;
+      }
+      mat.uniforms.uPaletteB.value = tex;
+      mat.uniforms.uStageBlend.value = 0;
+      crossfadeStart = mat.uniforms.uTime.value;
+      crossfadeDuration = durationSec;
+      // Use a synthetic name so any code reading `current` for diagnostics
+      // gets something meaningful. Round to integer for stability.
+      const h = (((hue % 360) + 360) % 360);
+      nextName = `hue:${Math.round(h)}`;
+      currentHue = h;
     },
 
     setIntensity(v) { mat.uniforms.uIntensity.value = v; },
     get intensity() { return mat.uniforms.uIntensity.value; },
     get current()   { return currentName; },
+    get currentHue() { return currentHue; }, // null when name-based, else 0..360
     get available() { return PALETTE_NAMES; },
 
     dispose() {

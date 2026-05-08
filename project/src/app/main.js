@@ -9,6 +9,9 @@ import { createPunchZoom } from '../camera/punch-zoom.js';
 import { createAudioPlayback } from '../audio/playback.js';
 import { createStarfield } from '../world/starfield.js';
 import { createNebulaSky } from '../world/nebula-sky.js';
+import { createMoon } from '../world/moon.js';
+import { hueForLevel, pickFlashHue } from '../config/nebula-progression.js';
+import { paletteFromHue, STAGE_HUE_FOR_NAME } from '../config/palettes.js';
 import { createBreathe } from '../camera/breathe.js';
 import { createStageController, STAGE_EVENTS } from '../vfx/stage-controller.js';
 import { STAGES } from '../config/stages.js';
@@ -21,6 +24,8 @@ import { createBeatGrid } from '../audio/reactive/beat-grid.js';
 import { createPlaybackProgress } from '../audio/playback-progress.js';
 import { createBindings } from '../vfx/reactive/bindings.js';
 import { createEffectsPanel } from '../ui/effects-panel.js';
+import { bakeCurlNoise3D } from '../vfx/curl-noise.js';
+import { createEnvReaction } from '../vfx/emitters/env-reaction.js';
 
 // Shader sources are imported as raw strings via Vite's ?raw suffix.
 // Files live under src/shaders/. This unlocks shader hot-reload during dev
@@ -158,14 +163,47 @@ const starfield = createStarfield({
 scene.add(starfield.group);
 
 // Stage 10 — procedural nebula sky behind everything. Renders before stars
-// (renderOrder -10 vs starfield -1). Try `__nebula.crossfadeTo('ember')`
-// or `'aurora'` from the console to see palette transitions.
+// (renderOrder -10 vs starfield -1). Initial palette is hue-based (matches
+// the level-1 entry in LEVEL_HUE_BANDS); subsequent crossfades come from
+// the player override, level-progression, or STAGE_CHANGE handlers.
+//   __nebula.crossfadeToHue(280)   // violet
+//   __nebula.crossfadeTo('ember')  // legacy named palette
 const nebula = createNebulaSky({
   radius: 130,
   initialPalette: 'deep-cyan',
   intensity: 0.4,
 });
 scene.add(nebula.mesh);
+// Seed the hue-based path so the level-1 visible color matches what
+// `hueForLevel(1)` says it should be; without this the first level-up
+// would fade from the named-palette texture to a hue-based one and the
+// step would be visibly larger than intended.
+nebula.crossfadeToHue(hueForLevel(1), 0.0);
+
+// Stage 10 — procedural moon (per the violet-halo reference, screenshots/
+// image.png). A high-segment SphereGeometry with a custom shader doing
+// Lambertian + FBM surface detail, surrounded by a camera-facing halo
+// billboard with additive bloom-eligible falloff. The disc is NOT bloom-
+// eligible (moons are reflective, not luminous); the HALO is bloom-eligible
+// (that's the dreamy violet aura in the reference).
+//
+// Position is above the case (high Y) and slightly off-center, NOT directly
+// behind it — sitting the moon directly behind the playfield reads as
+// oppressive (the case visually presses against it). Above-and-offset
+// puts it clearly "in the sky."
+const moon = createMoon({
+  position: new THREE.Vector3(-15, 25, -28),
+  radius: 12,
+  segments: 96,
+  // Mostly-frontal sun keeps the disc nearly full, like the reference.
+  // The terminator is softened separately so the day/night boundary
+  // doesn't read as a hard line.
+  sunDir: new THREE.Vector3(0.25, 0.30, 0.95),
+  terminatorSoftness: 0.55,
+  haloColor: 0xb088ff,
+  haloIntensity: 0.85,
+});
+scene.add(moon.group);
 
 // Stage 8 — stage controller owns the active stage palette + recipe and
 // emits STAGE_CHANGE when switched. Subscribers (nebula crossfade, future
@@ -173,10 +211,22 @@ scene.add(nebula.mesh);
 // to the controller — pure event-driven decoupling per §1.5.
 const stageController = createStageController({ bus, initial: 'cyan-void' });
 
-// Stage 8 ↔ Stage 10 wiring: stage change drives the nebula crossfade.
-// Neither side knows about the other — they meet only through the bus.
+// Stage 8 ↔ Stage 10 wiring: stage change drives the nebula crossfade,
+// unless the player has explicitly pinned a hue via the effects-panel
+// slider. Neither side knows about the other — they meet only through
+// the bus and the `_userOverrideHue` flag.
+//
+// We translate the stage's named palette into a representative hue via
+// STAGE_HUE_FOR_NAME, so the nebula crossfade goes through the same
+// hue-based path as level-up and the player override. Keeps the resting-
+// hue tracker accurate so the *next* level-up's wash starts from where
+// the screen actually is.
 bus.on(STAGE_EVENTS.STAGE_CHANGE, ({ spec }) => {
-  nebula.crossfadeTo(spec.nebulaPalette, 2.5);
+  if (_userOverrideHue != null) return;   // player choice wins
+  const stageHue = STAGE_HUE_FOR_NAME[spec.nebulaPalette];
+  if (stageHue == null) return;            // unknown palette — leave nebula alone
+  nebula.crossfadeToHue(stageHue, 2.5);
+  _currentRestingHue = stageHue;
 });
 
 const breathe = createBreathe({ amplitudeDeg: 0.4, periodSec: 9 });
@@ -219,7 +269,7 @@ composer.addPass(afterimagePass);
 
 // Stage 6 — chromatic aberration. Radial UV offset; uAmount bound to
 // bands.air.norm in the bindings layer so high-end shimmer drives it.
-const chromaticPass = createChromaticPass({ amount: 0.0 });
+const chromaticPass = createChromaticPass({ amount: 1.0 });
 composer.addPass(chromaticPass);
 
 const VignetteShader = {
@@ -284,17 +334,22 @@ function makeSparkleTexture() {
 }
 
 // =============================================================
-// Ambient particle field — Phase 1 of plan_particle_1.md
+// Ambient particle field — Stages 1 + 4 of plan_particle_2.md
 //   500 CPU-driven, additively-billboarded sprites that drift around the
 //   playfield. Single THREE.Points draw call. All per-particle state lives
 //   in pre-allocated Float32Arrays — no per-frame allocations on the hot
-//   path. The motion is intentionally simple sinusoidal drift; Phase 3 will
-//   replace the integrator with a curl-noise field on the GPU and Phase 4
-//   will wire emission rate to audio bands. The interface is therefore
-//   designed so those upgrades are localized to update().
+//   path. Motion comes from a baked curl-noise field (vfx/curl-noise.js),
+//   which is divergence-free so particles never converge into "rivers."
+//   Stage 9 will move the integrator to a GPU ping-pong sim; the interface
+//   below is designed so that swap is local to update().
 // =============================================================
 const AMBIENT_COUNT = 500;
 const AMBIENT_VOL = { x: 32, y: 28, z: 18, zOffset: -6 };
+
+// Curl-noise field shared by the ambient layer (and any future emitter that
+// wants the same swirl shape). Bake once at boot — the cost (<100 ms for
+// 64³) only hits the loading screen, which already tolerates a beat.
+const ambientCurl = bakeCurlNoise3D({ size: 64, frequency: 1.6, seed: 1337 });
 
 function makeAmbientTexture() {
   const c = document.createElement('canvas');
@@ -322,7 +377,6 @@ const ambientField = (() => {
   const sizes = new Float32Array(N);
   const colors = new Float32Array(N * 3);
   const alphas = new Float32Array(N);
-  const phases = new Float32Array(N);
 
   function spawn(i, randomizeAge) {
     positions[i*3+0] = (Math.random()*2-1) * AMBIENT_VOL.x;
@@ -334,7 +388,6 @@ const ambientField = (() => {
     lives[i] = 7.0 + Math.random() * 6.0;
     ages[i] = randomizeAge ? Math.random() * lives[i] : 0;
     sizes[i] = 0.35 + Math.random() * 1.1;
-    phases[i] = Math.random() * Math.PI * 2;
     // Disciplined palette: cyan-blue-violet arc (hue 0.50..0.72), avoiding the
     // saturated reds/greens that would clash with active piece highlights.
     const hue = 0.50 + Math.random() * 0.22;
@@ -370,6 +423,9 @@ const ambientField = (() => {
     depthTest: true,
     blending: THREE.AdditiveBlending,
   });
+  // Stash the curl texture on the material so a future GPU integrator
+  // (Stage 9) can lift it into a uniform without re-baking.
+  mat.userData.curlTexture = ambientCurl.texture;
 
   const points = new THREE.Points(geo, mat);
   points.frustumCulled = false;
@@ -386,35 +442,101 @@ const ambientField = (() => {
     return 1.0;
   }
 
+  // Stage 4 tunables. `flowSpeed` is world-units / sec along the curl
+  // direction — the dominant drift. `curlScale` is sample rate per world
+  // unit; smaller = larger swirls. The volume is roughly 64 wide so we
+  // want ~2 swirl features visible across it (curlScale ≈ 0.04).
+  // `inwardBias` blends a unit vector toward the playfield center into
+  // the curl direction; it's the §1.4 attention-guidance lever — kept at
+  // zero by default so the field reads as ambient atmosphere, not a
+  // funnel. `upBias` preserves the gentle "rising past the camera" feel
+  // from the original wobble.
+  let flowSpeed   = 0.85;
+  let curlScale   = 0.04;
+  let inwardBias  = 0.0;
+  const upBias    = 0.18;
+  // Flow-target smoothing time-constant. Smaller = velocity tracks the
+  // sampled curl more rigidly; larger = velocity glides through swirl
+  // boundaries instead of snapping to them. 0.45 reads as "drifting".
+  const TAU = 0.45;
+
+  // Reused scratch vector — keep the hot loop allocation-free.
+  const _curl = new Float32Array(3);
+
   function update(dt, time) {
     const posAttr   = geo.attributes.position;
     const alphaAttr = geo.attributes.aAlpha;
+    // Low-pass coefficient. Per-frame `dt` varies (especially under
+    // slow-mo / pause), so derive `k` from `dt` rather than baking a
+    // fixed multiplier — keeps the response time-correct under any
+    // frame budget.
+    const k = 1 - Math.exp(-dt / TAU);
+    // Slow temporal drift of the sampled point so even stationary
+    // particles see the field "breathe" — keeps the volume from
+    // looking frozen in still moments. Coefficient is small; the
+    // CPU integration is the dominant motion source.
+    const tShift = time * 0.01;
 
     for (let i = 0; i < N; i++) {
       ages[i] += dt;
       if (ages[i] >= lives[i]) { spawn(i, false); }
 
-      // Sinusoidal wobble — placeholder for the curl-noise field that Phase 3
-      // will introduce. Two octaves with per-particle phase keep neighboring
-      // particles from moving in lockstep.
-      const ph = phases[i];
-      const t  = time * 0.6 + ph;
-      const wx = Math.sin(t)            * 0.18;
-      const wz = Math.cos(t * 0.83)     * 0.18;
-      const wy = Math.sin(t * 0.47 + 1) * 0.06;
+      let px = positions[i*3+0];
+      let py = positions[i*3+1];
+      let pz = positions[i*3+2];
 
-      let vx = velocities[i*3+0] + wx * dt;
-      let vy = velocities[i*3+1] + wy * dt;
-      let vz = velocities[i*3+2] + wz * dt;
-      // Gentle damping keeps velocities bounded over long lifetimes.
-      vx *= 0.995; vy *= 0.998; vz *= 0.995;
+      // Sample curl at the particle position in normalized field space.
+      // The 3D texture wraps, so any input range is fine; we add a tiny
+      // time shift so the field itself slowly evolves.
+      ambientCurl.sample(
+        _curl,
+        px * curlScale + tShift,
+        py * curlScale + tShift * 0.7,
+        pz * curlScale + tShift * 1.3,
+      );
+      let cx = _curl[0];
+      let cy = _curl[1];
+      let cz = _curl[2];
+
+      // Optional inward bias toward the playfield center. Blends a unit
+      // vector into the curl direction; norm of result stays ~1 so
+      // flowSpeed remains the dominant magnitude control.
+      if (inwardBias > 0) {
+        const dx = -px;
+        const dy = -py;
+        const dz = -(pz - AMBIENT_VOL.zOffset);
+        const len = Math.sqrt(dx*dx + dy*dy + dz*dz);
+        if (len > 1e-3) {
+          const inv = inwardBias / len;
+          cx += dx * inv;
+          cy += dy * inv;
+          cz += dz * inv;
+        }
+      }
+
+      // Target velocity: curl direction scaled by flowSpeed, plus a
+      // small upward bias so the field still feels like it's rising.
+      const tvx = cx * flowSpeed;
+      const tvy = cy * flowSpeed + upBias;
+      const tvz = cz * flowSpeed;
+
+      // First-order low-pass toward the target. Without this, velocity
+      // would jump on every frame (curl is a position-only function),
+      // and particles crossing swirl cell boundaries would visibly
+      // snap. Smoothing also implicitly damps high-frequency noise.
+      let vx = velocities[i*3+0];
+      let vy = velocities[i*3+1];
+      let vz = velocities[i*3+2];
+      vx += (tvx - vx) * k;
+      vy += (tvy - vy) * k;
+      vz += (tvz - vz) * k;
       velocities[i*3+0] = vx;
       velocities[i*3+1] = vy;
       velocities[i*3+2] = vz;
 
-      let px = positions[i*3+0] + vx * dt;
-      let py = positions[i*3+1] + vy * dt;
-      let pz = positions[i*3+2] + vz * dt;
+      px += vx * dt;
+      py += vy * dt;
+      pz += vz * dt;
 
       // Toroidal wrap on Y so particles always feel like they're rising past
       // the camera. X/Z wrap softly to keep the volume populated.
@@ -440,7 +562,22 @@ const ambientField = (() => {
     mat.uniforms.uPointScale.value = h * 0.5;
   }
 
-  return { update, setPointScaleFromHeight, material: mat, points };
+  // Stage-5b binding handles. `setFlowSpeed` is the lowMid → field-speed
+  // lever the plan calls out (§Stage 4·10). Clamp the lower bound so the
+  // field never freezes — even in silence the room should feel alive.
+  function setFlowSpeed(v) { flowSpeed = Math.max(0.1, v); }
+  function setCurlScale(v) { curlScale = v; }
+  function setInwardBias(v) { inwardBias = v; }
+
+  return {
+    update,
+    setPointScaleFromHeight,
+    setFlowSpeed,
+    setCurlScale,
+    setInwardBias,
+    material: mat,
+    points,
+  };
 })();
 
 // =============================================================
@@ -695,6 +832,116 @@ function updateLineClearVeil(dt) {
     _veilFx.active = false;
     _veilEl.style.opacity = '0';
   }
+}
+
+// -------------------------------------------------------------
+// Level-up "cool wash" — temporary nebula palette swap.
+// -------------------------------------------------------------
+// On LEVEL_UP, the whole sky crossfades to a random cool palette for a
+// brief hold, then crossfades to the *new* resting palette (which may
+// differ from the previous one if the level crossed a fixed milestone —
+// see config/nebula-progression.js). The nebula covers most of the
+// visible background, so this shift recolors the entire scene atmosphere
+// — a much more visible punctuation than a screen-blend overlay. The
+// asymmetry between phases (fast snap in, slower settle out) reads as a
+// deliberate cool flash rather than a generic crossfade.
+//
+// State machine ticks from animate() — no setTimeout (would desync with
+// pause / slow-mo / hot reload).
+const _levelUpWash = {
+  phase:    'idle',     // 'idle' | 'forward' | 'hold' | 'return'
+  t:        0,
+  forward:  0.32,       // fast snap to the random flash palette
+  hold:     0.55,       // dwell at the flash palette
+  release:  1.5,        // slower settle back to the resting palette
+  returnTo: null,       // palette to crossfade back to (= new resting)
+};
+
+/**
+ * @param {number} fromHue   Resting hue before the level-up.
+ * @param {number} toHue     Resting hue AFTER the level-up. Equal to
+ *   `fromHue` when the level didn't cross a band threshold; differs when
+ *   it did (the wash settles into the new band's hue).
+ */
+function triggerLevelUpWash(fromHue, toHue) {
+  // Re-trigger during a wash: snap to the previous return target so the
+  // new wash starts from a clean state. Without this, rapid level-ups
+  // (debug: mashing console `__bus.emit(EVENTS.LEVEL_UP, ...)`) would
+  // strand the nebula mid-fade.
+  if (_levelUpWash.phase !== 'idle' && _levelUpWash.returnTo != null) {
+    nebula.crossfadeToHue(_levelUpWash.returnTo, 0.1);
+  }
+  // Random cool flash hue. Excludes both the from- and to-resting hues so
+  // the flash always reads as a third, distinct color even when the level
+  // crosses a band — "snap to surprise hue, settle into the new resting"
+  // rather than "preview the new resting then commit."
+  const exclude = (fromHue !== toHue) ? toHue : null;
+  const flashHue = pickFlashHue(fromHue, exclude);
+  nebula.crossfadeToHue(flashHue, _levelUpWash.forward);
+  _levelUpWash.phase = 'forward';
+  _levelUpWash.t = 0;
+  _levelUpWash.returnTo = toHue;
+}
+function updateLevelUpWash(dt) {
+  if (_levelUpWash.phase === 'idle') return;
+  _levelUpWash.t += dt;
+  if (_levelUpWash.phase === 'forward' && _levelUpWash.t >= _levelUpWash.forward) {
+    _levelUpWash.phase = 'hold';
+    _levelUpWash.t = 0;
+  }
+  if (_levelUpWash.phase === 'hold' && _levelUpWash.t >= _levelUpWash.hold) {
+    nebula.crossfadeToHue(_levelUpWash.returnTo, _levelUpWash.release);
+    _levelUpWash.phase = 'return';
+    _levelUpWash.t = 0;
+  }
+  if (_levelUpWash.phase === 'return' && _levelUpWash.t >= _levelUpWash.release) {
+    _levelUpWash.phase = 'idle';
+    _levelUpWash.returnTo = null;
+  }
+}
+
+// Tracks the resting nebula HUE across level-ups. Initialized to the
+// level-1 band entry — must agree with the nebula's initial visible hue
+// or the first level-up will fade from somewhere other than the current
+// visual state. We seed the nebula to this hue right after instantiation
+// (see the createNebulaSky call site).
+let _currentRestingHue = hueForLevel(1);
+
+// Player override — when non-null, the effects-panel hue slider has
+// pinned a specific hue. Level-up still fires its random flash, but
+// settles back to this hue instead of `hueForLevel(level)`. Stage
+// changes also defer to this override (see STAGE_CHANGE handler).
+// `null` means follow the level progression (the default).
+let _userOverrideHue = null;
+
+// Resolve the resting hue: player choice if set, otherwise level-driven.
+function _resolveResting(forLevel) {
+  return _userOverrideHue != null ? _userOverrideHue : hueForLevel(forLevel);
+}
+
+/**
+ * Effects-panel hue slider handler. Pins the nebula to a specific hue
+ * (0..360) and crossfades immediately. The resting tracker updates so
+ * future level-up washes settle on the chosen hue instead of the level
+ * progression.
+ */
+function setOverrideHue(hue) {
+  _userOverrideHue = hue;
+  nebula.crossfadeToHue(hue, 1.2);
+  _currentRestingHue = hue;
+}
+
+/**
+ * Effects-panel "Auto" toggle handler. When enabled, clears the player's
+ * pin and crossfades back to `hueForLevel(currentLevel)` so subsequent
+ * level-ups follow the band table.
+ */
+function setAutoHue(enabled) {
+  if (!enabled) return;       // turning auto OFF is implicit when slider moves
+  _userOverrideHue = null;
+  const target = hueForLevel(level);
+  nebula.crossfadeToHue(target, 1.5);
+  _currentRestingHue = target;
 }
 
 // -------------------------------------------------------------
@@ -2532,6 +2779,15 @@ function triggerLevelUp(newLevel) {
   levelUpEl.classList.remove('show');
   void levelUpEl.offsetWidth;
   levelUpEl.classList.add('show');
+  // Cool background wash. On every level-up: random cool flash → settle
+  // into the new resting hue. Resting comes from the player override
+  // (effects-panel hue slider) if set, else from the level band table —
+  // so milestone levels (5, 10, 15…) commit to a new atmosphere by
+  // default, but a player who's pinned a hue stays on it.
+  const oldHue = _currentRestingHue;
+  const newHue = _resolveResting(newLevel);
+  _currentRestingHue = newHue;
+  triggerLevelUpWash(oldHue, newHue);
 }
 
 // Multi-line callout (DOUBLE / TRIPLE / TETRIS)
@@ -2832,6 +3088,9 @@ function animate(dt, envTime) {
   starfield.update(dt);
   // Stage 10 — nebula time/crossfade advance.
   nebula.update(dt, envTime);
+  // Stage 10 — moon self-rotation. Real-time `dt` so it keeps spinning
+  // during pause / slow-mo (it's environment, not gameplay).
+  moon.update(dt);
   breathe.update(camera, envTime);
 
   // Ambient particle field (Phase 1: CPU-driven drift). Uses real-time dt so
@@ -2845,7 +3104,11 @@ function animate(dt, envTime) {
   // slow the effect itself).
   clearSparkle.update(dt);
   if (_veilFx.active) updateLineClearVeil(dt);
+  if (_levelUpWash.phase !== 'idle') updateLevelUpWash(dt);
   tickAttentionRecovery(dt);
+  // Stage 8c env-reaction — Layer 7 streaks. Real-time tick (slow-mo on
+  // Tetris is meant to *let you see* the effect, not slow it).
+  envReaction.update(dt);
 
   // Slow-mo tick — drives gameTimeScale. dtGame is what game logic and
   // effect lifetimes consume; rendering and input use real-time dt.
@@ -3207,6 +3470,21 @@ function animate(dt, envTime) {
 // block); referencing it directly here would hit the TDZ at module init.
 // Wrapping it in an arrow defers the lookup until the listener actually
 // fires, after the const has been initialized.
+// Stage 8c env-reaction emitter — vertical light streaks above the case on
+// recipe-gated tiers. Today only `aurora.tetris` opts in; the orchestrator
+// reads the stage's `accentHex` and feeds it into spawnRow so the streaks
+// read as a stage-palette periphery event, not an extension of the inside-
+// the-case block-color burst.
+const envReaction = createEnvReaction({ scene });
+
+function triggerEnvReaction(rows, accentHex, rowCount) {
+  // Origin Y: bottom-most cleared row (matches the shockwave's anchor so
+  // both peripheral layers visually emerge from the same spot).
+  const bottomRow = rows[rows.length - 1];
+  const worldY = -PLAY_H / 2 + (bottomRow + 0.5) * CELL;
+  envReaction.spawnRow(worldY, accentHex, rowCount);
+}
+
 registerDirector(bus, {
   impactRing:    triggerImpactRing,
   hardDropTrail: spawnHardDropTrail,
@@ -3216,13 +3494,15 @@ registerDirector(bus, {
   // is active (and thus which `clearRecipe` is read); each lineClearLayers
   // entry is the existing inline emitter, gated now by recipe instead of
   // always-firing. Single-line clears in the seed stages drop flash +
-  // shockwave + veil; Tetris+ keeps all four.
+  // shockwave + veil; Tetris+ keeps all four. Stage 8c adds envReaction
+  // (Layer 7) — currently only fires for `aurora.tetris`.
   stageController,
   lineClearLayers: {
-    sparkle:   (rows, rowColors)         => emitLineClearBurst(rows, rowColors),
-    flash:     (rows, rowColors)         => triggerFlash(rows, rowColors),
-    shockwave: (rows, color, rowCount)   => triggerLineClearShockwave(rows, color, rowCount),
-    veil:      (rowCount)                => triggerLineClearVeil(rowCount),
+    sparkle:     (rows, rowColors)        => emitLineClearBurst(rows, rowColors),
+    flash:       (rows, rowColors)        => triggerFlash(rows, rowColors),
+    shockwave:   (rows, color, rowCount)  => triggerLineClearShockwave(rows, color, rowCount),
+    veil:        (rowCount)               => triggerLineClearVeil(rowCount),
+    envReaction: (rows, accent, rowCount) => triggerEnvReaction(rows, accent, rowCount),
   },
 });
 
@@ -3358,6 +3638,19 @@ const beatGrid = createBeatGrid({
   },
 });
 
+// Stage 5b — façade exposing the active piece's edge-intensity uniform to
+// the bindings layer. The active piece uses cached fresnel materials keyed
+// by tetromino color (`fresnelMaterialCache`); writing once per material on
+// every binding tick is bounded at ≤7 writes/frame and means the binding
+// works regardless of which piece happens to be active.
+const activePieceEdges = {
+  setEdgeIntensity(v) {
+    for (const m of fresnelMaterialCache.values()) {
+      m.uniforms.uEdgeIntensity.value = v;
+    }
+  },
+};
+
 const bindings = createBindings({
   feature: featureBus,
   beatGrid,
@@ -3365,6 +3658,9 @@ const bindings = createBindings({
     selectiveBloom,
     breathe,
     chromatic: chromaticPass,
+    ambientField,
+    activePieceEdges,
+    nebula,
   },
 });
 // Live FeatureBus inspector — F key toggles. Visible by default during the
@@ -3376,11 +3672,35 @@ const featureDebug = createFeatureDebugOverlay({ feature: featureBus, audio, bea
 // at boot to apply the initial state. The body tint cache lets us cleanly
 // restore the radial gradient when re-enabled.
 const _bodyTintOriginal = document.body.style.background || getComputedStyle(document.body).background;
+// Effects-panel hue preview — given a hue, return a CSS gradient string
+// showing the actual generated palette. Lets the player see the final
+// look before committing the slider release.
+function _hueGradientCss(hue) {
+  const stops = paletteFromHue(hue);
+  const css = stops.map((s) => {
+    const r = Math.round(s.color[0] * 255);
+    const g = Math.round(s.color[1] * 255);
+    const b = Math.round(s.color[2] * 255);
+    return `rgb(${r},${g},${b}) ${(s.t * 100).toFixed(0)}%`;
+  });
+  return `linear-gradient(to right, ${css.join(', ')})`;
+}
+
 const effectsPanel = createEffectsPanel({
   hotkey: 'KeyE',
   visibleByDefault: true,
   stage: stageController,
   stages: Object.fromEntries(Object.entries(STAGES).map(([k, v]) => [k, v.label])),
+  // Hue slider — RPG-style continuous picker. Auto toggle defaults ON
+  // (matches `_userOverrideHue = null` initial state). Dragging the
+  // slider commits a pin on release; flipping Auto on releases the pin.
+  hue: {
+    initial: hueForLevel(1),
+    initialAuto: true,
+    previewBackground: _hueGradientCss,
+    onChange: (h) => setOverrideHue(h),
+    onAutoToggle: (on) => setAutoHue(on),
+  },
   effects: [
     {
       name: 'Nebula sky',
@@ -3429,6 +3749,20 @@ const effectsPanel = createEffectsPanel({
       initiallyOn: true,
       onChange: (on) => { vignettePass.enabled = on; },
     },
+    {
+      // Stage 8c — Layer 7 streaks above the case on aurora-tetris.
+      // Toggling off hides the mesh entirely (no per-frame cost beyond
+      // the empty `update` tick).
+      name: 'Env reaction',
+      initiallyOn: true,
+      onChange: (on) => { envReaction.mesh.visible = on; },
+    },
+    {
+      // Stage 10 — procedural moon hero body in the background.
+      name: 'Moon',
+      initiallyOn: true,
+      onChange: (on) => { moon.setVisible(on); },
+    },
   ],
 });
 // BGM progress + scrubber — click anywhere on the bar to seek. Useful for
@@ -3453,6 +3787,18 @@ if (typeof window !== 'undefined') {
   window.__effectsPanel = effectsPanel;
   window.__stage = stageController;
   window.__beat = beatGrid;
+  // Console handle: __hue(280) pins the nebula hue; __hue() clears the
+  // pin and resumes level-progression. The effects-panel slider is the
+  // same surface; this is for ad-hoc tuning + scripted demos.
+  window.__hue = (h) => {
+    if (h == null) {
+      setAutoHue(true);
+      effectsPanel.syncHue(null);   // null = auto mode
+    } else {
+      setOverrideHue(h);
+      effectsPanel.syncHue(h);
+    }
+  };
 }
 function setMuted(b) {
   audio.setMuted(b);

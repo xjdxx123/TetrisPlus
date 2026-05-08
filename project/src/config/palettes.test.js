@@ -1,9 +1,15 @@
 import { describe, it, expect } from 'vitest';
-import { _buildLUT, PALETTE_NAMES } from './palettes.js';
+import { _buildLUT, PALETTE_NAMES, paletteFromHue, STAGE_HUE_FOR_NAME } from './palettes.js';
 
 describe('palettes', () => {
   it('PALETTE_NAMES includes the starter set', () => {
     expect(PALETTE_NAMES).toEqual(expect.arrayContaining(['deep-cyan', 'ember', 'aurora', 'void']));
+  });
+
+  it('PALETTE_NAMES includes the aurora-family expansion', () => {
+    expect(PALETTE_NAMES).toEqual(expect.arrayContaining([
+      'aurora-violet', 'aurora-magenta', 'aurora-teal', 'aurora-rose', 'cosmic-blue',
+    ]));
   });
 
   it('LUT has 256x4 RGBA entries', () => {
@@ -60,6 +66,56 @@ describe('palettes', () => {
     for (let i = 0; i < data.length; i++) {
       expect(data[i]).toBeGreaterThanOrEqual(0);
       expect(data[i]).toBeLessThanOrEqual(255);
+    }
+  });
+});
+
+describe('paletteFromHue', () => {
+  it('returns 5 stops with t in [0,1] and rgb in [0,1]', () => {
+    for (const hue of [0, 90, 180, 270, 359]) {
+      const stops = paletteFromHue(hue);
+      expect(stops).toHaveLength(5);
+      for (const s of stops) {
+        expect(s.t).toBeGreaterThanOrEqual(0);
+        expect(s.t).toBeLessThanOrEqual(1);
+        expect(s.color).toHaveLength(3);
+        for (const c of s.color) {
+          expect(c).toBeGreaterThanOrEqual(0);
+          expect(c).toBeLessThanOrEqual(1);
+        }
+      }
+    }
+  });
+
+  it('produces a dark→bright gradient (luminance grows with t)', () => {
+    // Crude luminance check on the green channel for a hue that exercises
+    // the green region. The profile guarantees increasing brightness.
+    const stops = paletteFromHue(120);
+    const lums = stops.map(s => 0.299 * s.color[0] + 0.587 * s.color[1] + 0.114 * s.color[2]);
+    for (let i = 1; i < lums.length; i++) {
+      expect(lums[i]).toBeGreaterThan(lums[i - 1]);
+    }
+  });
+
+  it('normalizes negative and >360 hues', () => {
+    const a = paletteFromHue(60);
+    const b = paletteFromHue(60 + 720);
+    const c = paletteFromHue(60 - 720);
+    // Same hue → same stops within FP rounding.
+    for (let i = 0; i < a.length; i++) {
+      for (let j = 0; j < 3; j++) {
+        expect(Math.abs(a[i].color[j] - b[i].color[j])).toBeLessThan(1e-6);
+        expect(Math.abs(a[i].color[j] - c[i].color[j])).toBeLessThan(1e-6);
+      }
+    }
+  });
+
+  it('STAGE_HUE_FOR_NAME has an entry for every named palette', () => {
+    for (const name of PALETTE_NAMES) {
+      expect(STAGE_HUE_FOR_NAME).toHaveProperty(name);
+      const h = STAGE_HUE_FOR_NAME[name];
+      expect(h).toBeGreaterThanOrEqual(0);
+      expect(h).toBeLessThan(360);
     }
   });
 });

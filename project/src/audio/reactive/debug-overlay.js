@@ -4,152 +4,198 @@
 // Stage 5 of plan_particle_2.md (was earmarked for Stage 5b but pulled
 // forward as a verification tool — without this, bindings are tuned blind).
 //
-// Pure DOM — no Three.js, no canvas. The cost is one update per frame
-// writing ~24 string properties; trivial.
+// Visual design follows `document/plan_UI_1.md` §4 — shared chrome from
+// `panel-shared.js` (cyan accent, glass blur, monospace mark + sans-serif
+// title). Pure DOM — no Three.js, no canvas.
 
-export function createFeatureDebugOverlay({ feature, audio = null, beatGrid = null, hotkey = 'KeyF', visibleByDefault = true } = {}) {
+import { installPanelStyles, makePanelHeader } from '../../ui/panel-shared.js';
+
+export function createFeatureDebugOverlay({
+  feature,
+  audio = null,
+  beatGrid = null,
+  hotkey = 'KeyF',
+  visibleByDefault = true,
+} = {}) {
+  installPanelStyles();
   const bandNames = feature.bandNames;
 
   const root = document.createElement('div');
   root.id = 'feature-debug';
-  Object.assign(root.style, {
-    position: 'fixed',
-    top: '64px',
-    right: '16px',
-    width: '240px',
-    padding: '10px 12px',
-    background: 'rgba(8, 12, 24, 0.82)',
-    border: '1px solid rgba(108, 240, 255, 0.22)',
-    borderRadius: '8px',
-    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
-    fontSize: '11px',
-    lineHeight: '1.4',
-    color: '#cbd5ff',
-    zIndex: '50',
-    pointerEvents: 'none',
-    userSelect: 'none',
-    backdropFilter: 'blur(4px)',
-  });
+  root.className = 'tp-panel';
+  root.style.top = '64px';
+  root.style.right = '16px';
+  root.style.width = '260px';
+  root.style.pointerEvents = 'none';
 
-  const header = document.createElement('div');
-  header.style.cssText = 'opacity:0.55;margin-bottom:8px;letter-spacing:0.4px;text-transform:uppercase;font-size:10px;';
-  header.textContent = 'audio bands · F to toggle';
+  let visible = visibleByDefault;
+  const setVisibleInternal = (v) => {
+    visible = !!v;
+    root.style.display = visible ? 'block' : 'none';
+  };
+
+  // Header — close button needs pointer events; the rest of the panel
+  // remains pass-through to the canvas (audio inspector should never block
+  // gameplay clicks).
+  const header = makePanelHeader({
+    title: 'Audio bands',
+    hotkey: hotkey.replace('Key', '').toUpperCase(),
+    onClose: () => setVisibleInternal(false),
+  });
+  // Re-enable pointer events only on the close button.
+  const closeBtn = header.querySelector('.tp-panel__close');
+  if (closeBtn) closeBtn.style.pointerEvents = 'auto';
   root.appendChild(header);
 
+  const body = document.createElement('div');
+  body.className = 'tp-panel__body';
+  root.appendChild(body);
+
   const status = document.createElement('div');
-  status.style.cssText = 'opacity:0.5;margin-bottom:6px;font-size:10px;';
+  status.className = 'tp-status';
   status.textContent = 'waiting for analyser…';
-  root.appendChild(status);
+  body.appendChild(status);
+
+  // === Band bars =========================================================
+  const bandsLabel = document.createElement('div');
+  bandsLabel.className = 'tp-panel__section-label';
+  bandsLabel.textContent = 'Bands';
+  body.appendChild(bandsLabel);
 
   const rows = {};
   for (const name of bandNames) {
     const row = document.createElement('div');
-    row.style.cssText = 'display:flex;align-items:center;gap:6px;margin:4px 0;';
-    row.innerHTML = `
-      <div style="width:52px;opacity:0.7">${name}</div>
-      <div style="flex:1;height:9px;background:rgba(255,255,255,0.06);position:relative;border-radius:4px;overflow:hidden;">
-        <div class="bar-norm"
-             style="position:absolute;left:0;top:0;bottom:0;width:0%;
-                    background:rgba(108,240,255,0.4);"></div>
-        <div class="bar-kick"
-             style="position:absolute;left:0;top:0;bottom:0;width:0%;
-                    background:linear-gradient(90deg,#ffd166,#ff5c8a);
-                    box-shadow:0 0 6px rgba(255,92,138,0.5);"></div>
-      </div>
-      <div class="val" style="width:46px;text-align:right;opacity:0.85;font-variant-numeric:tabular-nums;font-size:10px;">.00·.00</div>
-    `;
-    rows[name] = {
-      barNorm: row.querySelector('.bar-norm'),
-      barKick: row.querySelector('.bar-kick'),
-      val:     row.querySelector('.val'),
-    };
-    root.appendChild(row);
+    row.className = 'tp-band-row';
+
+    const nameEl = document.createElement('div');
+    nameEl.className = 'tp-band-row__name';
+    nameEl.textContent = name;
+    row.appendChild(nameEl);
+
+    const track = document.createElement('div');
+    track.className = 'tp-band-row__track';
+    const barNorm = document.createElement('div');
+    barNorm.className = 'tp-band-row__bar-norm';
+    const barKick = document.createElement('div');
+    barKick.className = 'tp-band-row__bar-kick';
+    track.appendChild(barNorm);
+    track.appendChild(barKick);
+    row.appendChild(track);
+
+    const val = document.createElement('div');
+    val.className = 'tp-band-row__val';
+    val.textContent = '.00 · .00';
+    row.appendChild(val);
+
+    rows[name] = { barNorm, barKick, val };
+    body.appendChild(row);
   }
 
   const legend = document.createElement('div');
-  legend.style.cssText = 'opacity:0.5;margin-top:8px;font-size:10px;display:flex;gap:10px;';
+  legend.className = 'tp-legend';
   legend.innerHTML = `
-    <span><span style="display:inline-block;width:8px;height:8px;background:rgba(108,240,255,0.4);vertical-align:middle;margin-right:3px;"></span>norm (level)</span>
-    <span><span style="display:inline-block;width:8px;height:8px;background:linear-gradient(90deg,#ffd166,#ff5c8a);vertical-align:middle;margin-right:3px;"></span>kick (transient)</span>
+    <span><span class="tp-legend__swatch" style="background:rgba(108,240,255,0.42);"></span>norm (level)</span>
+    <span><span class="tp-legend__swatch" style="background:linear-gradient(90deg,#ffd166,#ff5c8a);"></span>kick (transient)</span>
   `;
-  root.appendChild(legend);
+  body.appendChild(legend);
 
-  // Stage 5b — discrete onset markers. Each channel gets a small dot that
-  // flashes (and a short trailing label flashing strength) whenever an onset
-  // fires; the dot fades over ~250ms. The bar visualisations above show
-  // *continuous* signal; onset dots show *events*.
+  // === Onset markers (Stage 5b) =========================================
+  // Each channel gets a dot that flashes when an onset fires; fades over
+  // ~250ms. Bars above show *continuous* signal; dots show *events*.
   let onsetRows = null;
   if (feature.onsets) {
+    const divider = document.createElement('div');
+    divider.className = 'tp-panel__divider';
+    body.appendChild(divider);
+
+    const onsetLabel = document.createElement('div');
+    onsetLabel.className = 'tp-panel__section-label';
+    onsetLabel.textContent = 'Onsets';
+    body.appendChild(onsetLabel);
+
     const onsetSection = document.createElement('div');
-    onsetSection.style.cssText = 'margin-top:10px;padding-top:8px;border-top:1px solid rgba(255,255,255,0.08);display:flex;gap:14px;';
+    onsetSection.style.cssText = 'display:flex;gap:14px;margin:4px 0 2px;';
     const channels = feature.onsets.names;
     onsetRows = {};
     for (const name of channels) {
       const cell = document.createElement('div');
-      cell.style.cssText = 'display:flex;flex-direction:column;align-items:center;gap:3px;flex:1;';
-      cell.innerHTML = `
-        <div style="opacity:0.6;font-size:10px;letter-spacing:0.3px;">${name}</div>
-        <div class="onset-dot" style="
-          width:14px;height:14px;border-radius:50%;
-          background:rgba(255,255,255,0.06);
-          box-shadow:0 0 0 1px rgba(255,255,255,0.10);
-          transition:none;"></div>
-        <div class="onset-strength" style="
-          font-variant-numeric:tabular-nums;font-size:10px;opacity:0.5;">.00</div>
-      `;
-      onsetRows[name] = {
-        dot:      cell.querySelector('.onset-dot'),
-        strength: cell.querySelector('.onset-strength'),
-      };
+      cell.style.cssText = 'display:flex;flex-direction:column;align-items:center;gap:4px;flex:1;';
+
+      const cellLabel = document.createElement('div');
+      cellLabel.style.cssText = 'font-family:"SF Mono",ui-monospace,Menlo,Consolas,monospace;font-size:9.5px;letter-spacing:0.05em;color:var(--muted,#8b93ad);';
+      cellLabel.textContent = name;
+      cell.appendChild(cellLabel);
+
+      const dot = document.createElement('div');
+      dot.style.cssText = 'width:14px;height:14px;border-radius:50%;background:rgba(255,255,255,0.06);box-shadow:0 0 0 1px rgba(255,255,255,0.10);';
+      cell.appendChild(dot);
+
+      const strength = document.createElement('div');
+      strength.style.cssText = 'font-family:"SF Mono",ui-monospace,Menlo,Consolas,monospace;font-variant-numeric:tabular-nums;font-size:10px;color:var(--ink,#f3f5fb);opacity:0.45;';
+      strength.textContent = '.00';
+      cell.appendChild(strength);
+
+      onsetRows[name] = { dot, strength };
       onsetSection.appendChild(cell);
     }
-    root.appendChild(onsetSection);
+    body.appendChild(onsetSection);
   }
 
-  // Stage 5b — beat-grid status row. Shows BPM + a phase bar + an
-  // anticipation bar. The phase bar sweeps left-to-right between beats; the
-  // anticipation bar fills only during the lookahead window before each
-  // beat, so visually you see a "wind-up" pulse just before every beat.
+  // === Beat grid (Stage 5b) =============================================
+  // BPM + phase bar + anticipation bar. The phase bar sweeps left-to-right
+  // between beats; the anticipation bar fills only during the lookahead
+  // window before each beat — visually a "wind-up" pulse pre-beat.
   let beatRow = null;
   if (beatGrid) {
-    const row = document.createElement('div');
-    row.style.cssText = 'margin-top:10px;padding-top:8px;border-top:1px solid rgba(255,255,255,0.08);';
-    row.innerHTML = `
-      <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px;">
-        <span style="opacity:0.7;font-size:10px;letter-spacing:0.3px;">beat-grid</span>
-        <span class="bg-bpm" style="font-variant-numeric:tabular-nums;font-size:10px;opacity:0.9;">analyzing…</span>
-      </div>
-      <div style="display:flex;align-items:center;gap:6px;margin:3px 0;">
-        <div style="width:52px;opacity:0.6;font-size:10px;">phase</div>
-        <div style="flex:1;height:6px;background:rgba(255,255,255,0.06);border-radius:3px;position:relative;overflow:hidden;">
-          <div class="bg-phase" style="position:absolute;inset:0;width:0%;background:rgba(108,240,255,0.5);"></div>
-        </div>
-      </div>
-      <div style="display:flex;align-items:center;gap:6px;margin:3px 0;">
-        <div style="width:52px;opacity:0.6;font-size:10px;">anticip</div>
-        <div style="flex:1;height:6px;background:rgba(255,255,255,0.06);border-radius:3px;position:relative;overflow:hidden;">
-          <div class="bg-antic" style="position:absolute;inset:0;width:0%;background:linear-gradient(90deg,#a0e6ff,#ff5c8a);box-shadow:0 0 8px rgba(255,92,138,0.5);"></div>
-        </div>
-      </div>
-    `;
-    beatRow = {
-      bpm:    row.querySelector('.bg-bpm'),
-      phase:  row.querySelector('.bg-phase'),
-      antic:  row.querySelector('.bg-antic'),
+    const divider = document.createElement('div');
+    divider.className = 'tp-panel__divider';
+    body.appendChild(divider);
+
+    const sectionLabel = document.createElement('div');
+    sectionLabel.style.cssText = 'display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px;';
+    const left = document.createElement('span');
+    left.className = 'tp-panel__section-label';
+    left.style.margin = '0';
+    left.textContent = 'Beat-grid';
+    const bpm = document.createElement('span');
+    bpm.style.cssText = 'font-family:"SF Mono",ui-monospace,Menlo,Consolas,monospace;font-size:10px;color:var(--muted,#8b93ad);font-variant-numeric:tabular-nums;';
+    bpm.textContent = 'analyzing…';
+    sectionLabel.appendChild(left);
+    sectionLabel.appendChild(bpm);
+    body.appendChild(sectionLabel);
+
+    const mkLine = (label) => {
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;align-items:center;gap:8px;margin:3px 0;';
+      const lbl = document.createElement('div');
+      lbl.style.cssText = 'width:48px;font-family:"SF Mono",ui-monospace,Menlo,Consolas,monospace;font-size:10px;letter-spacing:0.05em;color:var(--muted,#8b93ad);';
+      lbl.textContent = label;
+      const track = document.createElement('div');
+      track.style.cssText = 'flex:1;height:6px;background:rgba(255,255,255,0.05);border-radius:3px;position:relative;overflow:hidden;';
+      const fill = document.createElement('div');
+      fill.style.cssText = 'position:absolute;inset:0;width:0%;';
+      track.appendChild(fill);
+      row.appendChild(lbl);
+      row.appendChild(track);
+      body.appendChild(row);
+      return fill;
     };
-    root.appendChild(row);
+    const phaseBar = mkLine('phase');
+    phaseBar.style.background = 'rgba(108,240,255,0.5)';
+    const anticBar = mkLine('antic');
+    anticBar.style.background = 'linear-gradient(90deg,#a0e6ff,#ff5c8a)';
+    anticBar.style.boxShadow = '0 0 8px rgba(255,92,138,0.5)';
+
+    beatRow = { bpm, phase: phaseBar, antic: anticBar };
   }
 
   document.body.appendChild(root);
-
-  let visible = visibleByDefault;
   if (!visible) root.style.display = 'none';
 
   window.addEventListener('keydown', (e) => {
     if (e.code !== hotkey) return;
-    if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA')) return;
-    visible = !visible;
-    root.style.display = visible ? 'block' : 'none';
+    if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT')) return;
+    setVisibleInternal(!visible);
   });
 
   return {
@@ -158,11 +204,16 @@ export function createFeatureDebugOverlay({ feature, audio = null, beatGrid = nu
       const ready = feature.isBound;
       const hasAnalyser = audio && !!audio.analyser;
       const ctxState = audio && audio.hasContext ? 'ready' : 'no-ctx';
+      // Status uses the shared `tp-status--{ok,warn,err}` modifiers so the
+      // colour communicates state without a parallel text channel.
       if (ready) {
+        status.className = 'tp-status tp-status--ok';
         status.textContent = `bound · ${bandNames.length} bands · ctx ${ctxState}`;
       } else if (audio && audio.hasContext && !hasAnalyser) {
+        status.className = 'tp-status tp-status--err';
         status.textContent = '⚠ analyser tap failed — see console (CORS?)';
       } else {
+        status.className = 'tp-status';
         status.textContent = 'waiting for first user gesture…';
       }
       if (!ready) return;
@@ -173,27 +224,26 @@ export function createFeatureDebugOverlay({ feature, audio = null, beatGrid = nu
         const row = rows[name];
         row.barNorm.style.width = (norm * 100).toFixed(1) + '%';
         row.barKick.style.width = (kick * 100).toFixed(1) + '%';
-        row.val.textContent = norm.toFixed(2) + '·' + kick.toFixed(2);
+        row.val.textContent = norm.toFixed(2) + ' · ' + kick.toFixed(2);
       }
       // Beat-grid status — BPM, phase, anticipation. Updated every frame; the
-      // anticipation bar will visibly fill during the 250ms before each beat.
+      // anticipation bar visibly fills during the 250ms before each beat.
       if (beatRow && beatGrid) {
         if (beatGrid.isAnalyzing) {
           beatRow.bpm.textContent = 'analyzing…';
+          beatRow.bpm.style.color = '';
           beatRow.bpm.style.opacity = '0.55';
-          beatRow.bpm.style.color = '#cbd5ff';
         } else if (beatGrid.isAnalyzed) {
-          // Stage 5b multi-track support: the drift indicator surfaces when
-          // the running track no longer matches the cached BPM (next analysis
-          // window will reset it). Color shifts so it's visible without text
-          // changes.
+          // Multi-track support: drift indicator surfaces when the running
+          // track no longer matches the cached BPM (next analysis window
+          // resets it). Color shifts so it's visible without text changes.
           const drifting = beatGrid.isDrifting;
           const driftMs = (beatGrid.driftMeanAbsSec * 1000) | 0;
           beatRow.bpm.textContent = drifting
             ? `${beatGrid.bpm.toFixed(1)} bpm · drift ${driftMs}ms ⚠`
             : `${beatGrid.bpm.toFixed(1)} bpm · offs ${beatGrid.offsetSec.toFixed(2)}s`;
           beatRow.bpm.style.opacity = '0.9';
-          beatRow.bpm.style.color = drifting ? '#ff5c8a' : '#cbd5ff';
+          beatRow.bpm.style.color = drifting ? '#ff5c8a' : '';
         } else if (beatGrid.analyzeError) {
           beatRow.bpm.textContent = '⚠ analysis failed';
           beatRow.bpm.style.opacity = '0.6';
@@ -201,7 +251,7 @@ export function createFeatureDebugOverlay({ feature, audio = null, beatGrid = nu
         } else {
           beatRow.bpm.textContent = 'awaiting BGM';
           beatRow.bpm.style.opacity = '0.45';
-          beatRow.bpm.style.color = '#cbd5ff';
+          beatRow.bpm.style.color = '';
         }
         beatRow.phase.style.width = (beatGrid.phase * 100).toFixed(1) + '%';
         beatRow.antic.style.width = (beatGrid.anticipation * 100).toFixed(1) + '%';
@@ -209,8 +259,8 @@ export function createFeatureDebugOverlay({ feature, audio = null, beatGrid = nu
       // Onset markers — fade over a fixed wall-clock window. Reads telemetry
       // from the FeatureBus so the overlay can be turned off mid-session
       // without leaking listeners. 250ms feels right: fast enough that two
-      // back-to-back kicks read as separate flashes, slow enough that you
-      // can actually see a single fire on a 60Hz display.
+      // back-to-back kicks read as separate flashes, slow enough that a
+      // single fire is visible on a 60Hz display.
       if (onsetRows && feature.onsets) {
         const FADE_SEC = 0.25;
         const now = feature.totalSec || 0;
@@ -229,14 +279,11 @@ export function createFeatureDebugOverlay({ feature, audio = null, beatGrid = nu
           } else {
             dot.style.background = 'rgba(255,255,255,0.06)';
             dot.style.boxShadow = '0 0 0 1px rgba(255,255,255,0.10)';
-            label.style.opacity = '0.35';
+            label.style.opacity = '0.45';
           }
         }
       }
     },
-    setVisible(v) {
-      visible = !!v;
-      root.style.display = visible ? 'block' : 'none';
-    },
+    setVisible: setVisibleInternal,
   };
 }

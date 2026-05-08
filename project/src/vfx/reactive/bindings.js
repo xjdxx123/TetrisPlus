@@ -21,11 +21,26 @@ export function createBindings({ feature, targets, beatGrid = null } = {}) {
   // Shape kept identical for every entry so future bindings drop in trivially.
   const bindings = [];
 
+  // Capture the nebula's authored intensity so the bass binding modulates
+  // around it as a multiplier rather than overwriting with absolute values
+  // (different stages can ship different baselines without changing the
+  // binding). Read once at boot — runtime tweaks via `__nebula.setIntensity`
+  // would be lost, but those are dev-only inspector pokes.
+  const nebulaBaseIntensity = targets.nebula
+    ? (targets.nebula.intensity ?? 1.0)
+    : 1.0;
+
   // Helper: anticipation 0..1 if a beat-grid is wired and BPM has been
   // detected; 0 otherwise. Bindings can compose with this multiplicatively
   // to ramp UP into a beat without changing their resting behaviour when
   // the analyzer is unavailable.
   const beatAnticipation = () => (beatGrid && beatGrid.isAnalyzed ? beatGrid.anticipation : 0);
+
+  // Helper to give existing bindings a name for the `debug()` console
+  // helper below. Pre-Stage-5b bindings were anonymous; named here without
+  // changing behaviour so `__bindings.debug()` can list them by what they
+  // bind, not by index.
+  const named = (name, b) => ({ name, ...b });
 
   // Bass.norm → bloom layer scale (the combine pass weight).
   // Bound to `setBloomScale` not `bloomPass.strength` so this doesn't fight
@@ -47,13 +62,13 @@ export function createBindings({ feature, targets, beatGrid = null } = {}) {
   // "everything is throbbing." Combined with the audio kick, the anticipation
   // is "set up" by the climb and "released" by the kick.
   if (targets.selectiveBloom) {
-    bindings.push({
+    bindings.push(named('highMid.{norm,kick} → selectiveBloom.scale', {
       get: () => {
         const audio = 0.15 * feature.bands.highMid.norm + 0.85 * feature.bands.highMid.kick;
         return lerp(0.7, 2.6, audio) * (1 + 0.25 * beatAnticipation());
       },
       apply: (v) => { targets.selectiveBloom.setBloomScale(v); },
-    });
+    }));
   }
 
   // Same hybrid for FOV breathing — small sustain swell + impulsive expand
@@ -74,18 +89,64 @@ export function createBindings({ feature, targets, beatGrid = null } = {}) {
   // signal; layering anticipation on top biases the high-end pre-beat so the
   // air feels electric a fraction of a second before the kick lands.
   if (targets.chromatic) {
-    bindings.push({
+    bindings.push(named('air.norm → chromatic.uAmount', {
       get: () => feature.bands.air.norm + 0.20 * beatAnticipation(),
       apply: (v) => {
         const clamped = v < 0 ? 0 : (v > 1 ? 1 : v);
         targets.chromatic.uniforms.uAmount.value = lerp(0.0, 0.9, clamped);
       },
+    }));
+  }
+
+  // Stage 5b — lowMid.norm → ambient flow speed. The lever was exposed in
+  // Stage 4. The `_clearAttentionMul` worry from earlier turned out to be a
+  // false alarm: that path writes `uIntensity` (brightness), not flow speed.
+  // Range 0.4 → 1.6: deliberately wide so the field visibly slows during
+  // breakdowns and surges on instrumental energy. lowMid (~200–500 Hz) is
+  // where bass guitars / synth pads sit — the sustained energy that "should"
+  // breathe the field — and is mostly silent during pure drum hits, which
+  // would otherwise make the field strobe.
+  if (targets.ambientField) {
+    bindings.push({
+      name: 'lowMid.norm → ambientField.flowSpeed',
+      get: () => feature.bands.lowMid.norm,
+      apply: (v) => { targets.ambientField.setFlowSpeed(lerp(0.4, 1.6, v)); },
     });
   }
 
-  // (Stage 5b will add: edge intensity from bass, ambient flow speed from
-  // lowMid (after refactoring the _clearAttentionMul conflict), sparkle/dust
-  // spawn rates from mid + air, kick onset → beat pulse, etc.)
+  // Stage 5b — bass.norm → active-piece edge intensity (the §1.6.2 "case
+  // breathes with the bass" rule, applied to the active piece's fresnel
+  // shell). Range 0.40 → 0.95 sits centered on the static 0.55 default;
+  // tuned to be visible but not overpowering the inner core glow. Locked
+  // cubes don't bind — only the active piece "feels" the music, which is
+  // the cinematic readability rule from `plan_particle_1.md` §1.4.
+  if (targets.activePieceEdges) {
+    bindings.push({
+      name: 'bass.norm → activePieceEdges.uEdgeIntensity',
+      get: () => feature.bands.bass.norm,
+      apply: (v) => { targets.activePieceEdges.setEdgeIntensity(lerp(0.40, 0.95, v)); },
+    });
+  }
+
+  // Stage 5b — bass.norm → nebula intensity (slow tier; the periphery
+  // breathes with the low end). Multiplier 0.85 → 1.15 around the authored
+  // base so the nebula reads as "alive" without ever competing with the
+  // playfield for attention (the §1.3 attention-budget rule). Bass.norm is
+  // the right band — sub is too low (most music doesn't have content there)
+  // and lowMid is already taken by the field; bass is the remaining slow,
+  // present signal.
+  if (targets.nebula) {
+    bindings.push({
+      name: 'bass.norm → nebula.uIntensity',
+      get: () => feature.bands.bass.norm,
+      apply: (v) => {
+        targets.nebula.setIntensity(nebulaBaseIntensity * lerp(0.85, 1.15, v));
+      },
+    });
+  }
+
+  // (Stage 5b still pending: sparkle/dust spawn rates from mid + air, kick
+  // onset → beat pulse emitter — both wait for new emitters from Stage 8c.)
 
   // Stage 5b — discrete onset events (kick / snare / generic). Live signal
   // accessible via `feature.onsets.on(name, fn)`. Subscribe here, not deep
@@ -105,9 +166,15 @@ export function createBindings({ feature, targets, beatGrid = null } = {}) {
   // reactivity is toggled off — without this, the last-modulated values
   // would freeze in place (bloom stuck dim or amped, CA stuck visible).
   function resetToBaseline() {
-    if (targets.selectiveBloom) targets.selectiveBloom.setBloomScale(1.0);
-    if (targets.chromatic)       targets.chromatic.uniforms.uAmount.value = 0;
-    if (targets.breathe)         targets.breathe.setIntensity(1.0);
+    if (targets.selectiveBloom)    targets.selectiveBloom.setBloomScale(1.0);
+    if (targets.chromatic)         targets.chromatic.uniforms.uAmount.value = 0;
+    if (targets.breathe)           targets.breathe.setIntensity(1.0);
+    // Stage-5b additions. Restore the authored static values these bindings
+    // were modulating so toggling reactivity off reads as "neutral," not
+    // "frozen at the last-modulated frame."
+    if (targets.ambientField)       targets.ambientField.setFlowSpeed(0.85);
+    if (targets.activePieceEdges)   targets.activePieceEdges.setEdgeIntensity(0.55);
+    if (targets.nebula)             targets.nebula.setIntensity(nebulaBaseIntensity);
   }
 
   return {
@@ -123,5 +190,16 @@ export function createBindings({ feature, targets, beatGrid = null } = {}) {
     },
     get enabled() { return enabled; },
     get bindingCount() { return bindings.length; },
+    // Console diagnostic. Returns the live value each binding is reading
+    // *right now*; call repeatedly during playback to see whether the audio
+    // chain is delivering signal. If every value is ~0, the issue is in the
+    // analyser (silent BGM, suspended AudioContext, missing crossorigin) —
+    // not in the bindings.
+    debug() {
+      return bindings.map(b => ({
+        name: b.name || '(unnamed)',
+        value: Number(b.get().toFixed(4)),
+      }));
+    },
   };
 }

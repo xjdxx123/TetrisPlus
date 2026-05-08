@@ -31,12 +31,13 @@ import { tierForRows } from '../config/stages.js';
  * @property {(rows: number[], colors: number[]) => void} [flash]     row-aligned flash slabs (Layer 5)
  * @property {(rows: number[], color: number, rowCount: number) => void} [shockwave] expanding ring (Layer 3)
  * @property {(rowCount: number) => void} [veil]                       camera-space tint (Layer 6)
+ * @property {(rows: number[], accentHex: number, rowCount: number) => void} [envReaction] outside-case reaction (Layer 7)
  */
 
 /**
  * @typedef {Object} StageControllerLike
  * Read-only interface the orchestrator needs from the stage controller.
- * @property {{ clearRecipe?: Record<string, {sparkle?:boolean,flash?:boolean,shockwave?:boolean,veil?:boolean}> }} spec
+ * @property {{ accentHex?: number, clearRecipe?: Record<string, {sparkle?:boolean,flash?:boolean,shockwave?:boolean,veil?:boolean,envReaction?:boolean}> }} spec
  */
 
 /**
@@ -97,6 +98,14 @@ export function createLineClearOrchestrator({ stageController, lineClearLayers }
       // Tetris+ in the seed stages.
       if (recipe.veil && lineClearLayers.veil) {
         lineClearLayers.veil(simultaneous);
+      }
+      // Layer 7 — environment reaction (outside the case). Stage 8c. Reads
+      // the stage accent from `spec.accentHex` and passes it to the emitter
+      // so the streaks read as "the room reacting" in the stage palette,
+      // not as a continuation of the block-color burst inside the case.
+      if (recipe.envReaction && lineClearLayers.envReaction) {
+        const accent = (spec && spec.accentHex != null) ? spec.accentHex : 0xffffff;
+        lineClearLayers.envReaction(rows, accent, simultaneous);
       }
     },
   };
