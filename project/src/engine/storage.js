@@ -1,0 +1,217 @@
+// Settings + stats persistence (plan_UI_1.md §3.1).
+//
+// Two versioned localStorage keys; settings save debounced 250 ms; stats
+// flush immediately on game-over. Wraps reads/writes in try/catch — in
+// privacy mode or when quota is exhausted we silently fall back to an
+// in-memory shadow so the game never crashes on a storage failure.
+//
+// No THREE, no DOM. Pure JS — runs in tests under Node by stubbing
+// `globalThis.localStorage` (see storage.test.js).
+
+const KEY_SETTINGS = 'tetrisplus.settings.v1';
+const KEY_STATS    = 'tetrisplus.stats.v1';
+
+// Authored defaults — copied into freshly-loaded blobs. Adding a field
+// here automatically backfills it on every load (deep-merge, see below).
+const SETTINGS_DEFAULTS = Object.freeze({
+  effects: {
+    shatterPower:    2.5,
+    bloom:           0.7,
+    shakeMul:        1.0,
+    slowmoMul:       1.0,
+    trailMul:        1.0,
+    rimGlowMul:      1.0,
+    mood:            'void',
+    particleQuality: 'mid',
+    vignette:        true,
+  },
+  audio: {
+    muted: false,
+    bgm:   0.32,
+    voice: 0.95,
+    sfx:   0.55,
+  },
+  mode: 'classic',
+  // panel.hidden defaults to FALSE — the settings panel is the primary UI
+  // surface (plan_UI_1.md §2.0); making it discoverable on first launch
+  // matters more than the slight visual clutter on a fresh install. The
+  // close button + O key let the player hide it whenever they want, and
+  // that hidden state is persisted alongside the pose.
+  panel: { x: 0, y: 0, z: 6, yaw: 0, pitch: 0, hidden: false },
+});
+
+const STATS_DEFAULTS = Object.freeze({
+  highScore: 0,
+  modeBests: {
+    classic: { score: 0, lines: 0, level: 1 },
+  },
+  totals: {
+    linesCleared:  0,
+    piecesPlaced:  0,
+    playTimeMs:    0,
+  },
+  lastUpdated: null,
+});
+
+// Deep-clone a frozen-source default tree so callers can mutate freely.
+function cloneDefaults(src) {
+  if (Array.isArray(src)) return src.map(cloneDefaults);
+  if (src && typeof src === 'object') {
+    const out = {};
+    for (const k of Object.keys(src)) out[k] = cloneDefaults(src[k]);
+    return out;
+  }
+  return src;
+}
+
+// Recursive merge — `incoming` fields override `base`, but anything missing
+// from `incoming` stays at its default. This is what lets us add a new
+// settings field tomorrow without breaking a player's existing save blob.
+function deepMerge(base, incoming) {
+  if (incoming == null) return base;
+  if (Array.isArray(base) || typeof base !== 'object') return incoming;
+  if (typeof incoming !== 'object' || Array.isArray(incoming)) return incoming;
+  const out = { ...base };
+  for (const k of Object.keys(incoming)) {
+    if (k in base) out[k] = deepMerge(base[k], incoming[k]);
+    else           out[k] = incoming[k];
+  }
+  return out;
+}
+
+function safeStorage() {
+  try {
+    return (typeof globalThis !== 'undefined' && globalThis.localStorage) || null;
+  } catch {
+    return null; // privacy mode / sandboxed iframe
+  }
+}
+
+// In-memory fallback so getters/setters always succeed even without
+// localStorage. Shape mirrors the localStorage API we use.
+const _memShadow = new Map();
+function readKey(key) {
+  const ls = safeStorage();
+  if (ls) {
+    try { return ls.getItem(key); }
+    catch { /* fallthrough */ }
+  }
+  return _memShadow.has(key) ? _memShadow.get(key) : null;
+}
+function writeKey(key, value) {
+  _memShadow.set(key, value);
+  const ls = safeStorage();
+  if (!ls) return;
+  try { ls.setItem(key, value); }
+  catch { /* quota exceeded — keep the in-memory copy */ }
+}
+
+function parseOrNull(raw) {
+  if (raw == null) return null;
+  try { return JSON.parse(raw); }
+  catch { return null; } // corrupt blob — fall back to defaults
+}
+
+/**
+ * Load + merge the settings blob. Always returns a fresh object the
+ * caller can mutate; missing fields are filled from SETTINGS_DEFAULTS.
+ */
+export function loadSettings() {
+  const incoming = parseOrNull(readKey(KEY_SETTINGS));
+  return deepMerge(cloneDefaults(SETTINGS_DEFAULTS), incoming);
+}
+
+/** Same shape for stats. */
+export function loadStats() {
+  const incoming = parseOrNull(readKey(KEY_STATS));
+  return deepMerge(cloneDefaults(STATS_DEFAULTS), incoming);
+}
+
+// Debounced settings save. Flushes early on visibilitychange=hidden so
+// the player doesn't lose their last tweak when they quickly close the
+// tab. The flush hook is registered lazily — tests in pure Node don't
+// need it.
+let _settingsTimer = null;
+let _settingsPending = null;
+let _flushHookInstalled = false;
+
+function installFlushHook() {
+  if (_flushHookInstalled) return;
+  if (typeof document === 'undefined') return;
+  _flushHookInstalled = true;
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') flushSettings();
+  });
+}
+
+function flushSettings() {
+  if (_settingsTimer != null) {
+    clearTimeout(_settingsTimer);
+    _settingsTimer = null;
+  }
+  if (_settingsPending != null) {
+    writeKey(KEY_SETTINGS, JSON.stringify(_settingsPending));
+    _settingsPending = null;
+  }
+}
+
+/**
+ * Save settings (whole blob). Debounced 250 ms; rapid slider drags coalesce
+ * into one write. Pass `{ flush: true }` to write synchronously.
+ */
+export function saveSettings(settings, opts = {}) {
+  installFlushHook();
+  _settingsPending = settings;
+  if (opts.flush) {
+    flushSettings();
+    return;
+  }
+  if (_settingsTimer == null) {
+    _settingsTimer = setTimeout(flushSettings, 250);
+  }
+}
+
+/**
+ * Stats save — also debounced 250 ms but flushes immediately on game-over
+ * by passing `{ flush: true }` (see plan §3.1).
+ */
+let _statsTimer = null;
+let _statsPending = null;
+function flushStats() {
+  if (_statsTimer != null) {
+    clearTimeout(_statsTimer);
+    _statsTimer = null;
+  }
+  if (_statsPending != null) {
+    writeKey(KEY_STATS, JSON.stringify(_statsPending));
+    _statsPending = null;
+  }
+}
+export function saveStats(stats, opts = {}) {
+  installFlushHook();
+  _statsPending = stats;
+  if (opts.flush) {
+    flushStats();
+    return;
+  }
+  if (_statsTimer == null) {
+    _statsTimer = setTimeout(flushStats, 250);
+  }
+}
+
+/** Test-only: wipe both keys + in-memory shadow. */
+export function _resetForTests() {
+  _memShadow.clear();
+  if (_settingsTimer) { clearTimeout(_settingsTimer); _settingsTimer = null; }
+  if (_statsTimer) { clearTimeout(_statsTimer); _statsTimer = null; }
+  _settingsPending = null;
+  _statsPending = null;
+  const ls = safeStorage();
+  if (ls) {
+    try { ls.removeItem(KEY_SETTINGS); ls.removeItem(KEY_STATS); }
+    catch { /* ignore */ }
+  }
+}
+
+export const STORAGE_KEYS = Object.freeze({ settings: KEY_SETTINGS, stats: KEY_STATS });
+export const _DEFAULTS = Object.freeze({ settings: SETTINGS_DEFAULTS, stats: STATS_DEFAULTS });

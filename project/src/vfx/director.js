@@ -41,6 +41,19 @@ import { tierForRows } from '../config/stages.js';
  */
 
 /**
+ * @typedef {Object} BeatGridLike
+ * Read-only beat-grid surface used for beat-quantized scheduling. Optional
+ * — when omitted, the orchestrator fires every layer immediately. When
+ * present + analyzed + the next beat is within the lookahead window, the
+ * "peripheral" layers (flash, shockwave, veil, envReaction) fire ON the
+ * beat instead.
+ * @property {boolean} isAnalyzed
+ * @property {number}  secondsUntilNextBeat
+ * @property {number}  nextBeatTimeSec
+ * @property {(at: number, fn: () => void) => void} scheduleAt
+ */
+
+/**
  * @typedef {Object} DirectorApi
  * @property {(x: number, y: number, color: number) => void} impactRing
  * @property {(cells: Array<{col:number,row:number}>, dropRows: number, color: number) => void} hardDropTrail
@@ -48,10 +61,11 @@ import { tierForRows } from '../config/stages.js';
  * @property {(level: number) => void} levelUpFx
  * @property {StageControllerLike}  [stageController]   Stage 8b — present once stages are wired.
  * @property {LineClearLayers}      [lineClearLayers]   Stage 8b — recipe-gated emitter callbacks.
+ * @property {BeatGridLike}         [beatGrid]          Optional — enables beat-quantized scheduling.
  */
 
 /**
- * LineClearOrchestrator — Stage 8b of plan_particle_2.md.
+ * LineClearOrchestrator — Stage 8b + beat-quantized scheduling.
  *
  * Subscribes (via registerDirector) to LINE_CLEAR; reads
  * `stageController.spec.clearRecipe[tier]` for the active stage; fires only
@@ -59,13 +73,55 @@ import { tierForRows } from '../config/stages.js';
  * single knob that turns "every clear fires every layer faintly" into
  * "single is muted, triple is escalated, Tetris is cinematic" (plan §1.6.3).
  *
+ * If `beatGrid` is provided AND analyzed AND the next beat is within
+ * `BEAT_QUANTIZE_WINDOW_SEC`, the "peripheral" layers (flash, shockwave,
+ * veil, envReaction) are scheduled to fire ON the next beat. The
+ * "intra-case" layers (sparkle) always fire immediately — they're tied to
+ * the cleared rows' visual cascade, not the music. Plan §1.6.4 / §9.5
+ * binding: "the room responds *with* the beat."
+ *
  * Pure logic — receives spawn callbacks, never touches THREE/DOM/audio.
  *
- * @param {{ stageController: StageControllerLike, lineClearLayers: LineClearLayers }} deps
+ * @param {{ stageController: StageControllerLike, lineClearLayers: LineClearLayers, beatGrid?: BeatGridLike }} deps
  */
-export function createLineClearOrchestrator({ stageController, lineClearLayers }) {
+// Maximum delay we'll tolerate to "wait for the beat." Past this, the
+// scheduled flash/shockwave/veil would visibly trail the clear cascade,
+// which reads as a stutter rather than a punctuation. 200 ms keeps the
+// visual coupling tight while still allowing meaningful quantization.
+const BEAT_QUANTIZE_WINDOW_SEC = 0.20;
+
+export function createLineClearOrchestrator({ stageController, lineClearLayers, beatGrid = null }) {
   if (!stageController) throw new Error('LineClearOrchestrator requires stageController');
   if (!lineClearLayers) throw new Error('LineClearOrchestrator requires lineClearLayers');
+
+  // `beatGrid` may be either the resolved object OR a zero-arg thunk that
+  // returns it. Thunk form lets call sites pass `() => beatGrid` when the
+  // beat grid is declared after `registerDirector` runs — without it,
+  // referencing a `const` before its declaration is a TDZ error and
+  // crashes module load.
+  function _resolveBeatGrid() {
+    if (beatGrid == null) return null;
+    return typeof beatGrid === 'function' ? beatGrid() : beatGrid;
+  }
+
+  // Decide whether to fire `fn` now or schedule it to the next beat.
+  // Falls back to immediate firing whenever beatGrid isn't ready or the
+  // next beat is outside the quantization window — graceful degradation
+  // when the BPM analyzer hasn't returned yet, between songs, or on
+  // tracks with bad confidence.
+  function fireOrSchedule(fn) {
+    const bg = _resolveBeatGrid();
+    if (!bg || !bg.isAnalyzed) {
+      fn();
+      return;
+    }
+    const delay = bg.secondsUntilNextBeat;
+    if (delay == null || delay <= 0 || delay > BEAT_QUANTIZE_WINDOW_SEC) {
+      fn();
+      return;
+    }
+    bg.scheduleAt(bg.nextBeatTimeSec, fn);
+  }
 
   return {
     /**
@@ -79,33 +135,30 @@ export function createLineClearOrchestrator({ stageController, lineClearLayers }
       if (!recipe) return;
 
       // Layer 2 — stage-palette sparkle. Always present at every tier in the
-      // current stages; included in the recipe so a future "no-sparkle" stage
-      // can opt out without code changes.
+      // current stages; tied to the cleared-row cascade visually, so it
+      // fires immediately regardless of the beat grid.
       if (recipe.sparkle && lineClearLayers.sparkle) {
         lineClearLayers.sparkle(rows, colors);
       }
-      // Layer 5 — flash slabs (row-aligned, color-tinted). Tetris-tier in
-      // the seed stages.
+      // Layer 5 — flash slabs. Beat-quantized when possible (peaks on the
+      // beat for cinematic punch).
       if (recipe.flash && lineClearLayers.flash) {
-        lineClearLayers.flash(rows, colors);
+        fireOrSchedule(() => lineClearLayers.flash(rows, colors));
       }
-      // Layer 3 — shockwave ring. Triple+ in the seed stages. The fallback
-      // color is white if the gameplay event omits overallColor.
+      // Layer 3 — shockwave ring. Beat-quantized.
       if (recipe.shockwave && lineClearLayers.shockwave) {
-        lineClearLayers.shockwave(rows, overallColor != null ? overallColor : 0xffffff, simultaneous);
+        const color = overallColor != null ? overallColor : 0xffffff;
+        fireOrSchedule(() => lineClearLayers.shockwave(rows, color, simultaneous));
       }
-      // Layer 6 — full-screen accent veil (camera-space tonemap bias).
-      // Tetris+ in the seed stages.
+      // Layer 6 — full-screen accent veil. Beat-quantized.
       if (recipe.veil && lineClearLayers.veil) {
-        lineClearLayers.veil(simultaneous);
+        fireOrSchedule(() => lineClearLayers.veil(simultaneous));
       }
-      // Layer 7 — environment reaction (outside the case). Stage 8c. Reads
-      // the stage accent from `spec.accentHex` and passes it to the emitter
-      // so the streaks read as "the room reacting" in the stage palette,
-      // not as a continuation of the block-color burst inside the case.
+      // Layer 7 — environment reaction (outside the case). Beat-quantized.
+      // Stage accent (not block color) — §1.6.2 rule 2.
       if (recipe.envReaction && lineClearLayers.envReaction) {
         const accent = (spec && spec.accentHex != null) ? spec.accentHex : 0xffffff;
-        lineClearLayers.envReaction(rows, accent, simultaneous);
+        fireOrSchedule(() => lineClearLayers.envReaction(rows, accent, simultaneous));
       }
     },
   };
@@ -145,11 +198,14 @@ export function registerDirector(bus, api) {
   // Line clear: orchestrator gates the recipe layers. Wired only when the
   // call site supplies the stage controller + layer callbacks; older call
   // sites that don't pass them keep working with no LINE_CLEAR handling
-  // (clearLines() owns the model-side updates regardless).
+  // (clearLines() owns the model-side updates regardless). `beatGrid` is
+  // optional — when present, the orchestrator quantizes peripheral layers
+  // to the next beat for cinematic punch.
   if (api.stageController && api.lineClearLayers) {
     const orchestrator = createLineClearOrchestrator({
       stageController: api.stageController,
       lineClearLayers: api.lineClearLayers,
+      beatGrid:        api.beatGrid,
     });
     offs.push(
       bus.on(EVENTS.LINE_CLEAR, (payload) => orchestrator.onClear(payload))

@@ -231,6 +231,28 @@ export function createAudioPlayback({ voices = {}, bgmEl = null, volumes = {} } 
     if (state.bgmEl)  state.bgmEl.volume = state.muted ? 0 : vol.bgm;
   }
 
+  // Settings-panel sliders (plan_UI_1.md §3.6). Each updates BOTH the
+  // cached volume table AND the live gain so the running session hears
+  // the change immediately. BGM volume routes through `bgmEl.volume`
+  // because the bgmGain stage is `1.0` by design (mute uses bgmEl, not
+  // the gain node, so existing mute behaviour stays unchanged).
+  function setBgmVolume(v) {
+    vol.bgm = clamp01(v);
+    if (state.bgmEl && !state.muted) state.bgmEl.volume = vol.bgm;
+  }
+  function setVoiceVolume(v) {
+    vol.voice = clamp01(v);
+    if (state.voiceGain) state.voiceGain.gain.value = vol.voice;
+  }
+  function setSfxVolume(v) {
+    vol.sfx = clamp01(v);
+    if (state.sfxGain) state.sfxGain.gain.value = vol.sfx;
+  }
+  function clamp01(v) { return Math.max(0, Math.min(1, +v)); }
+  function getVolumes() {
+    return { bgm: vol.bgm, voice: vol.voice, sfx: vol.sfx };
+  }
+
   // Stage 5b — exposed so the beat-grid can decode the BGM into an
   // AudioBuffer for offline BPM/downbeat analysis. Null when called before
   // init(); caller must await audio.init() first.
@@ -286,6 +308,10 @@ export function createAudioPlayback({ voices = {}, bgmEl = null, volumes = {} } 
     playVoice,
     playSfx,
     setMuted,
+    setBgmVolume,
+    setVoiceVolume,
+    setSfxVolume,
+    volumes: getVolumes,
     decode,
     createBgmRecorder,
     get muted() { return state.muted; },

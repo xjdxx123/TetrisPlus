@@ -219,7 +219,7 @@
   .score-burst-inner.tier-3 { font-size: 84px; }
   .score-burst-inner.tier-4 { font-size: 104px; }
 
-  .help-toggle, .audio-toggle {
+  .help-toggle, .audio-toggle, .settings-toggle {
     position: fixed;
     bottom: 18px;
     z-index: 6;
@@ -235,10 +235,17 @@
     transition: color 0.2s, border-color 0.2s;
     line-height: 1;
   }
-  .help-toggle  { right: 22px; }
-  .audio-toggle { right: 62px; font-size: 14px; }
-  .help-toggle:hover, .audio-toggle:hover { color: var(--ink); border-color: rgba(108,240,255,0.5); }
+  .help-toggle     { right: 22px; }
+  .audio-toggle    { right: 62px; font-size: 14px; }
+  .settings-toggle { right: 102px; font-size: 16px; }
+  .help-toggle:hover, .audio-toggle:hover, .settings-toggle:hover {
+    color: var(--ink); border-color: rgba(108,240,255,0.5);
+  }
   .audio-toggle.muted { color: rgba(255,140,140,0.9); border-color: rgba(255,140,140,0.45); }
+  .settings-toggle.is-open {
+    color: var(--accent); border-color: rgba(108,240,255,0.7);
+    box-shadow: 0 0 16px rgba(108,240,255,0.25);
+  }
 
   /* Game over overlay */
   .game-over {
@@ -336,6 +343,7 @@
     <h4 style="margin-top:10px;">Panels</h4>
     <div class="row"><span>Drag in 3D</span><span>Click + drag panel</span></div>
   </div>
+  <button class="settings-toggle" id="settingsToggle" title="Settings (O)">⚙</button>
   <button class="audio-toggle" id="audioToggle" title="Mute / unmute audio">🔊</button>
   <button class="help-toggle" id="helpToggle" title="Toggle controls">?</button>
   <!-- crossorigin="anonymous" is REQUIRED for Web Audio MediaElementSource

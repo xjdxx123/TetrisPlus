@@ -94,6 +94,13 @@ export function createBeatGrid({
     preBeat: new Set(),  // (timeUntilSec: number, beatIndex: number) — fired ENTERING window
   };
 
+  // One-shot schedule queue. Each entry fires exactly once when song-time
+  // crosses `atSongTimeSec`. Used by the LineClearOrchestrator to peak its
+  // flash/shockwave/veil layers ON the next beat for beat-quantized punch.
+  // Plain array — at most a handful pending at a time so the linear scan
+  // in tick() is cheaper than a heap.
+  const pendingSchedules = [];
+
   function on(name, fn) {
     const set = subs[name];
     if (!set) throw new Error(`unknown beat event '${name}'. Available: ${Object.keys(subs).join(',')}`);
@@ -118,6 +125,10 @@ export function createBeatGrid({
     lastPreBeatIdx = -1;
     cachedAnticipation = 0;
     cachedPhase = 0;
+    // Drop any pending schedules whose `atSongTimeSec` is in the future of
+    // a previous song-time. After a loop / scrub-back, those would never
+    // fire in the new timeline. Cheaper than per-schedule timeline tracking.
+    pendingSchedules.length = 0;
   }
 
   function resetDriftState() {
@@ -290,6 +301,36 @@ export function createBeatGrid({
     // Phase: 0..1 sawtooth across one beat. 0 just after a beat, → 1 next beat.
     const m = elapsed % period;
     cachedPhase = ((m + period) % period) / period;
+
+    // One-shot scheduled callbacks. Iterate backwards so we can splice in
+    // place; small-N so O(n²) doesn't matter.
+    for (let i = pendingSchedules.length - 1; i >= 0; i--) {
+      if (t >= pendingSchedules[i].atSongTimeSec) {
+        const { fn } = pendingSchedules[i];
+        pendingSchedules.splice(i, 1);
+        try { fn(); }
+        catch (err) { console.error('[beat-grid] scheduled callback threw:', err); }
+      }
+    }
+  }
+
+  /**
+   * Schedule a one-shot callback to fire when song-time crosses `atSongTimeSec`.
+   * Driven by the same tick that drives beat events, so it works correctly
+   * across pause / scrub / loop boundaries (a schedule that becomes
+   * unreachable after a scrub-back is dropped by resetSchedulerState).
+   *
+   * @param {number}   atSongTimeSec  Song-time at which to fire.
+   * @param {() => void} fn
+   */
+  function scheduleAt(atSongTimeSec, fn) {
+    if (typeof fn !== 'function') {
+      throw new Error('beat-grid scheduleAt requires a function');
+    }
+    if (typeof atSongTimeSec !== 'number' || !isFinite(atSongTimeSec)) {
+      throw new Error('beat-grid scheduleAt requires a finite atSongTimeSec');
+    }
+    pendingSchedules.push({ atSongTimeSec, fn });
   }
 
   return {
@@ -298,6 +339,7 @@ export function createBeatGrid({
     analyze,
     analyzeWindow,
     recordOnset,
+    scheduleAt,
     reset: resetSchedulerState,
 
     // Snapshot accessors. These are read every frame by bindings + the
@@ -320,6 +362,16 @@ export function createBeatGrid({
       if (bpm == null) return null;
       const period = 60 / bpm;
       return offsetSec + (lastBeatIdx + 1) * period;
+    },
+    /** Seconds until the next projected beat. `null` if not analyzed yet.
+     *  Negative if we're inside the small "current beat just passed" gap
+     *  before tick() advances `lastBeatIdx`. Read-only — bindings + the
+     *  orchestrator use this to decide "schedule, or fire now?". */
+    get secondsUntilNextBeat() {
+      if (bpm == null) return null;
+      const period = 60 / bpm;
+      const nextBeat = offsetSec + (lastBeatIdx + 1) * period;
+      return nextBeat - getSongTimeSec();
     },
   };
 }

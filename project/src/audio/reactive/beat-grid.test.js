@@ -383,3 +383,86 @@ describe('beat-grid — drift detection', () => {
     expect(grid.driftMeanAbsSec).toBeCloseTo(0, 3);
   });
 });
+
+// ===================================================================
+// Schedule queue (used by LineClearOrchestrator beat quantization).
+// ===================================================================
+
+describe('beat-grid — scheduleAt', () => {
+  it('fires a scheduled callback once song-time crosses the target', async () => {
+    const { grid, advance } = makeGrid({ bpm: 120 });
+    await grid.analyze({});
+    const fn = vi.fn();
+    grid.scheduleAt(0.30, fn);
+    advance(0.10);
+    expect(fn).not.toHaveBeenCalled();
+    advance(0.10);  // now at 0.20 — still before
+    expect(fn).not.toHaveBeenCalled();
+    advance(0.15);  // now at 0.35 — past 0.30
+    expect(fn).toHaveBeenCalledTimes(1);
+  });
+
+  it('fires each callback exactly once even if many ticks pass', async () => {
+    const { grid, advance } = makeGrid({ bpm: 120 });
+    await grid.analyze({});
+    const fn = vi.fn();
+    grid.scheduleAt(0.05, fn);
+    advance(0.10);
+    advance(0.10);
+    advance(0.10);
+    expect(fn).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects non-function callbacks', async () => {
+    const { grid } = makeGrid();
+    await grid.analyze({});
+    expect(() => grid.scheduleAt(0.5, null)).toThrow();
+    expect(() => grid.scheduleAt(NaN, () => {})).toThrow();
+    expect(() => grid.scheduleAt(Infinity, () => {})).toThrow();
+  });
+
+  it('reset() drops pending schedules (loop / scrub-back path)', async () => {
+    const { grid, advance, setSongTime } = makeGrid({ bpm: 120 });
+    await grid.analyze({});
+    const fn = vi.fn();
+    grid.scheduleAt(0.30, fn);
+    setSongTime(0.20);
+    grid.tick();
+    expect(fn).not.toHaveBeenCalled();
+    grid.reset();
+    advance(0.50);  // would normally fire the callback at t=0.30
+    expect(fn).not.toHaveBeenCalled();
+  });
+
+  it('handler error is logged but does not break the scheduler', async () => {
+    const { grid, advance } = makeGrid({ bpm: 120 });
+    await grid.analyze({});
+    const goodFn = vi.fn();
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    grid.scheduleAt(0.10, () => { throw new Error('boom'); });
+    grid.scheduleAt(0.10, goodFn);
+    advance(0.20);
+    expect(goodFn).toHaveBeenCalledTimes(1);
+    expect(errSpy).toHaveBeenCalled();
+    errSpy.mockRestore();
+  });
+});
+
+describe('beat-grid — secondsUntilNextBeat', () => {
+  it('returns null until analyze() resolves', () => {
+    const { grid } = makeGrid();
+    expect(grid.secondsUntilNextBeat).toBeNull();
+  });
+
+  it('measures the gap from the current song-time to the next beat', async () => {
+    const { grid, setSongTime } = makeGrid({ bpm: 120, offset: 0.10 });
+    await grid.analyze({});
+    // Period 0.5s. Beats at 0.10, 0.60, 1.10, ...
+    setSongTime(0.50);   // before first beat at 0.10? no — 0.50 > 0.10
+    grid.tick();         // crosses beat #0 at 0.10; lastBeatIdx becomes 0
+    setSongTime(0.55);   // 0.05s before beat #1 at 0.60
+    expect(grid.secondsUntilNextBeat).toBeCloseTo(0.05, 5);
+    setSongTime(0.20);   // immediately after beat #0; beat #1 still at 0.60
+    expect(grid.secondsUntilNextBeat).toBeCloseTo(0.40, 5);
+  });
+});

@@ -228,3 +228,104 @@ describe('LineClearOrchestrator', () => {
     expect(layers.veil).toHaveBeenCalledTimes(1);
   });
 });
+
+// ===================================================================
+// Beat-quantized scheduling. The orchestrator routes the peripheral
+// layers (flash/shockwave/veil/envReaction) through `beatGrid.scheduleAt`
+// when the next beat is within the quantization window. Sparkle always
+// fires immediately because it's coupled to the cleared-row cascade.
+// ===================================================================
+describe('LineClearOrchestrator — beat quantization', () => {
+  // Minimal beat-grid stub — exposes the four properties the orchestrator
+  // reads. `scheduleAt` records calls; we manually invoke pending callbacks
+  // in tests to simulate the beat firing.
+  const stubBeatGrid = ({ analyzed = true, secondsUntilNextBeat = 0.10 } = {}) => {
+    const pending = [];
+    return {
+      get isAnalyzed() { return analyzed; },
+      secondsUntilNextBeat,
+      nextBeatTimeSec: 100 + secondsUntilNextBeat,
+      scheduleAt: vi.fn((_at, fn) => pending.push(fn)),
+      _firePending() { for (const fn of pending) fn(); pending.length = 0; },
+    };
+  };
+
+  it('schedules flash/shockwave/veil to the next beat when in-window', () => {
+    const layers = stubLayers();
+    layers.envReaction = vi.fn();
+    const stage = {
+      spec: {
+        accentHex: 0x6cf0ff,
+        clearRecipe: { tetris: { sparkle: true, flash: true, shockwave: true, veil: true, envReaction: true } },
+      },
+    };
+    const beatGrid = stubBeatGrid({ secondsUntilNextBeat: 0.10 });
+    const orch = createLineClearOrchestrator({ stageController: stage, lineClearLayers: layers, beatGrid });
+
+    orch.onClear({ rows: [3, 2, 1, 0], simultaneous: 4, colors: [1, 2, 3, 4], overallColor: 0x808080 });
+
+    // Sparkle fires immediately (cascade-coupled).
+    expect(layers.sparkle).toHaveBeenCalledTimes(1);
+    // Peripheral layers are scheduled, not fired yet.
+    expect(layers.flash).not.toHaveBeenCalled();
+    expect(layers.shockwave).not.toHaveBeenCalled();
+    expect(layers.veil).not.toHaveBeenCalled();
+    expect(layers.envReaction).not.toHaveBeenCalled();
+    expect(beatGrid.scheduleAt).toHaveBeenCalledTimes(4);
+
+    // Simulating the beat firing dispatches all four scheduled callbacks.
+    beatGrid._firePending();
+    expect(layers.flash).toHaveBeenCalledTimes(1);
+    expect(layers.shockwave).toHaveBeenCalledTimes(1);
+    expect(layers.veil).toHaveBeenCalledTimes(1);
+    expect(layers.envReaction).toHaveBeenCalledTimes(1);
+    // Color routing is preserved through the schedule wrapper.
+    expect(layers.envReaction).toHaveBeenCalledWith([3, 2, 1, 0], 0x6cf0ff, 4);
+  });
+
+  it('falls back to immediate firing when next beat is outside the window', () => {
+    const layers = stubLayers();
+    const stage = stubStage({
+      tetris: { sparkle: true, flash: true, shockwave: true, veil: true },
+    });
+    // 350ms is past the 200ms quantize window — should fire now, not defer.
+    const beatGrid = stubBeatGrid({ secondsUntilNextBeat: 0.35 });
+    const orch = createLineClearOrchestrator({ stageController: stage, lineClearLayers: layers, beatGrid });
+
+    orch.onClear({ rows: [3, 2, 1, 0], simultaneous: 4, colors: [1, 2, 3, 4], overallColor: 0x808080 });
+
+    expect(beatGrid.scheduleAt).not.toHaveBeenCalled();
+    expect(layers.flash).toHaveBeenCalledTimes(1);
+    expect(layers.shockwave).toHaveBeenCalledTimes(1);
+    expect(layers.veil).toHaveBeenCalledTimes(1);
+  });
+
+  it('falls back to immediate firing when beat-grid is unanalyzed', () => {
+    const layers = stubLayers();
+    const stage = stubStage({
+      tetris: { sparkle: true, flash: true, shockwave: true, veil: true },
+    });
+    const beatGrid = stubBeatGrid({ analyzed: false, secondsUntilNextBeat: 0.05 });
+    const orch = createLineClearOrchestrator({ stageController: stage, lineClearLayers: layers, beatGrid });
+
+    orch.onClear({ rows: [3, 2, 1, 0], simultaneous: 4, colors: [1, 2, 3, 4], overallColor: 0x808080 });
+
+    expect(beatGrid.scheduleAt).not.toHaveBeenCalled();
+    expect(layers.flash).toHaveBeenCalledTimes(1);
+    expect(layers.shockwave).toHaveBeenCalledTimes(1);
+  });
+
+  it('still works without a beatGrid argument (legacy call sites)', () => {
+    const layers = stubLayers();
+    const stage = stubStage({
+      tetris: { sparkle: true, flash: true, shockwave: true, veil: true },
+    });
+    const orch = createLineClearOrchestrator({ stageController: stage, lineClearLayers: layers });
+
+    orch.onClear({ rows: [3, 2, 1, 0], simultaneous: 4, colors: [1, 2, 3, 4], overallColor: 0x808080 });
+
+    expect(layers.flash).toHaveBeenCalledTimes(1);
+    expect(layers.shockwave).toHaveBeenCalledTimes(1);
+    expect(layers.veil).toHaveBeenCalledTimes(1);
+  });
+});

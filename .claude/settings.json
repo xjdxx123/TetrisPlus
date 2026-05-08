@@ -27,7 +27,8 @@
       "Bash(npm test *)",
       "Bash(npx vitest *)",
       "Bash(npm audit *)",
-      "Bash(xargs -I {} cat {})"
+      "Bash(xargs -I {} cat {})",
+      "Bash(awk -F: '$1>=3480 && $1<=3640')"
     ]
   }
 }

@@ -339,6 +339,198 @@ export function installPanelStyles() {
     .tp-status--ok    { color: var(--muted, #8b93ad); }
     .tp-status--warn  { color: #ff9c4a; opacity: 0.9; }
     .tp-status--err   { color: #ff5c8a; opacity: 0.9; }
+
+    /* === Settings panel — tabs, sliders, segmented, buttons (plan_UI_1.md) === */
+    .tp-tab-bar {
+      display: flex;
+      gap: 0;
+      margin: 0 -2px 10px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    }
+    .tp-tab {
+      flex: 1;
+      padding: 7px 4px;
+      border: none;
+      background: transparent;
+      color: var(--muted, #8b93ad);
+      font-family: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+      font-size: 10px;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      cursor: pointer;
+      border-bottom: 2px solid transparent;
+      margin-bottom: -1px;
+      transition: color 0.15s, border-color 0.15s;
+    }
+    .tp-tab:hover { color: var(--ink, #f3f5fb); }
+    .tp-tab.is-active {
+      color: var(--accent, #6cf0ff);
+      border-bottom-color: var(--accent, #6cf0ff);
+    }
+
+    .tp-tab-pane { display: none; }
+    .tp-tab-pane.is-active { display: block; }
+
+    /* Slider row — label / track / readout in one flex line. */
+    .tp-slider-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 5px 4px;
+    }
+    .tp-slider-row__label {
+      flex: 0 0 130px;
+      font-size: 11px;
+      color: var(--ink, #f3f5fb);
+    }
+    .tp-slider-row__readout {
+      flex: 0 0 38px;
+      text-align: right;
+      font-family: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+      font-size: 10px;
+      color: var(--muted, #8b93ad);
+      font-variant-numeric: tabular-nums;
+    }
+    .tp-slider {
+      flex: 1;
+      appearance: none;
+      -webkit-appearance: none;
+      height: 4px;
+      background: rgba(255, 255, 255, 0.08);
+      border-radius: 2px;
+      outline: none;
+      cursor: pointer;
+    }
+    .tp-slider::-webkit-slider-thumb {
+      appearance: none;
+      -webkit-appearance: none;
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      background: var(--accent, #6cf0ff);
+      box-shadow: 0 0 8px rgba(108, 240, 255, 0.6);
+      cursor: grab;
+    }
+    .tp-slider::-moz-range-thumb {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      background: var(--accent, #6cf0ff);
+      box-shadow: 0 0 8px rgba(108, 240, 255, 0.6);
+      cursor: grab;
+      border: none;
+    }
+    .tp-slider-track-pulse {
+      animation: tp-pulse 0.42s ease-out;
+    }
+    @keyframes tp-pulse {
+      0%   { box-shadow: 0 0 0 0 rgba(108, 240, 255, 0.6); }
+      50%  { box-shadow: 0 0 0 6px rgba(108, 240, 255, 0.0); }
+      100% { box-shadow: 0 0 0 0 rgba(108, 240, 255, 0.0); }
+    }
+
+    /* Segmented button group — preset choice (mood, particle quality). */
+    .tp-segmented {
+      display: flex;
+      gap: 4px;
+      flex: 1;
+    }
+    .tp-segmented__btn {
+      flex: 1;
+      padding: 5px 8px;
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid rgba(255, 255, 255, 0.10);
+      border-radius: 4px;
+      color: var(--muted, #8b93ad);
+      font-family: inherit;
+      font-size: 10px;
+      letter-spacing: 0.10em;
+      text-transform: uppercase;
+      cursor: pointer;
+      transition: color 0.15s, border-color 0.15s, background 0.15s;
+    }
+    .tp-segmented__btn:hover {
+      color: var(--ink, #f3f5fb);
+      border-color: rgba(108, 240, 255, 0.35);
+    }
+    .tp-segmented__btn.is-active {
+      color: var(--accent, #6cf0ff);
+      background: rgba(108, 240, 255, 0.10);
+      border-color: rgba(108, 240, 255, 0.55);
+      box-shadow: 0 0 12px rgba(108, 240, 255, 0.20);
+    }
+
+    /* Generic button — used by Reset / Test / Start. */
+    .tp-button {
+      padding: 7px 12px;
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 5px;
+      color: var(--ink, #f3f5fb);
+      font-family: inherit;
+      font-size: 11px;
+      letter-spacing: 0.06em;
+      cursor: pointer;
+      transition: color 0.15s, border-color 0.15s, background 0.15s;
+    }
+    .tp-button:hover {
+      border-color: rgba(108, 240, 255, 0.45);
+      background: rgba(108, 240, 255, 0.06);
+    }
+    .tp-button--primary {
+      color: var(--accent, #6cf0ff);
+      border-color: rgba(108, 240, 255, 0.50);
+      background: rgba(108, 240, 255, 0.08);
+    }
+    .tp-button--danger {
+      color: #ff8aa0;
+      border-color: rgba(255, 138, 160, 0.45);
+    }
+    .tp-button--danger.is-armed {
+      color: #fff;
+      background: rgba(255, 138, 160, 0.20);
+      animation: tp-pulse-danger 0.42s ease-out;
+    }
+    @keyframes tp-pulse-danger {
+      0%   { box-shadow: 0 0 0 0 rgba(255, 92, 138, 0.6); }
+      50%  { box-shadow: 0 0 0 6px rgba(255, 92, 138, 0.0); }
+      100% { box-shadow: 0 0 0 0 rgba(255, 92, 138, 0.0); }
+    }
+    .tp-button:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+    }
+
+    /* Stats display rows. */
+    .tp-stat-row {
+      display: flex;
+      justify-content: space-between;
+      padding: 4px 4px;
+      font-size: 11px;
+    }
+    .tp-stat-row__label {
+      color: var(--muted, #8b93ad);
+    }
+    .tp-stat-row__value {
+      color: var(--ink, #f3f5fb);
+      font-family: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+      font-variant-numeric: tabular-nums;
+    }
+    .tp-stat-row--hero .tp-stat-row__value {
+      color: var(--accent, #6cf0ff);
+      font-size: 18px;
+      text-shadow: 0 0 16px rgba(108, 240, 255, 0.4);
+    }
+    .tp-mode-note {
+      margin-top: 12px;
+      padding: 8px 10px;
+      border: 1px dashed rgba(255, 255, 255, 0.10);
+      border-radius: 5px;
+      color: var(--muted, #8b93ad);
+      font-size: 10px;
+      letter-spacing: 0.05em;
+      line-height: 1.5;
+    }
   `;
 
   const style = document.createElement('style');
@@ -474,6 +666,136 @@ export function makeHueSlider({ initial = 200, onChange, previewBackground } = {
     },
     setEnabled(on) {
       slider.disabled = !on;
+    },
+  };
+}
+
+/**
+ * Slider row — `[label] [range slider] [readout]`. Shared by every Effects/
+ * Audio tab knob in the settings panel. Live readout updates on `input`,
+ * commit (and `onChange`) fires on `change` (release) so heavy consumers
+ * (re-baking textures, etc.) don't thrash on continuous drag.
+ *
+ * @param {Object} opts
+ * @param {string}   opts.label
+ * @param {number}   opts.min
+ * @param {number}   opts.max
+ * @param {number}   [opts.step=0.01]
+ * @param {number}   opts.value
+ * @param {(v: number) => void} opts.onChange  Commit on release.
+ * @param {(v: number) => void} [opts.onInput] Live during drag (optional).
+ * @param {(v: number) => string} [opts.format] Override default toFixed(2).
+ * @returns {{ row: HTMLElement, slider: HTMLInputElement, readout: HTMLElement,
+ *            setValue: (v: number, opts?: { silent?: boolean, pulse?: boolean }) => void }}
+ */
+export function makeSliderRow({
+  label, min, max, step = 0.01, value,
+  onChange, onInput,
+  format = (v) => v.toFixed(2),
+} = {}) {
+  const row = document.createElement('div');
+  row.className = 'tp-slider-row';
+
+  const labelEl = document.createElement('span');
+  labelEl.className = 'tp-slider-row__label';
+  labelEl.textContent = label;
+  row.appendChild(labelEl);
+
+  const slider = document.createElement('input');
+  slider.type = 'range';
+  slider.className = 'tp-slider';
+  slider.min = String(min);
+  slider.max = String(max);
+  slider.step = String(step);
+  slider.value = String(value);
+
+  const readout = document.createElement('span');
+  readout.className = 'tp-slider-row__readout';
+  readout.textContent = format(value);
+
+  row.appendChild(slider);
+  row.appendChild(readout);
+
+  slider.addEventListener('input', () => {
+    const v = parseFloat(slider.value);
+    readout.textContent = format(v);
+    if (onInput) onInput(v);
+  });
+  slider.addEventListener('change', () => {
+    const v = parseFloat(slider.value);
+    if (onChange) onChange(v);
+  });
+
+  return {
+    row, slider, readout,
+    setValue(v, { silent = false, pulse = false } = {}) {
+      slider.value = String(v);
+      readout.textContent = format(v);
+      if (pulse) {
+        slider.classList.remove('tp-slider-track-pulse');
+        // Force reflow so removing + re-adding the class restarts the
+        // animation. Without this, two pulses in quick succession see
+        // only the first one.
+        void slider.offsetWidth;
+        slider.classList.add('tp-slider-track-pulse');
+      }
+      if (!silent && onChange) onChange(v);
+    },
+  };
+}
+
+/**
+ * Segmented button row — exclusive selection across N labelled buttons.
+ * Used by Mood preset, Particle quality, and the Mode tab's mode picker.
+ *
+ * @param {Object} opts
+ * @param {Array<{ value: string, label: string, disabled?: boolean }>} opts.choices
+ * @param {string} opts.value     Currently active choice.
+ * @param {(value: string) => void} opts.onChange
+ * @param {string} [opts.label]   If set, renders a `[label] [segmented]` row.
+ * @returns {{ row: HTMLElement, buttons: Map<string, HTMLButtonElement>,
+ *            setValue: (v: string, opts?: { silent?: boolean }) => void }}
+ */
+export function makeSegmentedRow({ choices, value, onChange, label } = {}) {
+  const row = document.createElement('div');
+  row.className = 'tp-slider-row';
+
+  if (label) {
+    const labelEl = document.createElement('span');
+    labelEl.className = 'tp-slider-row__label';
+    labelEl.textContent = label;
+    row.appendChild(labelEl);
+  }
+
+  const seg = document.createElement('div');
+  seg.className = 'tp-segmented';
+  const buttons = new Map();
+  for (const c of choices) {
+    const btn = document.createElement('button');
+    btn.className = 'tp-segmented__btn';
+    btn.type = 'button';
+    btn.textContent = c.label;
+    if (c.disabled) btn.disabled = true;
+    if (c.value === value) btn.classList.add('is-active');
+    btn.addEventListener('click', () => {
+      if (c.disabled) return;
+      _setActive(c.value);
+      if (onChange) onChange(c.value);
+    });
+    buttons.set(c.value, btn);
+    seg.appendChild(btn);
+  }
+  row.appendChild(seg);
+
+  function _setActive(v) {
+    for (const [k, btn] of buttons) btn.classList.toggle('is-active', k === v);
+  }
+
+  return {
+    row, buttons,
+    setValue(v, { silent = false } = {}) {
+      _setActive(v);
+      if (!silent && onChange) onChange(v);
     },
   };
 }

@@ -12,6 +12,10 @@ import { createNebulaSky } from '../world/nebula-sky.js';
 import { createMoon } from '../world/moon.js';
 import { hueForLevel, pickFlashHue } from '../config/nebula-progression.js';
 import { paletteFromHue, STAGE_HUE_FOR_NAME } from '../config/palettes.js';
+import { loadSettings, saveSettings, loadStats, saveStats, _resetForTests as _resetStorageForTests } from '../engine/storage.js';
+import { Mode } from '../gameplay/mode.js';
+import { createSettingsPanel } from '../ui/settings-panel.js';
+import { makeToggleRow, makeHueSlider } from '../ui/panel-shared.js';
 import { createBreathe } from '../camera/breathe.js';
 import { createStageController, STAGE_EVENTS } from '../vfx/stage-controller.js';
 import { STAGES } from '../config/stages.js';
@@ -48,14 +52,59 @@ import { lineClearScore, levelForLines, SOFT_DROP_POINTS_PER_CELL, HARD_DROP_POI
 import { KICK_OFFSETS, nextRotation } from '../gameplay/rotation.js';
 
 // =============================================================
-// Tweaks — three expressive controls that reshape the feel
+// Tweaks — original three (gravity / mood / shatterPower) are written by
+// the host editor app via the EDITMODE markers + postMessage; the rest
+// are knobs surfaced through the settings panel (plan_UI_1.md §3.5).
+// Their defaults sit alongside the editor-managed defaults; persistence
+// happens through `engine/storage.js` (loaded right below).
 // =============================================================
 const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
   "gravity": 1.9,
   "mood": "void",
   "shatterPower": 2.5
 }/*EDITMODE-END*/;
-const TWEAKS = { ...TWEAK_DEFAULTS };
+// Settings-panel-managed defaults — added beside the editor-managed ones
+// so a single TWEAKS object exposes everything to the consumer sites.
+const TWEAK_PANEL_DEFAULTS = Object.freeze({
+  shakeMul:        1.0,
+  slowmoMul:       1.0,
+  trailMul:        1.0,
+  rimGlowMul:      1.0,
+  particleQuality: 'mid',  // 'low' | 'mid' | 'high'
+});
+const TWEAKS = { ...TWEAK_DEFAULTS, ...TWEAK_PANEL_DEFAULTS };
+
+// Hydrate from localStorage at boot. Order: TWEAK defaults → saved
+// effects overlay → mood applied. The host-protocol path (postMessage
+// from the editor app) still overwrites later if a host is attached;
+// "last write wins" was the v1 contract.
+const _persistedSettings = loadSettings();
+{
+  const e = _persistedSettings.effects || {};
+  if (typeof e.shatterPower    === 'number') TWEAKS.shatterPower    = e.shatterPower;
+  if (typeof e.shakeMul        === 'number') TWEAKS.shakeMul        = e.shakeMul;
+  if (typeof e.slowmoMul       === 'number') TWEAKS.slowmoMul       = e.slowmoMul;
+  if (typeof e.trailMul        === 'number') TWEAKS.trailMul        = e.trailMul;
+  if (typeof e.rimGlowMul      === 'number') TWEAKS.rimGlowMul      = e.rimGlowMul;
+  if (typeof e.mood            === 'string') TWEAKS.mood            = e.mood;
+  if (typeof e.particleQuality === 'string') TWEAKS.particleQuality = e.particleQuality;
+}
+if (typeof _persistedSettings.mode === 'string') Mode.select(_persistedSettings.mode);
+
+// Captured at boot so triggerGameOver can compute play-time. Reset on
+// goRestart so each session contributes its own delta.
+let sessionStart = (typeof performance !== 'undefined') ? performance.now() : 0;
+let _piecesThisSession = 0;
+let _linesThisSession = 0;
+
+// §3.5 particleQuality — preset that scales every shard / sparkle count.
+// Discrete (low/mid/high) on purpose: communicates "this affects perf"
+// vs. a continuous slider that invites micro-tuning. Multiplier is
+// looked up in one place so adding a new tier is a single-table edit.
+const PARTICLE_QUALITY_MUL = Object.freeze({ low: 0.5, mid: 1.0, high: 1.5 });
+function particleQualityMul() {
+  return PARTICLE_QUALITY_MUL[TWEAKS.particleQuality] || 1.0;
+}
 
 // Mood presets — recolor rim/fill lights and case frame
 const MOOD_PRESETS = {
@@ -1595,9 +1644,12 @@ function spawnHardDropTrail(cells, dropRows, color) {
     slot.mesh.position.set(x, yMid, 0);
     slot.mesh.scale.set(1, trailHeight, 1);
     slot.mesh.material.color.setHex(color);
-    slot.mesh.material.opacity = 0.5;
-    slot.mesh.visible = true;
-    trailFx.push({ slot, life: 0, maxLife: 0.45, startOpacity: 0.5 });
+    // §3.5 trailMul: 0..1 scales the spawn opacity. At 0 the trail is
+    // visually disabled even though the slot still reserves bookkeeping.
+    const startOpacity = 0.5 * TWEAKS.trailMul;
+    slot.mesh.material.opacity = startOpacity;
+    slot.mesh.visible = startOpacity > 0;
+    trailFx.push({ slot, life: 0, maxLife: 0.45, startOpacity });
   }
 }
 
@@ -1687,6 +1739,9 @@ function spawnPiece(key) {
     triggerGameOver();
     return;
   }
+  // §3.8 piecesPlaced — bumped once per spawn (not once per lock) to
+  // catch pieces lost in a top-out without complicating clearLines.
+  _piecesThisSession++;
   activePiece = p;
   rebuildPieceMesh();
   rebuildGhostMesh();
@@ -1896,6 +1951,10 @@ function clearLines(rows) {
   const scoreDelta = lineClearScore(rows.length, level);
   score += scoreDelta;
   lines += rows.length;
+  // §3.8 totals: track per-session line count so triggerGameOver can
+  // increment Stats.totals.linesCleared without double-counting across
+  // the goRestart reset.
+  _linesThisSession += rows.length;
   bus.emit(EVENTS.SCORE_DELTA, { delta: scoreDelta, total: score, source: 'line-clear' });
   const newLevel = levelForLines(lines);
   if (newLevel > level) {
@@ -1970,8 +2029,10 @@ function clearLines(rows) {
   // Slow-mo on triple/tetris clears (G3)
   triggerSlowmo(rows.length);
 
-  // Camera shake — scales with rows AND shatter power
-  shake.setForce((0.25 + rows.length * 0.22) * TWEAKS.shatterPower);
+  // Camera shake — scales with rows AND shatter power. shakeMul (§3.5)
+  // lets nervous players turn shake down without nuking the shatter
+  // particle counts that share the shatterPower lever.
+  shake.setForce((0.25 + rows.length * 0.22) * TWEAKS.shatterPower * TWEAKS.shakeMul);
   // Punch-zoom on multi-line clears (≥2)
   if (rows.length >= 2) {
     triggerPunchZoom(rows.length);
@@ -2157,10 +2218,11 @@ function shatter(cube) {
   cube.getWorldPosition(_shardWorld);
   _shardColorObj.set(color);
 
-  // Shard count scales with SHATTER_POWER (1x = 8/cube, cinematic = 16/cube).
+  // Shard count scales with SHATTER_POWER (1x = 8/cube, cinematic = 16/cube)
+  // and the particleQuality preset (§3.5) — low halves count, high adds 50%.
   // All shards write into the shared InstancedBufferGeometry — zero allocations,
   // one draw call regardless of total active shard count.
-  const count = Math.round(8 * TWEAKS.shatterPower);
+  const count = Math.round(8 * TWEAKS.shatterPower * particleQualityMul());
   for (let i = 0; i < count; i++) {
     const idx = _shardCursor;
     _shardCursor = (_shardCursor + 1) % SHARD_CAPACITY;
@@ -2571,6 +2633,28 @@ function triggerGameOver() {
   if (gameOver) return;
   gameOver = true;
   bus.emit(EVENTS.GAME_OVER, { score, lines, level });
+  // §3.8 high-score plumbing. Run BEFORE goRestart resets `score` etc.
+  // — top-outs that the player quits on must still record the run. Stats
+  // are flushed synchronously so the write survives a tab close.
+  try {
+    const stats = loadStats();
+    if (score > (stats.highScore || 0)) stats.highScore = score;
+    if (!stats.modeBests[Mode.current]) stats.modeBests[Mode.current] = { score: 0, lines: 0, level: 1 };
+    const best = stats.modeBests[Mode.current];
+    if (score > (best.score || 0)) {
+      best.score = score; best.lines = lines; best.level = level;
+    }
+    if (!stats.totals) stats.totals = { linesCleared: 0, piecesPlaced: 0, playTimeMs: 0 };
+    stats.totals.linesCleared  = (stats.totals.linesCleared  || 0) + _linesThisSession;
+    stats.totals.piecesPlaced  = (stats.totals.piecesPlaced  || 0) + _piecesThisSession;
+    stats.totals.playTimeMs    = (stats.totals.playTimeMs    || 0) +
+      Math.round((typeof performance !== 'undefined' ? performance.now() : 0) - sessionStart);
+    stats.lastUpdated = new Date().toISOString();
+    saveStats(stats, { flush: true });
+    if (settingsPanel) settingsPanel.refreshStats();
+  } catch (err) {
+    console.warn('[stats] failed to persist game-over stats:', err);
+  }
 }
 document.getElementById('goRestart').addEventListener('click', () => {
   // Reset
@@ -2636,6 +2720,11 @@ document.getElementById('goRestart').addEventListener('click', () => {
   holdPiece = null;
   nextQueue = [];
   resetAnnouncerForNewGame();
+  // §3.8 reset session-counters so the next game contributes a clean
+  // delta to Stats.totals on triggerGameOver.
+  sessionStart = (typeof performance !== 'undefined') ? performance.now() : 0;
+  _piecesThisSession = 0;
+  _linesThisSession = 0;
   document.getElementById('gameOver').classList.remove('show');
   spawnPiece();
 });
@@ -2708,6 +2797,18 @@ window.addEventListener('keydown', (e) => {
     case 'KeyR':
       resetCamera();
       break;
+    case 'KeyO':
+      // plan_UI_1.md §3.4 — Settings panel toggle. Don't fire if focus
+      // is on a slider / select / text input (e.g. typing in the URL bar
+      // overlay), matching the existing E/F panel-toggle gates.
+      if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT')) break;
+      if (settingsPanel) {
+        settingsPanel.toggle();
+        syncSettingsToggleChrome();
+        _persistSettingsSnapshot();
+      }
+      e.preventDefault();
+      break;
   }
 });
 window.addEventListener('keyup', (e) => {
@@ -2748,13 +2849,22 @@ function triggerPunchZoom(rowCount) {
 let gameTimeScale = 1.0;
 const slowmo = { active: false, t: 0, holdScale: 1.0, holdDur: 0, releaseDur: 0 };
 function triggerSlowmo(rowCount) {
+  // §3.5 slowmoMul scales the holdScale away from 1.0 (real-time). At
+  // mul=1 we get the authored holdScale; at mul=0 the scale is 1.0 (no
+  // slow-mo); at mul=0.5 we land halfway between authored and real-time.
+  function blendedHold(authored) {
+    return 1.0 - (1.0 - authored) * TWEAKS.slowmoMul;
+  }
   if (rowCount === 4) {
-    slowmo.holdScale = 0.35; slowmo.holdDur = 0.75; slowmo.releaseDur = 0.55;
+    slowmo.holdScale = blendedHold(0.35); slowmo.holdDur = 0.75; slowmo.releaseDur = 0.55;
   } else if (rowCount === 3) {
-    slowmo.holdScale = 0.55; slowmo.holdDur = 0.50; slowmo.releaseDur = 0.45;
+    slowmo.holdScale = blendedHold(0.55); slowmo.holdDur = 0.50; slowmo.releaseDur = 0.45;
   } else {
     return; // 1- or 2-line clears stay real-time
   }
+  // If the player has slowmoMul = 0, holdScale becomes 1.0 — skip slow-mo
+  // entirely so we don't pay the tween cost for a no-op.
+  if (TWEAKS.slowmoMul <= 0) return;
   slowmo.t = 0;
   slowmo.active = true;
 }
@@ -2910,8 +3020,9 @@ const _burstColor = new THREE.Color();
 function spawnScorePopupBurst(worldPos, color, intensity) {
   // intensity = rowCount (1..4). Tier the densities so a Tetris reads as a
   // distinctly bigger event than a single, not just a louder one.
-  const SHARD_COUNT   = Math.round((20 + intensity * 22) * TWEAKS.shatterPower);
-  const SPARKLE_COUNT = Math.round((50 + intensity * 70) * TWEAKS.shatterPower);
+  const _qm = particleQualityMul();
+  const SHARD_COUNT   = Math.round((20 + intensity * 22) * TWEAKS.shatterPower * _qm);
+  const SPARKLE_COUNT = Math.round((50 + intensity * 70) * TWEAKS.shatterPower * _qm);
   const SPEED_BASE    = 5 + intensity * 1.3;  // m/s
   _burstColor.set(color);
 
@@ -3081,6 +3192,13 @@ function animate(dt, envTime) {
   bindings.tick();
   featureDebug.update();
   playbackProgress.update();
+  // Settings panel — drive the open/close animation tween and keep the
+  // gear-button chrome in sync with the panel's visibility (the panel's
+  // ✕ close button changes state without going through the gear button).
+  if (settingsPanel) {
+    settingsPanel.update(dt);
+    syncSettingsToggleChrome();
+  }
 
   // Stage 1 — starfield rotation + camera FOV breathing. Both wall-clock
   // driven so they keep "breathing" during pause / slow-mo, matching the
@@ -3207,7 +3325,10 @@ function animate(dt, envTime) {
       const aMat = materialCache.get(color + ':a');
       if (aMat) aMat.emissiveIntensity = ACTIVE_EMISSIVE_BASE * emissiveMul * lumaScale;
       const fMat = fresnelMaterialCache.get(color);
-      if (fMat) fMat.uniforms.uIntensity.value = fresnelMul * lumaScale;
+      // §3.5 rimGlowMul scales the active-piece fresnel rim ONLY (not
+      // settling cubes — those use cloned materials and own their own
+      // fade timeline). At 0 the rim disappears; at 1.5 it pops harder.
+      if (fMat) fMat.uniforms.uIntensity.value = fresnelMul * lumaScale * TWEAKS.rimGlowMul;
     }
   }
 
@@ -3496,7 +3617,19 @@ registerDirector(bus, {
   // always-firing. Single-line clears in the seed stages drop flash +
   // shockwave + veil; Tetris+ keeps all four. Stage 8c adds envReaction
   // (Layer 7) — currently only fires for `aurora.tetris`.
+  //
+  // `beatGrid` is the Stage-5b beat detector. When passed, the orchestrator
+  // quantizes the peripheral layers (flash, shockwave, veil, envReaction)
+  // to the next beat if it lands within ~200 ms — gives clears the
+  // distinctive "the room punches *with* the kick" feel. Falls back to
+  // immediate firing on tracks where BPM hasn't been detected yet.
+  //
+  // Passed as a thunk because `beatGrid` (the const) is declared further
+  // down in this file (it depends on the audio bgmEl). Direct reference
+  // would TDZ-throw at module load. The orchestrator resolves the thunk
+  // lazily on each line-clear; by then the binding is initialized.
   stageController,
+  beatGrid: () => beatGrid,
   lineClearLayers: {
     sparkle:     (rows, rowColors)        => emitLineClearBurst(rows, rowColors),
     flash:       (rows, rowColors)        => triggerFlash(rows, rowColors),
@@ -3589,6 +3722,10 @@ window.addEventListener('resize', () => {
 // the module's methods, so the 18 call sites scattered through this file
 // don't need to change. Future PR: replace those call sites with bus events
 // (e.g. events.emit('AUDIO_PLAY_SFX', { name })) and remove this adapter.
+// Pull persisted audio settings into the createAudioPlayback opts so the
+// stored mute / volumes take effect on the very first frame, before any
+// user gesture wakes the AudioContext.
+const _persistedAudio = (_persistedSettings && _persistedSettings.audio) || {};
 const audio = createAudioPlayback({
   voices: {
     freshmeat:    'asset/sounds/freshmeat.wav',
@@ -3605,7 +3742,13 @@ const audio = createAudioPlayback({
     man:          'asset/sounds/man.mp3',
   },
   bgmEl: document.getElementById('bgmAudio'),
+  volumes: {
+    bgm:   typeof _persistedAudio.bgm   === 'number' ? _persistedAudio.bgm   : 0.32,
+    voice: typeof _persistedAudio.voice === 'number' ? _persistedAudio.voice : 0.95,
+    sfx:   typeof _persistedAudio.sfx   === 'number' ? _persistedAudio.sfx   : 0.55,
+  },
 });
+if (_persistedAudio.muted) audio.setMuted(true);
 const initAudio = () => audio.init();
 const playSfx   = (name, arg) => audio.playSfx(name, arg);
 const playVoice = (name)      => audio.playVoice(name);
@@ -3686,9 +3829,13 @@ function _hueGradientCss(hue) {
   return `linear-gradient(to right, ${css.join(', ')})`;
 }
 
+// E-key effects panel — power-user backup view. The same controls now
+// live in the Settings panel (Effects tab + Layers/Atmosphere sections);
+// this floating panel stays hidden by default and can still be brought
+// up with the E key for quick toggle inspection.
 const effectsPanel = createEffectsPanel({
   hotkey: 'KeyE',
-  visibleByDefault: true,
+  visibleByDefault: false,
   stage: stageController,
   stages: Object.fromEntries(Object.entries(STAGES).map(([k, v]) => [k, v.label])),
   // Hue slider — RPG-style continuous picker. Auto toggle defaults ON
@@ -3765,6 +3912,323 @@ const effectsPanel = createEffectsPanel({
     },
   ],
 });
+// =============================================================
+// Settings panel (plan_UI_1.md) — single CSS3D panel with 4 tabs.
+// =============================================================
+// Authored defaults for the "Reset effects" button — values that match
+// what a fresh install gets from storage. Mirrors SETTINGS_DEFAULTS in
+// engine/storage.js; not imported because the panel itself doesn't need
+// to know about persistence — the reset path just rewinds TWEAKS + the
+// sliders, and the slider's onChange persists each one.
+const _EFFECTS_RESET_VALUES = Object.freeze({
+  shatterPower:    2.5,
+  bloom:           0.7,
+  shakeMul:        1.0,
+  slowmoMul:       1.0,
+  trailMul:        1.0,
+  rimGlowMul:      1.0,
+  mood:            'void',
+  particleQuality: 'mid',
+  vignette:        true,
+});
+
+// Persistence helper: snapshot the current TWEAKS + audio + mode + panel
+// pose into the settings blob. Called whenever a slider commits or the
+// panel pose changes; saveSettings debounces the write.
+function _persistSettingsSnapshot() {
+  const audioVols = audio && audio.volumes ? audio.volumes() : { bgm: 0.32, voice: 0.95, sfx: 0.55 };
+  saveSettings({
+    effects: {
+      shatterPower:    TWEAKS.shatterPower,
+      bloom:           bloomPass.strength,
+      shakeMul:        TWEAKS.shakeMul,
+      slowmoMul:       TWEAKS.slowmoMul,
+      trailMul:        TWEAKS.trailMul,
+      rimGlowMul:      TWEAKS.rimGlowMul,
+      mood:            TWEAKS.mood,
+      particleQuality: TWEAKS.particleQuality,
+      vignette:        vignettePass.enabled,
+    },
+    audio: {
+      muted: !!(audio && audio.muted),
+      ...audioVols,
+    },
+    mode: Mode.current,
+    // Snapshot the panel's pose AND its current visibility so a player
+    // who hides the panel keeps it hidden on next launch.
+    panel: {
+      ...(_persistedSettings.panel || { x: 0, y: 0, z: 6, yaw: 0, pitch: 0 }),
+      hidden: settingsPanel ? !settingsPanel.isOpen : false,
+    },
+  });
+}
+
+const settingsPanel = createSettingsPanel({
+  camera,
+  controls,
+  initialPose: _persistedSettings.panel,
+  onPoseChange: (pose) => {
+    // Mutate the persisted-settings cache so _persistSettingsSnapshot
+    // captures the latest pose; saveSettings debounces the write.
+    _persistedSettings.panel = { ..._persistedSettings.panel, ...pose };
+    _persistSettingsSnapshot();
+  },
+  onVisibilityChange: () => {
+    // Panel's own ✕ button or external open/close: persist + sync the
+    // gear button chrome.
+    if (typeof syncSettingsToggleChrome === 'function') syncSettingsToggleChrome();
+    _persistSettingsSnapshot();
+  },
+
+  effects: {
+    shatterPower: {
+      label: 'Shatter power', min: 0.4, max: 2.5, step: 0.05, value: TWEAKS.shatterPower,
+      onChange: (v) => { TWEAKS.shatterPower = v; _persistSettingsSnapshot(); },
+    },
+    bloom: {
+      label: 'Bloom intensity', min: 0.0, max: 1.5, step: 0.01, value: bloomPass.strength,
+      onChange: (v) => {
+        bloomPass.strength = v;
+        // Re-baseline so any in-flight level-up flash returns to the
+        // *new* user-set value, not the old one.
+        _bloomBaseStrength = v;
+        _persistSettingsSnapshot();
+      },
+    },
+    shakeMul: {
+      label: 'Camera shake', min: 0.0, max: 1.5, step: 0.05, value: TWEAKS.shakeMul,
+      onChange: (v) => { TWEAKS.shakeMul = v; _persistSettingsSnapshot(); },
+    },
+    slowmoMul: {
+      label: 'Slow-mo strength', min: 0.0, max: 1.0, step: 0.05, value: TWEAKS.slowmoMul,
+      onChange: (v) => { TWEAKS.slowmoMul = v; _persistSettingsSnapshot(); },
+    },
+    trailMul: {
+      label: 'Drop trail', min: 0.0, max: 1.0, step: 0.05, value: TWEAKS.trailMul,
+      onChange: (v) => { TWEAKS.trailMul = v; _persistSettingsSnapshot(); },
+    },
+    rimGlowMul: {
+      label: 'Rim glow', min: 0.0, max: 1.5, step: 0.05, value: TWEAKS.rimGlowMul,
+      onChange: (v) => { TWEAKS.rimGlowMul = v; _persistSettingsSnapshot(); },
+    },
+    mood: {
+      value: TWEAKS.mood,
+      choices: [
+        { value: 'neon',  label: 'Neon'  },
+        { value: 'icy',   label: 'Icy'   },
+        { value: 'ember', label: 'Ember' },
+        { value: 'void',  label: 'Void'  },
+      ],
+      onChange: (v) => { TWEAKS.mood = v; applyMood(); _persistSettingsSnapshot(); },
+    },
+    particleQuality: {
+      value: TWEAKS.particleQuality,
+      choices: [
+        { value: 'low',  label: 'Low'  },
+        { value: 'mid',  label: 'Mid'  },
+        { value: 'high', label: 'High' },
+      ],
+      onChange: (v) => { TWEAKS.particleQuality = v; _persistSettingsSnapshot(); },
+    },
+    vignette: {
+      value: vignettePass.enabled,
+      onChange: (v) => { vignettePass.enabled = v; _persistSettingsSnapshot(); },
+    },
+    onResetEffects: () => {
+      // Reset every effects-tab knob to authored defaults + force the
+      // panel sliders to display them. Uses setValue with pulse:true so
+      // the player gets visible confirmation.
+      TWEAKS.shatterPower    = _EFFECTS_RESET_VALUES.shatterPower;
+      bloomPass.strength     = _EFFECTS_RESET_VALUES.bloom;
+      _bloomBaseStrength     = _EFFECTS_RESET_VALUES.bloom;
+      TWEAKS.shakeMul        = _EFFECTS_RESET_VALUES.shakeMul;
+      TWEAKS.slowmoMul       = _EFFECTS_RESET_VALUES.slowmoMul;
+      TWEAKS.trailMul        = _EFFECTS_RESET_VALUES.trailMul;
+      TWEAKS.rimGlowMul      = _EFFECTS_RESET_VALUES.rimGlowMul;
+      TWEAKS.mood            = _EFFECTS_RESET_VALUES.mood;
+      TWEAKS.particleQuality = _EFFECTS_RESET_VALUES.particleQuality;
+      vignettePass.enabled   = _EFFECTS_RESET_VALUES.vignette;
+      applyMood();
+      _persistSettingsSnapshot();
+      // Re-render the Effects tab so the sliders snap visually. Pass
+      // explicit values rather than relying on the construction-time
+      // cfg snapshot.
+      settingsPanel.refreshEffects({
+        shatterPower:    TWEAKS.shatterPower,
+        bloom:           bloomPass.strength,
+        shakeMul:        TWEAKS.shakeMul,
+        slowmoMul:       TWEAKS.slowmoMul,
+        trailMul:        TWEAKS.trailMul,
+        rimGlowMul:      TWEAKS.rimGlowMul,
+        mood:            TWEAKS.mood,
+        particleQuality: TWEAKS.particleQuality,
+        vignette:        vignettePass.enabled,
+      });
+    },
+  },
+
+  audio: {
+    muted: {
+      value: !!(audio && audio.muted),
+      onChange: (v) => { audio.setMuted(v); _persistSettingsSnapshot(); },
+    },
+    bgm: {
+      label: 'BGM',   min: 0, max: 1, step: 0.01, value: (audio.volumes && audio.volumes().bgm)   || 0.32,
+      onChange: (v) => { audio.setBgmVolume(v); _persistSettingsSnapshot(); },
+    },
+    voice: {
+      label: 'Voice', min: 0, max: 1, step: 0.01, value: (audio.volumes && audio.volumes().voice) || 0.95,
+      onChange: (v) => { audio.setVoiceVolume(v); _persistSettingsSnapshot(); },
+    },
+    sfx: {
+      label: 'SFX',   min: 0, max: 1, step: 0.01, value: (audio.volumes && audio.volumes().sfx)   || 0.55,
+      onChange: (v) => { audio.setSfxVolume(v); _persistSettingsSnapshot(); },
+    },
+    onTestAnnouncer: () => playVoice('rempage'),
+    onTestSfx:       () => playSfx('clear', 4),
+  },
+
+  mode: {
+    current:      Mode.current,
+    available:    Mode.available,
+    labels:       Mode.labels,
+    descriptions: Mode.descriptions,
+    disabled:     Mode.disabled,
+    onSelect: (m) => { Mode.select(m); _persistSettingsSnapshot(); },
+    onStart:  () => {
+      // Use the existing reset path. Real per-mode rules ship later;
+      // this just gives the button something to do.
+      document.getElementById('goRestart').click();
+    },
+    onChange: (handler) => Mode.onChange(handler),
+  },
+
+  stats: {
+    load: () => loadStats(),
+    reset: () => {
+      // Wipe the stats blob entirely (storage module's _resetForTests
+      // also clears the in-memory shadow — which is what we want here).
+      _resetStorageForTests();
+      // Re-persist current settings so the wipe doesn't take settings
+      // with it.
+      _persistSettingsSnapshot();
+    },
+  },
+});
+cssScene.add(settingsPanel.obj);
+
+// =============================================================
+// Settings panel — Effects tab extensions: layer toggles + atmosphere.
+// =============================================================
+// The original "Effects" tab covers intensity sliders. The toggles here
+// were previously the contents of the E-key effects-panel; folding them
+// into the settings panel gives players one place to find every visual
+// knob (per the user feedback that the two panels' options weren't
+// integrated). The E-panel still exists as a power-user inspection tool
+// but starts hidden by default.
+{
+  const effectsPane = settingsPanel.panes.effects;
+
+  const divider1 = document.createElement('div');
+  divider1.className = 'tp-panel__divider';
+  effectsPane.appendChild(divider1);
+
+  const layersHeader = document.createElement('div');
+  layersHeader.className = 'tp-panel__section-label';
+  layersHeader.textContent = 'Layers';
+  effectsPane.appendChild(layersHeader);
+
+  // Toggle definitions — same wiring the E-panel used. `initiallyOn`
+  // mirrors the previous defaults; `apply` is fired immediately so the
+  // world matches the toggle state at boot.
+  const LAYER_TOGGLES = [
+    { name: 'Nebula sky',           on: true,  apply: (v) => { nebula.mesh.visible = v; } },
+    { name: 'Starfield',             on: true,  apply: (v) => { starfield.group.visible = v; } },
+    { name: 'Bloom',                 on: true,  apply: (v) => { selectiveBloom.combinePass.enabled = v; } },
+    { name: 'Chromatic aberration',  on: true,  apply: (v) => { chromaticPass.enabled = v; } },
+    { name: 'After-image',           on: true,  apply: (v) => { afterimagePass.enabled = v; } },
+    { name: 'Camera breathe',        on: true,  apply: (v) => { breathe.setEnabled(v); } },
+    { name: 'Audio → visuals',       on: true,  apply: (v) => { bindings.setEnabled(v); } },
+    { name: 'Env reaction',          on: true,  apply: (v) => { envReaction.mesh.visible = v; } },
+    { name: 'Moon',                  on: true,  apply: (v) => { moon.setVisible(v); } },
+  ];
+  for (const t of LAYER_TOGGLES) {
+    const row = makeToggleRow({ label: t.name, checked: t.on });
+    row.input.addEventListener('change', () => {
+      try { t.apply(row.input.checked); }
+      catch (err) { console.error(`[settings] ${t.name} toggle threw:`, err); }
+    });
+    // Apply initial state — ensures the world matches the toggle on boot
+    // even if a previous panel had already applied something else.
+    try { t.apply(t.on); } catch { /* ignore */ }
+    effectsPane.appendChild(row.row);
+  }
+
+  const divider2 = document.createElement('div');
+  divider2.className = 'tp-panel__divider';
+  effectsPane.appendChild(divider2);
+
+  const atmosHeader = document.createElement('div');
+  atmosHeader.className = 'tp-panel__section-label';
+  atmosHeader.textContent = 'Atmosphere';
+  effectsPane.appendChild(atmosHeader);
+
+  // Stage dropdown — replicates the E-panel's stage selector.
+  const stageRow = document.createElement('div');
+  stageRow.className = 'tp-row';
+  const stageSelect = document.createElement('select');
+  stageSelect.className = 'tp-select';
+  stageSelect.title = 'Stage';
+  for (const name of stageController.available) {
+    const opt = document.createElement('option');
+    opt.value = name;
+    opt.textContent = (STAGES[name] && STAGES[name].label) || name;
+    if (name === stageController.current) opt.selected = true;
+    stageSelect.appendChild(opt);
+  }
+  stageSelect.addEventListener('change', () => stageController.set(stageSelect.value));
+  stageRow.appendChild(stageSelect);
+  effectsPane.appendChild(stageRow);
+  // Sync the dropdown when the stage is changed via the bus / console.
+  bus.on(STAGE_EVENTS.STAGE_CHANGE, ({ to }) => {
+    if (stageSelect.value !== to) stageSelect.value = to;
+  });
+
+  // Palette hue — auto toggle + slider. Mirrors the E-panel's hue picker
+  // and shares the setOverrideHue / setAutoHue handlers, so dragging
+  // either panel's slider has the same effect.
+  const hueAutoLabel = document.createElement('div');
+  hueAutoLabel.className = 'tp-panel__section-label';
+  hueAutoLabel.style.opacity = '0.7';
+  hueAutoLabel.style.marginTop = '6px';
+  hueAutoLabel.textContent = 'Palette hue';
+  effectsPane.appendChild(hueAutoLabel);
+
+  const hueAuto = makeToggleRow({ label: 'Auto (level-driven)', checked: true });
+  effectsPane.appendChild(hueAuto.row);
+
+  const hueWrap = document.createElement('div');
+  hueWrap.style.cssText = 'padding:4px 4px 8px;';
+  const hueSlider = makeHueSlider({
+    initial: hueForLevel(1),
+    previewBackground: _hueGradientCss,
+    onChange: (h) => {
+      if (hueAuto.input.checked) {
+        hueAuto.input.checked = false;
+        hueSlider.setEnabled(true);
+      }
+      setOverrideHue(h);
+    },
+  });
+  hueSlider.setEnabled(!hueAuto.input.checked);
+  hueWrap.appendChild(hueSlider.wrap);
+  effectsPane.appendChild(hueWrap);
+  hueAuto.input.addEventListener('change', () => {
+    hueSlider.setEnabled(!hueAuto.input.checked);
+    setAutoHue(hueAuto.input.checked);
+  });
+}
+
 // BGM progress + scrubber — click anywhere on the bar to seek. Useful for
 // VFX tuning so you can jump to drops/breakdowns on demand.
 const playbackProgress = createPlaybackProgress({ bgmEl: document.getElementById('bgmAudio') });
@@ -3804,12 +4268,38 @@ function setMuted(b) {
   audio.setMuted(b);
   audioToggleBtn.classList.toggle('muted', audio.muted);
   audioToggleBtn.textContent = audio.muted ? '🔇' : '🔊';
+  // Two views of the same `audio.muted` state — keep the panel toggle
+  // and the bottom-right 🔊 button in sync regardless of which fired
+  // the change.
+  if (settingsPanel) settingsPanel.syncMute(audio.muted);
+  // Persist on every flip so the mute survives reload.
+  _persistSettingsSnapshot();
 }
 const audioToggleBtn = document.getElementById('audioToggle');
 audioToggleBtn.addEventListener('click', (e) => {
   // Click also serves as the unlock gesture if audio hasn't started yet.
   if (!audio.hasContext) initAudio();
   setMuted(!audio.muted);
+  e.currentTarget.blur();
+});
+// Reflect the boot-time mute (loaded from storage) in the button chrome.
+if (audio.muted) {
+  audioToggleBtn.classList.add('muted');
+  audioToggleBtn.textContent = '🔇';
+}
+
+// ⚙ Settings panel toggle (plan_UI_1.md §3.4). Clicking the button or
+// pressing 'O' opens/closes the CSS3D panel. The button's `is-open`
+// class follows the panel state so the chrome highlights cyan when
+// open.
+const settingsToggleBtn = document.getElementById('settingsToggle');
+function syncSettingsToggleChrome() {
+  settingsToggleBtn.classList.toggle('is-open', settingsPanel.isOpen);
+}
+settingsToggleBtn.addEventListener('click', (e) => {
+  settingsPanel.toggle();
+  syncSettingsToggleChrome();
+  _persistSettingsSnapshot();   // remember hide/show across reloads
   e.currentTarget.blur();
 });
 // First user gesture (key or pointer) unlocks audio. Browsers gate
