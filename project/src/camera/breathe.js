@@ -15,6 +15,7 @@ export function createBreathe({
 } = {}) {
   let baseFov = null;
   let intensity = 1.3; // multiplier for Stage 5 audio modulation
+  let enabled = true;
 
   return {
     // Capture the camera's base FOV once at boot. Subsequent calls become a
@@ -25,6 +26,14 @@ export function createBreathe({
 
     update(camera, totalSec) {
       if (baseFov === null) this.bindBase(camera);
+      // When disabled, snap FOV back to base if drifted, then bail.
+      if (!enabled) {
+        if (camera.fov !== baseFov) {
+          camera.fov = baseFov;
+          camera.updateProjectionMatrix();
+        }
+        return;
+      }
       const phase = (totalSec / periodSec) * Math.PI * 2;
       const delta = Math.sin(phase) * amplitudeDeg * intensity;
       camera.fov = baseFov + delta;
@@ -34,7 +43,12 @@ export function createBreathe({
     // Stage 5 hook — audio-reactive bindings will write here.
     setIntensity(v) { intensity = v; },
 
+    // Effects-panel toggle. When disabled, FOV is restored to the base on
+    // the next update tick (visible immediately, before the next render).
+    setEnabled(b) { enabled = !!b; },
+
     // For tests / introspection.
     get baseFov() { return baseFov; },
+    get enabled() { return enabled; },
   };
 }

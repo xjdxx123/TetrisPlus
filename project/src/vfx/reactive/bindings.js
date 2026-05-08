@@ -52,15 +52,44 @@ export function createBindings({ feature, targets } = {}) {
   //   });
   // }
 
+  // Air.norm → chromatic aberration amount (Stage 6).
+  // High-end shimmer (cymbals, hats, sparkly synths) drives a subtle radial
+  // CA. Restrained range — even at uAmount=1 the corner offset is ~6 px on
+  // a 1080p frame; full-screen CA reads as broken display, not cinematic.
+  if (targets.chromatic) {
+    bindings.push({
+      get: () => feature.bands.air.norm,
+      apply: (v) => { targets.chromatic.uniforms.uAmount.value = lerp(0.0, 0.9, v); },
+    });
+  }
+
   // (Stage 5b will add: edge intensity from bass, ambient flow speed from
   // lowMid (after refactoring the _clearAttentionMul conflict), sparkle/dust
-  // spawn rates from mid + air, chromatic aberration from air, kick onset →
-  // beat pulse, etc.)
+  // spawn rates from mid + air, kick onset → beat pulse, etc.)
+
+  let enabled = true;
+
+  // Reset every bound target to a neutral baseline. Used when audio
+  // reactivity is toggled off — without this, the last-modulated values
+  // would freeze in place (bloom stuck dim or amped, CA stuck visible).
+  function resetToBaseline() {
+    if (targets.selectiveBloom) targets.selectiveBloom.setBloomScale(1.0);
+    if (targets.chromatic)       targets.chromatic.uniforms.uAmount.value = 0;
+    if (targets.breathe)         targets.breathe.setIntensity(1.0);
+  }
 
   return {
     tick() {
+      if (!enabled) return;
       for (const b of bindings) b.apply(b.get());
     },
+    setEnabled(b) {
+      const next = !!b;
+      if (next === enabled) return;
+      enabled = next;
+      if (!enabled) resetToBaseline();
+    },
+    get enabled() { return enabled; },
     get bindingCount() { return bindings.length; },
   };
 }

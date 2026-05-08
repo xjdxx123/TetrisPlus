@@ -8,12 +8,16 @@ import { createShake } from '../camera/shake.js';
 import { createPunchZoom } from '../camera/punch-zoom.js';
 import { createAudioPlayback } from '../audio/playback.js';
 import { createStarfield } from '../world/starfield.js';
+import { createNebulaSky } from '../world/nebula-sky.js';
 import { createBreathe } from '../camera/breathe.js';
 import { createSelectiveBloom } from '../rendering/post/selective-bloom.js';
+import { createAfterimagePass } from '../rendering/post/afterimage.js';
+import { createChromaticPass } from '../rendering/post/chromatic.js';
 import { createFeatureBus } from '../audio/reactive/feature-bus.js';
 import { createFeatureDebugOverlay } from '../audio/reactive/debug-overlay.js';
 import { createPlaybackProgress } from '../audio/playback-progress.js';
 import { createBindings } from '../vfx/reactive/bindings.js';
+import { createEffectsPanel } from '../ui/effects-panel.js';
 
 // Shader sources are imported as raw strings via Vite's ?raw suffix.
 // Files live under src/shaders/. This unlocks shader hot-reload during dev
@@ -150,6 +154,16 @@ const starfield = createStarfield({
 });
 scene.add(starfield.group);
 
+// Stage 10 — procedural nebula sky behind everything. Renders before stars
+// (renderOrder -10 vs starfield -1). Try `__nebula.crossfadeTo('ember')`
+// or `'aurora'` from the console to see palette transitions.
+const nebula = createNebulaSky({
+  radius: 130,
+  initialPalette: 'deep-cyan',
+  intensity: 0.4,
+});
+scene.add(nebula.mesh);
+
 const breathe = createBreathe({ amplitudeDeg: 0.4, periodSec: 9 });
 breathe.bindBase(camera);
 
@@ -180,6 +194,18 @@ composer.setPixelRatio(_DPR);
 composer.setSize(window.innerWidth, window.innerHeight);
 composer.addPass(new RenderPass(scene, camera));
 composer.addPass(selectiveBloom.combinePass);
+
+// Stage 6 — afterimage feeds on the bloom-composited HDR so high-bloom
+// regions (sparkles, line-clear flash, hard-drop trails) leave visible tails.
+// Damp 0.85 reads as a mild ghost; >0.92 starts smearing and reads as input
+// lag — keep this conservative.
+const afterimagePass = createAfterimagePass({ damp: 0.85 });
+composer.addPass(afterimagePass);
+
+// Stage 6 — chromatic aberration. Radial UV offset; uAmount bound to
+// bands.air.norm in the bindings layer so high-end shimmer drives it.
+const chromaticPass = createChromaticPass({ amount: 0.0 });
+composer.addPass(chromaticPass);
 
 const VignetteShader = {
   uniforms: {
@@ -2760,6 +2786,8 @@ function animate(dt, envTime) {
   // driven so they keep "breathing" during pause / slow-mo, matching the
   // ambient field below.
   starfield.update(dt);
+  // Stage 10 — nebula time/crossfade advance.
+  nebula.update(dt, envTime);
   breathe.update(camera, envTime);
 
   // Ambient particle field (Phase 1: CPU-driven drift). Uses real-time dt so
@@ -3258,12 +3286,71 @@ const bindings = createBindings({
   targets: {
     selectiveBloom,
     breathe,
+    chromatic: chromaticPass,
   },
 });
 // Live FeatureBus inspector — F key toggles. Visible by default during the
 // Stage 5 verification window; comment out `visibleByDefault: true` once the
 // audio→visual loop has been confirmed working.
 const featureDebug = createFeatureDebugOverlay({ feature: featureBus, audio, hotkey: 'KeyF', visibleByDefault: true });
+
+// Effects toggle panel — E key toggles. Each entry's `onChange` runs once
+// at boot to apply the initial state. The body tint cache lets us cleanly
+// restore the radial gradient when re-enabled.
+const _bodyTintOriginal = document.body.style.background || getComputedStyle(document.body).background;
+const effectsPanel = createEffectsPanel({
+  hotkey: 'KeyE',
+  visibleByDefault: true,
+  effects: [
+    {
+      name: 'Nebula sky',
+      initiallyOn: true,
+      onChange: (on) => { nebula.mesh.visible = on; },
+    },
+    {
+      name: 'Starfield',
+      initiallyOn: true,
+      onChange: (on) => { starfield.group.visible = on; },
+    },
+    {
+      name: 'Bloom',
+      initiallyOn: true,
+      onChange: (on) => { selectiveBloom.combinePass.enabled = on; },
+    },
+    {
+      name: 'Chromatic aberration',
+      initiallyOn: true,
+      onChange: (on) => { chromaticPass.enabled = on; },
+    },
+    {
+      name: 'After-image',
+      initiallyOn: true,
+      onChange: (on) => { afterimagePass.enabled = on; },
+    },
+    {
+      name: 'Camera breathe',
+      initiallyOn: true,
+      onChange: (on) => { breathe.setEnabled(on); },
+    },
+    {
+      name: 'Audio → visuals',
+      initiallyOn: true,
+      onChange: (on) => { bindings.setEnabled(on); },
+    },
+    {
+      name: 'Background tint',
+      initiallyOn: true,
+      onChange: (on) => {
+        document.body.style.background = on ? _bodyTintOriginal : '#000';
+      },
+    },
+    {
+      name: 'Vignette',
+      initiallyOn: true,
+      onChange: (on) => { vignettePass.enabled = on; },
+    },
+  ],
+});
 // BGM progress + scrubber — click anywhere on the bar to seek. Useful for
 // VFX tuning so you can jump to drops/breakdowns on demand.
 const playbackProgress = createPlaybackProgress({ bgmEl: document.getElementById('bgmAudio') });
@@ -3274,6 +3361,8 @@ if (typeof window !== 'undefined') {
   window.__featureDebug = featureDebug;
   window.__audio = audio;
   window.__progress = playbackProgress;
+  window.__nebula = nebula;
+  window.__effectsPanel = effectsPanel;
 }
 function setMuted(b) {
   audio.setMuted(b);
