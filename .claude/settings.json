@@ -17,7 +17,12 @@
       "Bash(git -C /Users/clintongao/coding/TetrisPlus status --short)",
       "Bash(git -C /Users/clintongao/coding/TetrisPlus log --oneline -10)",
       "Bash(node -e ' *)",
-      "Bash(node --check /tmp/tetris_check.mjs)"
+      "Bash(node --check /tmp/tetris_check.mjs)",
+      "Bash(grep -n \"^function\\\\|^const.*=.*{$\\\\|^class\\\\|^// ===\\\\|<script\\\\|THREE\\\\.\\\\|new.*Effect\\\\|audio\\\\|particle\" /Users/clintongao/coding/TetrisPlus/project/tetris.html)",
+      "Bash(grep -v \"^--$\")",
+      "Bash(git mv *)",
+      "Bash(git rm *)",
+      "Bash(npm run *)"
     ]
   }
 }
