@@ -10,6 +10,8 @@ import { createAudioPlayback } from '../audio/playback.js';
 import { createStarfield } from '../world/starfield.js';
 import { createNebulaSky } from '../world/nebula-sky.js';
 import { createBreathe } from '../camera/breathe.js';
+import { createStageController, STAGE_EVENTS } from '../vfx/stage-controller.js';
+import { STAGES } from '../config/stages.js';
 import { createSelectiveBloom } from '../rendering/post/selective-bloom.js';
 import { createAfterimagePass } from '../rendering/post/afterimage.js';
 import { createChromaticPass } from '../rendering/post/chromatic.js';
@@ -163,6 +165,18 @@ const nebula = createNebulaSky({
   intensity: 0.4,
 });
 scene.add(nebula.mesh);
+
+// Stage 8 — stage controller owns the active stage palette + recipe and
+// emits STAGE_CHANGE when switched. Subscribers (nebula crossfade, future
+// sparkle atlas / env-reaction systems) react without holding direct refs
+// to the controller — pure event-driven decoupling per §1.5.
+const stageController = createStageController({ bus, initial: 'cyan-void' });
+
+// Stage 8 ↔ Stage 10 wiring: stage change drives the nebula crossfade.
+// Neither side knows about the other — they meet only through the bus.
+bus.on(STAGE_EVENTS.STAGE_CHANGE, ({ spec }) => {
+  nebula.crossfadeTo(spec.nebulaPalette, 2.5);
+});
 
 const breathe = createBreathe({ amplitudeDeg: 0.4, periodSec: 9 });
 breathe.bindBase(camera);
@@ -451,12 +465,17 @@ const ambientField = (() => {
 // target aesthetic.
 // =============================================================
 
-// Stage palette resolver. MOOD_PRESETS gives us {rim, fill, frame}; we map
-// frame → sparkle hue (the lighter accent that lives in the ambient hue
-// arc) and rim → veil/accent hue (the saturated highlight bloom amplifies).
+// Stage palette resolver — Stage 8 of plan_particle_2.md.
+//
+// Now sources from the stage controller (which owns the active stage's
+// palette/accent/recipe). Returns the same { sparkleHex, accentHex } shape
+// as before so call sites in emitLineClearBurst / triggerLineClearVeil /
+// triggerFlash etc. don't need to change. The richer .palette[] array and
+// .clearRecipe live on stageController.spec for the LineClearOrchestrator
+// in Stage 8b.
 function _stagePalette() {
-  const m = MOOD_PRESETS[TWEAKS.mood] || MOOD_PRESETS.neon;
-  return { sparkleHex: m.frame, accentHex: m.rim };
+  const spec = stageController.spec;
+  return { sparkleHex: spec.sparkleHex, accentHex: spec.accentHex };
 }
 
 // -------------------------------------------------------------
@@ -3301,6 +3320,8 @@ const _bodyTintOriginal = document.body.style.background || getComputedStyle(doc
 const effectsPanel = createEffectsPanel({
   hotkey: 'KeyE',
   visibleByDefault: true,
+  stage: stageController,
+  stages: Object.fromEntries(Object.entries(STAGES).map(([k, v]) => [k, v.label])),
   effects: [
     {
       name: 'Nebula sky',
@@ -3354,6 +3375,14 @@ const effectsPanel = createEffectsPanel({
 // BGM progress + scrubber — click anywhere on the bar to seek. Useful for
 // VFX tuning so you can jump to drops/breakdowns on demand.
 const playbackProgress = createPlaybackProgress({ bgmEl: document.getElementById('bgmAudio') });
+
+// Keep the effects-panel stage dropdown in sync if the stage is changed
+// from the console (`__stage.set('aurora')`) instead of via the dropdown.
+// Registered HERE rather than next to the nebula sub so it doesn't TDZ-hit
+// `effectsPanel` (which is declared above this line but conceptually a
+// later-bound dep — keep the seam tight).
+bus.on(STAGE_EVENTS.STAGE_CHANGE, ({ to }) => effectsPanel.syncStage(to));
+
 // Console handle for ad-hoc inspection: __feature.snapshot() / __bindings.bindingCount
 if (typeof window !== 'undefined') {
   window.__feature = featureBus;
@@ -3363,6 +3392,7 @@ if (typeof window !== 'undefined') {
   window.__progress = playbackProgress;
   window.__nebula = nebula;
   window.__effectsPanel = effectsPanel;
+  window.__stage = stageController;
 }
 function setMuted(b) {
   audio.setMuted(b);

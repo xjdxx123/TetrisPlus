@@ -63,6 +63,8 @@ export default [
         clearTimeout: 'readonly',
         setInterval: 'readonly',
         clearInterval: 'readonly',
+        getComputedStyle: 'readonly',
+        Event: 'readonly',
       },
     },
     rules: {

@@ -8,33 +8,41 @@
 
 ---
 
-## 0. Honest Status (Code, Not Aspiration)
+## 0. Implementation Status (Updated)
 
-Before staging, the actual baseline. `plan_particle_1.md`'s "✅ implemented" claims for Phase 2/3 are documentation-ahead-of-code; this plan is grounded in what `git grep` actually finds.
+This section was last updated **2026-05-08**. It supersedes the original "honest status" baseline — significant work has shipped since the plan was written. Each stage's status badge here is mirrored at the top of its section in §3. Detailed forward roadmap in §9.
 
-| Capability | Real status | Where |
+### 0.1 Per-stage status
+
+| Stage | Status | What's shipped | What's pending |
+|---|---|---|---|
+| 1 — Spatial awareness | ✅ Complete | starfield (600pts), body radial-gradient, camera FOV breathe | — |
+| 2 — Bloom + emissive | ✅ Complete | selective-bloom (material-swap), edge-emissive on glass | hand-rolled Kawase (polish) |
+| 3 — Particle layers | ❌ Not started | — | depth-layered ambient (close/mid/far) |
+| 4 — Curl-noise particles | ❌ Not started | — | 3D noise bake + vertex sampling |
+| 5 — Audio reactive | ⚠ 5a done | analyser, bands, envelope, normalizer, FeatureBus, bindings (2 active), debug overlay (F), playback progress bar | onset detection, beat grid (offline BPM), anticipatory ramps, more bindings |
+| 6 — Advanced post | ⚠ Partial | chromatic aberration, after-image | depth fog, motion blur (deferred), DoF (deferred) |
+| 7 — Glass material | ⚠ Partial | edge-emissive (shipped in Stage 2) | refraction, bass→edge-intensity binding, settle-edge ramp |
+| 8 — Event-driven layered effects | ⚠ 8a done | stage controller, `STAGE_CHANGE` event, `_stagePalette()` reads from controller, dropdown UI, nebula crossfade wiring | LineClearOrchestrator, voxel-fragments / ribbon / env-reaction emitters, beat-quantized scheduling, hold/combo events, HARD_DROP/GAME_OVER director cleanup |
+| 9 — GPU particles | ❌ Not started | — | FBO ping-pong, GPU sim for ambient + sparkle |
+| 10 — Nebula atmosphere | ⚠ Mostly | nebula skybox (3-octave fbm + dual-LUT crossfade), palette LUT system, STAGE_CHANGE → crossfade wiring, console controls | distant cosmic structure, vertical fog gradient, optional audio-modulated intensity |
+
+### 0.2 Bonus tooling delivered (not in original plan)
+
+Worth listing because it materially helps iteration but doesn't appear in the staged plan:
+
+| Tool | Hotkey / handle | Purpose |
 |---|---|---|
-| Composer + bloom + vignette + SMAA | ✅ live | `src/app/main.js`, `src/shaders/vignette.*.glsl` |
-| Glass / fresnel piece + case shaders | ✅ live | `src/shaders/glass.*.glsl`, `src/shaders/glass-case.frag.glsl` |
-| 500-CPU-particle ambient drift | ✅ live, sinusoidal (not curl-noise) | `src/shaders/ambient.*.glsl` |
-| Hard-drop trail (instanced points) | ✅ live | `src/shaders/trail.*.glsl` |
-| Instanced shatter shards | ✅ live | `src/shaders/shard.*.glsl` |
-| Line-clear sparkle pool (instanced points) | ✅ live, **single-layer** (block-color only) | `src/shaders/sparkle.*.glsl` |
-| Camera shake + punch-zoom | ✅ modular | `src/camera/{shake,punch-zoom}.js` |
-| Event bus + clock | ✅ modular | `src/engine/events/bus.js`, `src/engine/time/clock.js` |
-| Director (gameplay → cinematic) | ✅ wires HARD_DROP + LEVEL_UP | `src/vfx/director.js` |
-| Audio playback (SFX + BGM + voices) | ✅ modular | `src/audio/playback.js` |
-| **Audio analysis (FFT / bands / onsets / beat grid)** | ❌ not in code | (referenced as `audio/reactive/*` placeholder folder) |
-| **Curl-noise field, GPU-driven particles** | ❌ not in code | — |
-| **Layered line-clear (block color + stage palette + flash)** | ❌ single-layer only | — |
-| **Stage palette system** | ❌ tweaks have moods, but no per-stage palette + `clearLayerRecipe` | — |
-| **Starfield / cosmic background** | ❌ scene is dark void, no points | — |
-| **Camera breathing / FOV mod** | ❌ not in code | — |
-| **Post chain beyond bloom+vignette+SMAA** | ❌ no CA, no after-image, no fog | — |
-| **Selective bloom (mask, not threshold)** | ❌ everything bloom-eligible | — |
-| **GPU FBO ping-pong sim** | ❌ all particles CPU-allocated | — |
+| FeatureBus debug overlay | `F` / `__featureDebug` | per-band bars (norm + kick), live audio inspection |
+| BGM scrubber | `__progress` | click/drag to seek; jump to drops on demand |
+| Effects panel | `E` / `__effectsPanel` | toggle each effect on/off + master + stage dropdown |
+| Stage controller console | `__stage.set('aurora')` | switch stages from console; emits STAGE_CHANGE |
+| Bus history recorder | `__bus.history()` | last 256 events for debugging dispatch |
+| Window-exposed handles | `__feature`, `__audio`, `__nebula`, etc. | direct introspection from DevTools |
 
-The architectural plumbing (bus, director, clock, modules, shaders-as-files, gameplay isolation) is in place — this is what makes the staging below cheap. The *content* (FeatureBus, GPU sim, layered line-clear, stages) is not. Stages 1–10 in this plan are scoped to that content gap.
+### 0.3 Architectural property held throughout
+
+The plumbing established in `plan_architecture.md` PRs 1–7 — bus + clock + director + module boundaries + ESLint isolation rules — has held cleanly across every shipped stage. No regressions, no architectural drift. New audio→visual code lands in `bindings.js`; new gameplay→VFX code lands in `director.js`; new stage logic lands in `config/stages.js`. Three files, three concerns, no leakage. This is the design property that's making subsequent stages cheap.
 
 ---
 
@@ -172,7 +180,7 @@ If a particle pool ends up reading `score` directly, you've broken bucket 1↔3.
 
 Each stage answers the 10-item template the prompt requires. Stages are *layered* — each ships independently green and the game keeps running. Time estimates are single-developer, focused work, after the architectural refactor in `plan_architecture.md` PRs 1–4 lands (which it has, through PR-7).
 
-### Stage 1 — Basic Spatial Awareness
+### Stage 1 — Basic Spatial Awareness · ✅ Complete
 
 #### 1. Goal
 Make the playfield feel embedded in space, not floating on a black canvas. Buy "atmosphere" with the cheapest possible visual moves.
@@ -283,7 +291,7 @@ Stage 2 turns up the lighting work — bloom tuning + selective bloom + cube edg
 
 ---
 
-### Stage 2 — Bloom and Emissive Systems
+### Stage 2 — Bloom and Emissive Systems · ✅ Complete
 
 #### 1. Goal
 Make the existing geometry *glow*, not just *render*. The single biggest perceived-quality lever in the entire project.
@@ -378,7 +386,7 @@ Stage 3 introduces depth-layered particles that live in the bloom mask. Stage 5 
 
 ---
 
-### Stage 3 — Basic Particle Systems
+### Stage 3 — Basic Particle Systems · ❌ Not started
 
 #### 1. Goal
 Layered ambient particles — three depth strata (close dust, mid drift, far field) instead of the single 500-particle band that exists today. Pre-instanced. Still CPU-driven.
@@ -471,7 +479,7 @@ Stage 4 replaces the per-layer `vel` integration with sampling from a shared 3D 
 
 ---
 
-### Stage 4 — Flow Field Particles (start of "advanced")
+### Stage 4 — Flow Field Particles (start of "advanced") · ❌ Not started
 
 #### 1. Goal
 Particles sample a shared **curl-noise** vector field instead of integrating fixed per-particle velocities. The motion immediately stops looking sinusoidal and starts looking like *fluid*.
@@ -568,7 +576,11 @@ Stage 5's `bands.lowMid.smoothed` modulates `uFlowSpeed` (the "music breathes th
 
 ---
 
-### Stage 5 — Music-Synchronized Visual System
+### Stage 5 — Music-Synchronized Visual System · ⚠ 5a Complete, 5b Pending
+
+> **5a (shipped):** AnalyserNode tap, log-spaced 6 bands, asymmetric envelope follower, running-peak AGC normalizer, half-wave-rectified flux + kick impulse signals, FeatureBus public API, declarative bindings.js layer (2 active bindings: highMid → bloom, air → CA). F-key debug strip-chart overlay. Bonus: BGM scrubber for VFX tuning.
+>
+> **5b (pending):** discrete onset event channel via spectral-flux + adaptive threshold + refractory; offline beat grid via `web-audio-beat-detector`; anticipatory ramps on emission rates 200–300 ms ahead of predicted beats; expanded bindings (FOV breathing intensity, glass edge intensity, sparkle/dust spawn rates). See §9.2.
 
 #### 1. Goal
 Audio drives visuals through a clean signal layer. **Different frequency bands drive different visual concerns** — bass moves slow things, treble moves fast things, beats fire impulses. Don't just "dance to the rhythm"; play different bands against different layers.
@@ -712,7 +724,11 @@ Stage 6's chromatic aberration and after-image both subscribe to `bands.air.norm
 
 ---
 
-### Stage 6 — Advanced Post-Processing System
+### Stage 6 — Advanced Post-Processing System · ⚠ Partial
+
+> **Shipped:** chromatic aberration (radial UV-offset; uAmount bound to `bands.air.norm`), after-image (Three's `AfterimagePass`, damp 0.85).
+>
+> **Pending:** depth-based exponential fog (every shader needs to opt in — bigger lift than it looks); motion blur (camera-velocity only, behind quality flag); DoF (behind quality flag).
 
 #### 1. Goal
 Round out the post chain: chromatic aberration, after-image (motion accumulation), depth-based fog. Defer motion-blur and DoF — both are easy to overdo and the marginal gain is small.
@@ -809,7 +825,11 @@ Stage 7's glass material refraction can sample the post-bloom buffer for "glow r
 
 ---
 
-### Stage 7 — Advanced Block Materials
+### Stage 7 — Advanced Block Materials · ⚠ Partial
+
+> **Shipped:** `fwidth(vNormalW)`-based edge-emissive component on the active piece glow shell (delivered as part of Stage 2); `uEdgeColor` + `uEdgeIntensity` uniforms in [`glass.frag.glsl`](../project/src/shaders/glass.frag.glsl).
+>
+> **Pending:** depth-aware refraction (sample background buffer with `cross(viewDir,normal)`-driven UV offset); `bands.bass.norm → uEdgeIntensity` binding (a 1-line addition in [`bindings.js`](../project/src/vfx/reactive/bindings.js) once we agree on the range); piece-settling animation tied to edge-intensity ramp.
 
 #### 1. Goal
 Make blocks look like *electronic glass* — refractive, edge-emissive, alive in motion. Not just "transparent material with a fresnel."
@@ -898,7 +918,13 @@ Stage 8's line-clear shatter graduates to the `cube-emissive` material — fragm
 
 ---
 
-### Stage 8 — Event-Driven Effects System
+### Stage 8 — Event-Driven Effects System · ⚠ 8a Complete, 8b/c Pending
+
+> **8a (shipped):** stage spec system in [`config/stages.js`](../project/src/config/stages.js) (3 stages: `cyan-void`, `ember-rise`, `aurora`; each with `palette[]` + `accentHex` + `clearRecipe` per tier + `nebulaPalette` cross-ref). [`vfx/stage-controller.js`](../project/src/vfx/stage-controller.js) owns the active stage and emits `STAGE_CHANGE`. `_stagePalette()` in main.js now reads from the controller. `STAGE_CHANGE → nebula.crossfadeTo` wired through the bus. Stage selector dropdown in the effects panel + `__stage` console handle.
+>
+> **8b (pending — the inflection point):** `LineClearOrchestrator` in [`vfx/director.js`](../project/src/vfx/director.js) that subscribes to `LINE_CLEAR` and reads `stage.clearRecipe` to gate which layers fire per tier (single/double/triple/tetris). Currently the recipe is *defined* but not *consumed* — `clearLines()` still fires every layer inline.
+>
+> **8c (pending — content):** new emitter modules (`voxel-fragments`, `ribbon`, `env-reaction` per §1.6 layers 1/4/7); `HOLD_PIECE`, `COMBO_INCREMENT`, `COMBO_RESET` event additions; HARD_DROP/GAME_OVER director cleanup; beat-quantized scheduling for layers 3/5/6 (depends on 5b beat grid).
 
 #### 1. Goal
 The full layered event-driven cinematic, per `plan_particle_1.md` §1.6. This is the stage where line clears stop being "okay" and start being "the thing players remember."
@@ -1045,7 +1071,7 @@ Stage 9 promotes the highest-density emitters (sparkle, fragments) to GPU-reside
 
 ---
 
-### Stage 9 — GPU Particle Architecture Upgrade
+### Stage 9 — GPU Particle Architecture Upgrade · ❌ Not started
 
 #### 1. Goal
 Move the highest-count particle layers (ambient drift, sparkle pool) from CPU integration to GPU-resident simulation. Unlock 30k–50k+ ambient particles. Free up several ms of CPU/frame.
@@ -1157,7 +1183,11 @@ Stage 10 nebula uses a similar half-res GPU pass for the volumetric layer; the `
 
 ---
 
-### Stage 10 — Final Atmosphere Layer
+### Stage 10 — Final Atmosphere Layer · ⚠ Mostly Complete
+
+> **Shipped:** procedural nebula skybox in [`world/nebula-sky.js`](../project/src/world/nebula-sky.js) — 3-octave fbm of 3D simplex noise sampled along view direction, two-LUT crossfade via [`shaders/nebula.frag.glsl`](../project/src/shaders/nebula.frag.glsl). Palette LUT system in [`config/palettes.js`](../project/src/config/palettes.js) (4 starter palettes). `STAGE_CHANGE → nebula.crossfadeTo` wired through bus. `__nebula` console handle.
+>
+> **Pending:** distant cosmic structure (low-poly silhouette meshes at radius 60–80); vertical fog gradient (depends on Stage 6 fog); optional `bands.bass.env → nebula.setIntensity` binding (1-line addition).
 
 #### 1. Goal
 The world feels *inhabited* — there's a giant cosmic structure beyond the playfield. Distant galaxies, slow nebulae, sense of immense scale.
@@ -1316,25 +1346,136 @@ When implementing a stage, read both:
 - *This* doc for the goal, scope, and step-by-step plan.
 - `plan_particle_1.md` for the supporting analysis (especially §1.6 for Stage 8, §4 for Stage 5).
 
-## 8. Schedule Sketch (single developer, focused)
+## 8. Schedule — Planned vs Actual
 
-| Stage | Effort | Dependency |
-|---|---|---|
-| 1 — Spatial awareness | 0.5 day | none |
-| 2 — Bloom + emissive + selective | 1.5 days | 1 |
-| 3 — Particle layers | 1 day | 2 |
-| 4 — Curl-noise field | 1.5 days | 3 |
-| 5 — Audio reactive (FeatureBus) | **3 days** (the heaviest plumbing) | 2 |
-| 6 — Advanced post chain | 1.5 days | 2, 5 |
-| 7 — Glass material polish | 1 day | 2, 6 |
-| 8 — Event-driven layered effects | 2.5 days | 5, 7 |
-| 9 — GPU particle sim | 2 days | 3, 4 |
-| 10 — Nebula + atmosphere | 1.5 days | 2 |
-| **Total** | **~16 days** | sequential |
+| Stage | Original budget | Done | Remaining | Notes |
+|---|---|---|---|---|
+| 1 — Spatial awareness | 0.5 day | 0.5 ✅ | — | shipped |
+| 2 — Bloom + emissive + selective | 1.5 days | 1.5 ✅ | — | shipped |
+| 3 — Particle layers | 1 day | 0 ❌ | 1 day | not started; deferred (existing 500-particle field is adequate) |
+| 4 — Curl-noise field | 1.5 days | 0 ❌ | 1.5 days | not started |
+| 5 — Audio reactive | 3 days | 1.5 ⚠ | 1.5 days | 5a complete (analyser/bands/envelope/normalizer/bindings); 5b pending (onsets/beat-grid/anticipation/+bindings) |
+| 6 — Advanced post | 1.5 days | 1.0 ⚠ | 0.5 day | CA + after-image done; fog pending; motion blur + DoF deferred |
+| 7 — Glass material | 1 day | 0.3 ⚠ | 0.7 day | edge-emissive done; refraction + bass-binding pending |
+| 8 — Event-driven layered | 2.5 days | 1.0 ⚠ | 1.5 days | 8a (stage system + STAGE_CHANGE) done; 8b (LineClearOrchestrator) + 8c (new emitters) pending |
+| 9 — GPU particle sim | 2 days | 0 ❌ | 2 days | not started |
+| 10 — Nebula + atmosphere | 1.5 days | 1.0 ⚠ | 0.5 day | nebula + crossfade done; distant structure + vertical fog pending |
+| **Total** | **~16 days** | **~7 days** | **~9 days** | — |
 
-Stages 5 and 8 dominate the schedule; everything else is mechanical.
+Stages 5 and 8 still dominate the remaining work. **Stage 8b (LineClearOrchestrator)** is the highest-leverage remaining item — see §9.
 
-## 9. Final Word
+## 9. Roadmap from Here
+
+Concrete next sessions, ordered by **felt-quality lift per day** rather than plan-section number. Each is independently green and ships under one focused session.
+
+### 9.1 — Stage 8b: LineClearOrchestrator (~1.5 days · the inflection point)
+
+The single most "Tetris Effect feel" change still on the board. Stage 8a already wired up the stage controller, palette discipline, and `STAGE_CHANGE` plumbing — the missing piece is the orchestrator that consumes `stage.clearRecipe`.
+
+**Scope**
+- Build `LineClearOrchestrator` in [`src/vfx/director.js`](../project/src/vfx/director.js):
+  1. Subscribe to `EVENTS.LINE_CLEAR`
+  2. Compute tier from `simultaneous` via `tierForRows()` (already in [`config/stages.js`](../project/src/config/stages.js))
+  3. Read `stageController.spec.clearRecipe[tier]`
+  4. For each layer flag: gate the existing inline emitter call (sparkle / flash / shockwave / veil)
+- Refactor [`clearLines()`](../project/src/app/main.js) so it ONLY emits the bus event (model side); the view-side firing moves into the orchestrator
+- Verify tier escalation reads correctly: a single-line clear should now look visibly different from a triple, and a triple visibly different from a tetris
+
+**Why this is high leverage**
+- The recipe is already defined; this PR makes it *active*. Single-line clears stop firing the dramatic flash + shockwave + veil layers (they were always firing before, just faintly because `triggerFlash` and `triggerLineClearVeil` had `rowCount < 4` guards). Result: clears feel **graded** instead of **uniform**.
+- Sets up Stage 8c — once layers are gated by recipe, adding the env-reaction layer to specific stages is one entry per stage.
+
+**Risks**
+- Refactoring `clearLines` view body without losing existing visual behavior. Keep the existing emitter calls; just MOVE them to the orchestrator and gate them by recipe — don't replace with new emitters yet.
+
+### 9.2 — Stage 5b: Onset events + offline beat grid (~1.5 days)
+
+The single most distinctive Tetris Effect feel still missing: anticipation. Live-only audio analysis can never deliver "the room responds *before* the beat" — it requires pre-analyzed BPM.
+
+**Scope**
+- `src/audio/reactive/onset.js`: spectral-flux per band, median-filter window, adaptive threshold, 60ms refractory. Emit discrete `onsets.kick`, `onsets.snare`, `onsets.generic` events on the FeatureBus event channel.
+- Install `web-audio-beat-detector`. On BGM load, decode once into `AudioBuffer`, run BPM + downbeat detection, cache `{bpm, downbeatPhase, confidence}`.
+- `src/audio/reactive/beat-grid.js`: project beat times, emit `beat-in-Δ` events 250ms ahead via `audioContext.currentTime` lookahead.
+- 2–3 anticipatory bindings in [`bindings.js`](../project/src/vfx/reactive/bindings.js): ramp ambient particle emission rate up over the 200ms before predicted beats; gentle bloom-strength climb; sparkle pre-warm.
+- Show beat markers + onset firings on the F-key debug overlay.
+
+**Why this matters**
+- Currently, audio reactivity is *reactive* — bloom pops AFTER the kick lands, not before. The Tetris Effect signature is the *opposite* (visuals lead the audio by ~250ms). This requires the offline beat grid; no shortcut.
+
+### 9.3 — Stage 4: Curl-noise particles (~1.5 days)
+
+Particles still drift sinusoidally per the existing `ambient.vert.glsl`. Curl noise is the canonical "Tetris Effect particle motion" technique.
+
+**Scope**
+- `src/vfx/curl-noise.js`: bake a 128³ RGBA8 3D texture of curl noise at boot (~500ms one-time cost). Rejection-sample 3 scalar Perlin/simplex offsets per voxel, take partial differences for curl.
+- Modify `ambient.vert.glsl` to sample `texture(uCurl, position * uCurlScale)` and add the result × `uFlowSpeed * dt` to position.
+- Add `bindings.js` entry: `bands.lowMid.norm → uFlowSpeed` (range 0.6 → 1.4) — particles flow faster on instrumental energy.
+- Will be reused by Stage 9's GPU sim (same noise texture, same sampling pattern).
+
+**Why this matters**
+- Sinusoidal motion looks scripted; curl-noise reads as fluid. Per `plan_particle_1.md` §1.1: "curl noise is the canonical pattern; the eye sees flow, not points."
+
+### 9.4 — Stage 7: Refraction + bass-driven edges (~1 day)
+
+Cubes currently look like resin (matte under emissive lift). Refraction makes them read as glass.
+
+**Scope**
+- Add `tBackground` sampler uniform on the glass shader. Bind it to a render target storing the post-opaque pre-transparent scene.
+- In `glass.frag.glsl`: sample `tBackground` at UV offset by `cross(viewDir, normal).xy * uRefractionAmount`. Mix with base color weighted by `1 - fres`.
+- Add `bands.bass.norm → uEdgeIntensity` binding (range 0.7 → 1.1) for active piece — already commented out in [`bindings.js`](../project/src/vfx/reactive/bindings.js); just uncomment with a target.
+
+**Risks**
+- Refraction needs a background-buffer render pass before the transparent pass. Requires a small refactor of the render loop (extract a "render opaque scene to background buffer" step). Doable but care needed.
+
+### 9.5 — Stage 8c: env-reaction (one stage, then content) (~1 day)
+
+After 8b, add the §1.6 layer 7 — environment reactions outside the case.
+
+**Scope**
+- Pick **one** stage to demonstrate. Recommend `aurora` → vertical green light streaks shoot up from the cleared rows past the case top on Tetris+. Cheapest and most visible.
+- `src/vfx/emitters/env-reaction.js`: instanced thin quads, additive, lifetime ~1s, animated upward velocity, stage-accent color.
+- Recipe gate: only fire when `stage.clearRecipe[tier].envReaction === true` (extend the recipe shape).
+- Future: per-stage env reactions (water ripple for sea, sand kick for desert) — content work.
+
+### 9.6 — Stage 6 fog + Stage 10 distant structure (~1 day, both)
+
+Polish layer. Both small.
+- Add `scene.fog = new THREE.FogExp2(...)` and modify glass + particle shaders to multiply outgoing color by `exp(-z * density)` factor in fragment. Vertical bias optional.
+- Stage 10 distant structure: 4–6 low-poly silhouette meshes (asteroids, planets) at radius 60–80, parented to a slowly rotating group. Emissive material with a slight bass-modulated brightness.
+
+### 9.7 — Stage 3: Particle layers (~1 day, low priority)
+
+Marginal vs the items above until Stage 9 makes density affordable. Defer until after 8b/5b/4 land.
+
+### 9.8 — Stage 9: GPU particle sim (~2 days, architectural)
+
+Move ambient + sparkle pools from CPU integration to GPU-resident FBO ping-pong. Unlocks 30k+ particle counts; saves ~3ms CPU/frame at current counts. Only worth doing once the visible content stages above are done — without 4+8b, you'd have 30k particles of *nothing in particular*.
+
+### 9.9 — Recommended landing order
+
+If shipping all of 9.1–9.8 sequentially:
+
+1. **Stage 8b** (1.5 days) — biggest perceived lift, lowest architectural risk
+2. **Stage 5b** (1.5 days) — unlocks the anticipation property; required for 8b's beat-quantized scheduling to be more than "fire on lock"
+3. **Stage 4** (1.5 days) — visible motion-language change
+4. **Stage 7** (1 day) — glass becomes glass
+5. **Stage 8c env-reaction** (1 day) — first peripheral spectacle
+6. **Stage 6 fog + Stage 10 distant** (1 day combined) — polish
+7. **Stage 3** (1 day) — depth layers
+8. **Stage 9** (2 days) — GPU sim if particle counts ever justify it
+
+**Total remaining: ~10.5 days** (matches the §8 figure within rounding).
+
+### 9.10 — Two architectural items to track separately
+
+These aren't stages but should land alongside future work:
+
+- **`qualityScalar` LOD knob.** Single 0..1 multiplier scaling per-system particle counts, post-chain depth, mobile DPR. Add when Stage 9 lands; useful enough that an MVP version (`bindings.js`-style table mapping `qualityScalar → various uniforms`) could land sooner.
+- **Per-system frame-time budget HUD.** Profile-during-development tool. Build into the F-key overlay or a new G-key one. Without this, mobile soak testing is guesswork.
+
+---
+
+## 10. Final Word
 
 Half the difficulty of "make it feel like Tetris Effect" is *restraint*: not putting motion blur and DoF on, not bumping bloom strength to 1.5, not cranking sparkle counts to 10k, not letting CA stack with after-image without tuning. The bones in this plan are conservative for that reason.
 
