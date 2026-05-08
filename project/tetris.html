@@ -338,7 +338,12 @@
   </div>
   <button class="audio-toggle" id="audioToggle" title="Mute / unmute audio">🔊</button>
   <button class="help-toggle" id="helpToggle" title="Toggle controls">?</button>
-  <audio id="bgmAudio" src="asset/sounds/bgm_vaporwave.m4a" loop preload="auto"></audio>
+  <!-- crossorigin="anonymous" is REQUIRED for Web Audio MediaElementSource
+       to capture non-silent audio (Stage 5). Without it, the element plays
+       fine through the speakers but createMediaElementSource produces a
+       silent capture — the analyser would read zeros forever. Same-origin
+       assets are not exempt. -->
+  <audio id="bgmAudio" crossorigin="anonymous" src="asset/sounds/bgm_vaporwave.m4a" loop preload="auto"></audio>
 
   <div class="levelup" id="levelup"></div>
   <div class="clear-callout" id="clearCallout"></div>

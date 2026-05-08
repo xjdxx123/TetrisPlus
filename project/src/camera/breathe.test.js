@@ -27,6 +27,7 @@ describe('breathe', () => {
 
   it('peaks at +amplitude at quarter-period', () => {
     const b = createBreathe({ amplitudeDeg: 0.5, periodSec: 10 });
+    b.setIntensity(1.0);   // pin intensity so the test is independent of default tuning
     const cam = fakeCamera(38);
     b.update(cam, 2.5);
     expect(cam.fov).toBeCloseTo(38.5, 5);

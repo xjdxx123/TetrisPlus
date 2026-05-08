@@ -63,6 +63,9 @@ export function createAudioPlayback({ voices = {}, bgmEl = null, volumes = {} } 
     master: null,
     voiceGain: null,
     sfxGain: null,
+    bgmGain: null,                 // gain stage for BGM through Web Audio
+    bgmSource: null,               // MediaElementAudioSourceNode (one per element)
+    analyser: null,                // AnalyserNode tap for audio/reactive
     decoded: Object.create(null),  // name -> AudioBuffer
     currentVoice: null,
     bgmEl,
@@ -90,6 +93,44 @@ export function createAudioPlayback({ voices = {}, bgmEl = null, volumes = {} } 
     state.sfxGain = state.ctx.createGain();
     state.sfxGain.gain.value = vol.sfx;
     state.sfxGain.connect(state.master);
+
+    // Browsers create AudioContext in "suspended" state under autoplay
+    // policy. Without an explicit resume(), the graph processes nothing —
+    // BGM through MediaElementSource would route to silence even though
+    // playback "started." playSfx/playVoice already resume on demand, but
+    // BGM-only sessions never hit those paths.
+    if (state.ctx.state === 'suspended') {
+      state.ctx.resume().catch(() => { /* gesture may still be required */ });
+    }
+
+    // BGM tap (Stage 5 — plan_particle_2.md). Routes the HTMLAudioElement
+    // through Web Audio so the analyser can read its spectrum every frame.
+    //   <audio> → MediaElementSource → bgmGain → analyser → master → destination
+    // BGM volume is still controlled by bgmEl.volume (not bgmGain) so the
+    // existing setMuted() semantics keep working unchanged. createMediaElement
+    // Source can only be called once per element — wrapped in try/catch in
+    // case init() runs twice (HMR, re-entrant boot).
+    //
+    // *** crossorigin="anonymous" on the <audio> element is REQUIRED ***
+    // Without it, the captured audio is silent (analyser reads zeros) even
+    // though the element plays normally to the speakers. See tetris.html.
+    if (state.bgmEl) {
+      state.bgmGain = state.ctx.createGain();
+      state.bgmGain.gain.value = 1.0;
+      state.analyser = state.ctx.createAnalyser();
+      state.analyser.fftSize = 1024;          // 512 frequency bins
+      state.analyser.smoothingTimeConstant = 0; // we do our own smoothing in audio/reactive
+      try {
+        state.bgmSource = state.ctx.createMediaElementSource(state.bgmEl);
+        state.bgmSource.connect(state.bgmGain);
+        state.bgmGain.connect(state.analyser);
+        state.analyser.connect(state.master);
+        console.log('[audio] BGM tap online — analyser bound, fftSize=' + state.analyser.fftSize);
+      } catch (e) {
+        console.warn('[audio] BGM Web-Audio tap unavailable:', e?.message || e);
+        state.analyser = null;  // signal no analyser available
+      }
+    }
 
     // Decode all voice clips in parallel; tolerate individual failures.
     await Promise.all(Object.entries(voices).map(async ([name, url]) => {
@@ -196,6 +237,12 @@ export function createAudioPlayback({ voices = {}, bgmEl = null, volumes = {} } 
     playSfx,
     setMuted,
     get muted() { return state.muted; },
+    // Stage 5 — BGM tap for audio/reactive. Null until init() runs (and may
+    // remain null if MediaElementSource creation failed). Subscribers must
+    // gracefully handle the null case during the first user-gesture window.
+    get analyser() { return state.analyser; },
+    get sampleRate() { return state.ctx ? state.ctx.sampleRate : 0; },
+    get currentTime() { return state.ctx ? state.ctx.currentTime : 0; },
     get ready() { return state.ready; },
     get hasContext() { return !!state.ctx; },
   };

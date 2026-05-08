@@ -9,6 +9,11 @@ import { createPunchZoom } from '../camera/punch-zoom.js';
 import { createAudioPlayback } from '../audio/playback.js';
 import { createStarfield } from '../world/starfield.js';
 import { createBreathe } from '../camera/breathe.js';
+import { createSelectiveBloom } from '../rendering/post/selective-bloom.js';
+import { createFeatureBus } from '../audio/reactive/feature-bus.js';
+import { createFeatureDebugOverlay } from '../audio/reactive/debug-overlay.js';
+import { createPlaybackProgress } from '../audio/playback-progress.js';
+import { createBindings } from '../vfx/reactive/bindings.js';
 
 // Shader sources are imported as raw strings via Vite's ?raw suffix.
 // Files live under src/shaders/. This unlocks shader hot-reload during dev
@@ -149,24 +154,32 @@ const breathe = createBreathe({ amplitudeDeg: 0.4, periodSec: 9 });
 breathe.bindBase(camera);
 
 // =============================================================
-// Post-processing pipeline
-//   RenderPass → UnrealBloom → Vignette → SMAA → OutputPass
-// Bloom is the visual headline (was imported but never wired). Vignette pulls
-// the eye to the case; SMAA replaces the disabled MSAA on offscreen targets.
+// Post-processing pipeline — Stage 2: selective bloom
+//   bloomLayer (masked render → UnrealBloom)  ┐
+//                                              ├─►  combine (additive)  ─►  vignette  ─►  SMAA  ─►  output
+//   regular RenderPass(scene, camera)         ┘
+//
+// Materials with `userData.enableBloom = true` contribute to the bloom layer.
+// Everything else (case glass, locked cube bodies, frame, dim lighting)
+// renders as normal but does NOT bloom — preventing the previous full-scene
+// bloom from washing out the playfield. See rendering/post/selective-bloom.js.
 // =============================================================
+const _DPR = Math.min(window.devicePixelRatio, 2);
+const selectiveBloom = createSelectiveBloom({
+  renderer, scene, camera,
+  width: window.innerWidth, height: window.innerHeight, pixelRatio: _DPR,
+  strength: 0.95,
+  radius: 0.45,
+  threshold: 0.0,
+  bloomScale: 1.0,
+});
+const bloomPass = selectiveBloom.bloomPass;   // alias for legacy strength tweens
+
 const composer = new EffectComposer(renderer);
-composer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+composer.setPixelRatio(_DPR);
 composer.setSize(window.innerWidth, window.innerHeight);
-
 composer.addPass(new RenderPass(scene, camera));
-
-const bloomPass = new UnrealBloomPass(
-  new THREE.Vector2(window.innerWidth, window.innerHeight),
-  0.6,   // strength
-  0.7,   // radius
-  0.85,  // threshold (only highlights bloom)
-);
-composer.addPass(bloomPass);
+composer.addPass(selectiveBloom.combinePass);
 
 const VignetteShader = {
   uniforms: {
@@ -745,6 +758,11 @@ function getCubeMaterial(color, opts = {}) {
     side: THREE.FrontSide,
     depthWrite: true,
   });
+  // Stage 2: cube body (resin) is structural — its emissive contribution is
+  // intentional but should not be a bloom source. The cube CORE (separate
+  // additive material) is what blooms. Without this opt-out, the locked
+  // cubes' own glossy emissive bloomed back through and washed the case.
+  mat.userData.enableBloom = false;
   materialCache.set(key, mat);
   return mat;
 }
@@ -814,6 +832,8 @@ function getActiveFresnelMaterial(color) {
       uIntensity: { value: 1.0 },
       uPower: { value: 2.6 },
       uFloor: { value: 0.06 },
+      uEdgeColor: { value: new THREE.Color(0xffffff) },
+      uEdgeIntensity: { value: 0.55 },
     },
     vertexShader: FRESNEL_VERT,
     fragmentShader: FRESNEL_FRAG,
@@ -833,6 +853,8 @@ function makeFresnelMaterialClone(color, intensity = 1.0) {
       uIntensity: { value: intensity },
       uPower: { value: 2.6 },
       uFloor: { value: 0.06 },
+      uEdgeColor: { value: new THREE.Color(0xffffff) },
+      uEdgeIntensity: { value: 0.55 },
     },
     vertexShader: FRESNEL_VERT,
     fragmentShader: FRESNEL_FRAG,
@@ -862,7 +884,7 @@ const GLASS_FRAG = GLASS_FRAG_CASE;
 function makeGlassMaterial({ tint = 0xc8e6ff, rim = 0xffffff,
                              tintAlpha = 0.05, rimAlpha = 0.55,
                              power = 3.5 } = {}) {
-  return new THREE.ShaderMaterial({
+  const mat = new THREE.ShaderMaterial({
     uniforms: {
       uTint:      { value: new THREE.Color(tint) },
       uRimColor:  { value: new THREE.Color(rim) },
@@ -876,6 +898,11 @@ function makeGlassMaterial({ tint = 0xc8e6ff, rim = 0xffffff,
     depthWrite: false,
     side: THREE.FrontSide, // single visible face per wall — no double-tint stacking
   });
+  // Stage 2: case glass should remain calm — bloom is for the contents, not
+  // the container. The thin emissive trim (frame LineSegments) blooms; the
+  // glass walls themselves do not.
+  mat.userData.enableBloom = false;
+  return mat;
 }
 
 // Active-piece tunables — shared base values that the per-frame pulse rides on.
@@ -1094,6 +1121,9 @@ caseGroup.add(rimLightStrip);
 const backGridMat = new THREE.LineBasicMaterial({
   color: 0x4a8acc, transparent: true, opacity: 0.12,
 });
+// Stage 2: dim reference grid — must NOT bloom or it competes with the
+// playfield contents.
+backGridMat.userData.enableBloom = false;
 const backGridGeo = new THREE.BufferGeometry();
 const backVerts = [];
 const backZ = -PLAY_D / 2 - 0.01;
@@ -1119,6 +1149,8 @@ const innerFloorMat = new THREE.MeshPhysicalMaterial({
   clearcoat: 0.8,
   clearcoatRoughness: 0.1,
 });
+// Stage 2: structural reflective floor — should not bloom.
+innerFloorMat.userData.enableBloom = false;
 const innerFloor = new THREE.Mesh(innerFloorGeo, innerFloorMat);
 innerFloor.rotation.x = -Math.PI / 2;
 innerFloor.position.y = -PLAY_H / 2 + 0.015;
@@ -2716,6 +2748,14 @@ const shake = createShake();
 // state needed here anymore.
 function animate(dt, envTime) {
 
+  // Stage 5 — sample audio FIRST, before any visual code reads streams.
+  // featureBus.tick is a safe no-op until the user gesture wakes the
+  // AudioContext (audio.analyser is null up to that point).
+  featureBus.tick(dt);
+  bindings.tick();
+  featureDebug.update();
+  playbackProgress.update();
+
   // Stage 1 — starfield rotation + camera FOV breathing. Both wall-clock
   // driven so they keep "breathing" during pause / slow-mo, matching the
   // ambient field below.
@@ -3071,6 +3111,9 @@ function animate(dt, envTime) {
   // Apply additive impulse layers around the render call so they don't
   // accumulate into camera.position between frames.
   camera.position.add(shake.offset).add(punchZoom.offset);
+  // Stage 2 — render the bloom layer first (masked render → blur). The
+  // result is sampled by the combine pass inside the main composer below.
+  selectiveBloom.renderBloomLayer();
   composer.render();
   cssRenderer.render(cssScene, camera);
   camera.position.sub(shake.offset).sub(punchZoom.offset);
@@ -3165,7 +3208,7 @@ window.addEventListener('resize', () => {
   renderer.setSize(window.innerWidth, window.innerHeight);
   cssRenderer.setSize(window.innerWidth, window.innerHeight);
   composer.setSize(window.innerWidth, window.innerHeight);
-  bloomPass.setSize(window.innerWidth, window.innerHeight);
+  selectiveBloom.setSize(window.innerWidth, window.innerHeight);
   smaaPass.setSize(
     window.innerWidth * Math.min(window.devicePixelRatio, 2),
     window.innerHeight * Math.min(window.devicePixelRatio, 2),
@@ -3202,6 +3245,36 @@ const audio = createAudioPlayback({
 const initAudio = () => audio.init();
 const playSfx   = (name, arg) => audio.playSfx(name, arg);
 const playVoice = (name)      => audio.playVoice(name);
+
+// Stage 5 — audio reactive feature bus + bindings layer.
+// FeatureBus reads the analyser tap exposed by audio/playback.js. Until the
+// user gesture wakes AudioContext, audio.analyser is null and feature.tick()
+// is a safe no-op (sampler returns null on the first frames).
+// Bindings is the SOLE place an audio stream meets a visual property —
+// no other module may straddle the boundary (plan_particle_2.md §1.5).
+const featureBus = createFeatureBus({ audio });
+const bindings = createBindings({
+  feature: featureBus,
+  targets: {
+    selectiveBloom,
+    breathe,
+  },
+});
+// Live FeatureBus inspector — F key toggles. Visible by default during the
+// Stage 5 verification window; comment out `visibleByDefault: true` once the
+// audio→visual loop has been confirmed working.
+const featureDebug = createFeatureDebugOverlay({ feature: featureBus, audio, hotkey: 'KeyF', visibleByDefault: true });
+// BGM progress + scrubber — click anywhere on the bar to seek. Useful for
+// VFX tuning so you can jump to drops/breakdowns on demand.
+const playbackProgress = createPlaybackProgress({ bgmEl: document.getElementById('bgmAudio') });
+// Console handle for ad-hoc inspection: __feature.snapshot() / __bindings.bindingCount
+if (typeof window !== 'undefined') {
+  window.__feature = featureBus;
+  window.__bindings = bindings;
+  window.__featureDebug = featureDebug;
+  window.__audio = audio;
+  window.__progress = playbackProgress;
+}
 function setMuted(b) {
   audio.setMuted(b);
   audioToggleBtn.classList.toggle('muted', audio.muted);

@@ -22,7 +22,8 @@
       "Bash(grep -v \"^--$\")",
       "Bash(git mv *)",
       "Bash(git rm *)",
-      "Bash(npm run *)"
+      "Bash(npm run *)",
+      "Bash(awk 'NR==780,NR==800; NR==1163,NR==1170; NR==1190,NR==1196; NR==1216,NR==1222; NR==2540,NR==2552' src/app/main.js)"
     ]
   }
 }
