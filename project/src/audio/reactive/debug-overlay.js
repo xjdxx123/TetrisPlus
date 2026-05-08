@@ -7,7 +7,7 @@
 // Pure DOM — no Three.js, no canvas. The cost is one update per frame
 // writing ~24 string properties; trivial.
 
-export function createFeatureDebugOverlay({ feature, audio = null, hotkey = 'KeyF', visibleByDefault = true } = {}) {
+export function createFeatureDebugOverlay({ feature, audio = null, beatGrid = null, hotkey = 'KeyF', visibleByDefault = true } = {}) {
   const bandNames = feature.bandNames;
 
   const root = document.createElement('div');
@@ -74,6 +74,72 @@ export function createFeatureDebugOverlay({ feature, audio = null, hotkey = 'Key
   `;
   root.appendChild(legend);
 
+  // Stage 5b — discrete onset markers. Each channel gets a small dot that
+  // flashes (and a short trailing label flashing strength) whenever an onset
+  // fires; the dot fades over ~250ms. The bar visualisations above show
+  // *continuous* signal; onset dots show *events*.
+  let onsetRows = null;
+  if (feature.onsets) {
+    const onsetSection = document.createElement('div');
+    onsetSection.style.cssText = 'margin-top:10px;padding-top:8px;border-top:1px solid rgba(255,255,255,0.08);display:flex;gap:14px;';
+    const channels = feature.onsets.names;
+    onsetRows = {};
+    for (const name of channels) {
+      const cell = document.createElement('div');
+      cell.style.cssText = 'display:flex;flex-direction:column;align-items:center;gap:3px;flex:1;';
+      cell.innerHTML = `
+        <div style="opacity:0.6;font-size:10px;letter-spacing:0.3px;">${name}</div>
+        <div class="onset-dot" style="
+          width:14px;height:14px;border-radius:50%;
+          background:rgba(255,255,255,0.06);
+          box-shadow:0 0 0 1px rgba(255,255,255,0.10);
+          transition:none;"></div>
+        <div class="onset-strength" style="
+          font-variant-numeric:tabular-nums;font-size:10px;opacity:0.5;">.00</div>
+      `;
+      onsetRows[name] = {
+        dot:      cell.querySelector('.onset-dot'),
+        strength: cell.querySelector('.onset-strength'),
+      };
+      onsetSection.appendChild(cell);
+    }
+    root.appendChild(onsetSection);
+  }
+
+  // Stage 5b — beat-grid status row. Shows BPM + a phase bar + an
+  // anticipation bar. The phase bar sweeps left-to-right between beats; the
+  // anticipation bar fills only during the lookahead window before each
+  // beat, so visually you see a "wind-up" pulse just before every beat.
+  let beatRow = null;
+  if (beatGrid) {
+    const row = document.createElement('div');
+    row.style.cssText = 'margin-top:10px;padding-top:8px;border-top:1px solid rgba(255,255,255,0.08);';
+    row.innerHTML = `
+      <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px;">
+        <span style="opacity:0.7;font-size:10px;letter-spacing:0.3px;">beat-grid</span>
+        <span class="bg-bpm" style="font-variant-numeric:tabular-nums;font-size:10px;opacity:0.9;">analyzing…</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:6px;margin:3px 0;">
+        <div style="width:52px;opacity:0.6;font-size:10px;">phase</div>
+        <div style="flex:1;height:6px;background:rgba(255,255,255,0.06);border-radius:3px;position:relative;overflow:hidden;">
+          <div class="bg-phase" style="position:absolute;inset:0;width:0%;background:rgba(108,240,255,0.5);"></div>
+        </div>
+      </div>
+      <div style="display:flex;align-items:center;gap:6px;margin:3px 0;">
+        <div style="width:52px;opacity:0.6;font-size:10px;">anticip</div>
+        <div style="flex:1;height:6px;background:rgba(255,255,255,0.06);border-radius:3px;position:relative;overflow:hidden;">
+          <div class="bg-antic" style="position:absolute;inset:0;width:0%;background:linear-gradient(90deg,#a0e6ff,#ff5c8a);box-shadow:0 0 8px rgba(255,92,138,0.5);"></div>
+        </div>
+      </div>
+    `;
+    beatRow = {
+      bpm:    row.querySelector('.bg-bpm'),
+      phase:  row.querySelector('.bg-phase'),
+      antic:  row.querySelector('.bg-antic'),
+    };
+    root.appendChild(row);
+  }
+
   document.body.appendChild(root);
 
   let visible = visibleByDefault;
@@ -108,6 +174,64 @@ export function createFeatureDebugOverlay({ feature, audio = null, hotkey = 'Key
         row.barNorm.style.width = (norm * 100).toFixed(1) + '%';
         row.barKick.style.width = (kick * 100).toFixed(1) + '%';
         row.val.textContent = norm.toFixed(2) + '·' + kick.toFixed(2);
+      }
+      // Beat-grid status — BPM, phase, anticipation. Updated every frame; the
+      // anticipation bar will visibly fill during the 250ms before each beat.
+      if (beatRow && beatGrid) {
+        if (beatGrid.isAnalyzing) {
+          beatRow.bpm.textContent = 'analyzing…';
+          beatRow.bpm.style.opacity = '0.55';
+          beatRow.bpm.style.color = '#cbd5ff';
+        } else if (beatGrid.isAnalyzed) {
+          // Stage 5b multi-track support: the drift indicator surfaces when
+          // the running track no longer matches the cached BPM (next analysis
+          // window will reset it). Color shifts so it's visible without text
+          // changes.
+          const drifting = beatGrid.isDrifting;
+          const driftMs = (beatGrid.driftMeanAbsSec * 1000) | 0;
+          beatRow.bpm.textContent = drifting
+            ? `${beatGrid.bpm.toFixed(1)} bpm · drift ${driftMs}ms ⚠`
+            : `${beatGrid.bpm.toFixed(1)} bpm · offs ${beatGrid.offsetSec.toFixed(2)}s`;
+          beatRow.bpm.style.opacity = '0.9';
+          beatRow.bpm.style.color = drifting ? '#ff5c8a' : '#cbd5ff';
+        } else if (beatGrid.analyzeError) {
+          beatRow.bpm.textContent = '⚠ analysis failed';
+          beatRow.bpm.style.opacity = '0.6';
+          beatRow.bpm.style.color = '#ff5c8a';
+        } else {
+          beatRow.bpm.textContent = 'awaiting BGM';
+          beatRow.bpm.style.opacity = '0.45';
+          beatRow.bpm.style.color = '#cbd5ff';
+        }
+        beatRow.phase.style.width = (beatGrid.phase * 100).toFixed(1) + '%';
+        beatRow.antic.style.width = (beatGrid.anticipation * 100).toFixed(1) + '%';
+      }
+      // Onset markers — fade over a fixed wall-clock window. Reads telemetry
+      // from the FeatureBus so the overlay can be turned off mid-session
+      // without leaking listeners. 250ms feels right: fast enough that two
+      // back-to-back kicks read as separate flashes, slow enough that you
+      // can actually see a single fire on a 60Hz display.
+      if (onsetRows && feature.onsets) {
+        const FADE_SEC = 0.25;
+        const now = feature.totalSec || 0;
+        for (const name of feature.onsets.names) {
+          const tele = feature.onsets.telemetry(name);
+          const elapsed = now - tele.lastFireAtSec;
+          const k = Math.max(0, Math.min(1, 1 - elapsed / FADE_SEC));
+          const dot = onsetRows[name].dot;
+          const label = onsetRows[name].strength;
+          if (k > 0) {
+            const alpha = 0.25 + 0.75 * k;
+            dot.style.background = `rgba(255, 92, 138, ${alpha.toFixed(2)})`;
+            dot.style.boxShadow = `0 0 ${(8 + 12 * k).toFixed(0)}px rgba(255, 92, 138, ${(0.6 * k).toFixed(2)}), 0 0 0 1px rgba(255, 92, 138, 0.6)`;
+            label.textContent = tele.lastStrength.toFixed(2);
+            label.style.opacity = (0.4 + 0.6 * k).toFixed(2);
+          } else {
+            dot.style.background = 'rgba(255,255,255,0.06)';
+            dot.style.boxShadow = '0 0 0 1px rgba(255,255,255,0.10)';
+            label.style.opacity = '0.35';
+          }
+        }
       }
     },
     setVisible(v) {

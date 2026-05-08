@@ -231,11 +231,63 @@ export function createAudioPlayback({ voices = {}, bgmEl = null, volumes = {} } 
     if (state.bgmEl)  state.bgmEl.volume = state.muted ? 0 : vol.bgm;
   }
 
+  // Stage 5b — exposed so the beat-grid can decode the BGM into an
+  // AudioBuffer for offline BPM/downbeat analysis. Null when called before
+  // init(); caller must await audio.init() first.
+  function decode(arrayBuffer) {
+    if (!state.ctx) return Promise.reject(new Error('audio context not ready'));
+    return state.ctx.decodeAudioData(arrayBuffer);
+  }
+
+  // Stage 5b live-capture path. Builds an AudioRecorder bound to this
+  // module's AudioContext and adds it as a PARALLEL tap off bgmGain:
+  //
+  //                             ┌──► analyser ──► master ──► destination  (audible)
+  //                             │
+  //   bgm → MediaElement → bgmGain
+  //                             │
+  //                             └──► recorder ──► sinkGain(g=0) ──► destination  (silent capture)
+  //
+  // We deliberately do NOT splice in series — a ScriptProcessor returns
+  // silence on its output by default (we never write to e.outputBuffer
+  // because we only capture), so an in-series splice would mute the BGM.
+  // The recorder's internal sinkGain→destination keeps the processor
+  // "live" so onaudioprocess fires, without adding to the mix.
+  //
+  // Returns the recorder + detach() that removes the parallel connection
+  // and frees the recorder's internal nodes. Null if init() hasn't run or
+  // the BGM tap isn't online.
+  async function createBgmRecorder({ durationSec = 20 } = {}) {
+    if (!state.ctx || !state.bgmGain) return null;
+    let createAudioRecorder;
+    try {
+      ({ createAudioRecorder } = await import('./reactive/audio-recorder.js'));
+    } catch (e) {
+      console.warn('[audio] recorder module load failed:', e?.message || e);
+      return null;
+    }
+    let rec;
+    try {
+      rec = createAudioRecorder({ context: state.ctx, durationSec });
+    } catch (e) {
+      console.warn('[audio] recorder construction failed:', e?.message || e);
+      return null;
+    }
+    state.bgmGain.connect(rec.node);
+    const detach = () => {
+      try { state.bgmGain.disconnect(rec.node); } catch { /* ignore */ }
+      rec.stop();
+    };
+    return { recorder: rec, detach };
+  }
+
   return {
     init,
     playVoice,
     playSfx,
     setMuted,
+    decode,
+    createBgmRecorder,
     get muted() { return state.muted; },
     // Stage 5 — BGM tap for audio/reactive. Null until init() runs (and may
     // remain null if MediaElementSource creation failed). Subscribers must

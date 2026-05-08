@@ -12,7 +12,8 @@
     "test": "vitest"
   },
   "dependencies": {
-    "three": "0.160.0"
+    "three": "0.160.0",
+    "web-audio-beat-detector": "^8.2.36"
   },
   "devDependencies": {
     "@eslint/js": "^9.0.0",

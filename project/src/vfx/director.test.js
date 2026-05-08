@@ -1,13 +1,27 @@
 import { describe, it, expect, vi } from 'vitest';
 import { EventBus } from '../engine/events/bus.js';
 import { EVENTS } from '../gameplay/events.js';
-import { registerDirector } from './director.js';
+import { registerDirector, createLineClearOrchestrator } from './director.js';
 
-const stubApi = () => ({
+const stubApi = (overrides = {}) => ({
   impactRing: vi.fn(),
   hardDropTrail: vi.fn(),
   sfx: vi.fn(),
   levelUpFx: vi.fn(),
+  ...overrides,
+});
+
+const stubLayers = () => ({
+  sparkle:   vi.fn(),
+  flash:     vi.fn(),
+  shockwave: vi.fn(),
+  veil:      vi.fn(),
+});
+
+// Mirrors the shape exported by config/stages.js so the orchestrator's
+// spec-shape coupling is exercised end-to-end without pulling in real stages.
+const stubStage = (recipe) => ({
+  spec: { clearRecipe: recipe },
 });
 
 describe('director', () => {
@@ -65,10 +79,152 @@ describe('director', () => {
     expect(api.levelUpFx).not.toHaveBeenCalled();
   });
 
+  it('skips LINE_CLEAR wiring when stage/layer api is absent', () => {
+    // Old call sites without stage controller still get HARD_DROP/LEVEL_UP
+    // but emitting LINE_CLEAR is a no-op (no throw, no spawn).
+    const bus = new EventBus();
+    const api = stubApi();
+    registerDirector(bus, api);
+    expect(() => {
+      bus.emit(EVENTS.LINE_CLEAR, {
+        rows: [0, 1, 2, 3], simultaneous: 4, colors: [0, 0, 0, 0], overallColor: 0xffffff, scoreDelta: 800,
+      });
+    }).not.toThrow();
+  });
+
   it('runs in pure Node — no THREE / no DOM imports', () => {
     // Implicit test: this file imports director.js. If director leaked a
     // THREE or DOM dependency, the test would crash at import time. The
     // assertion below just makes the intent visible.
     expect(typeof registerDirector).toBe('function');
+  });
+});
+
+describe('LineClearOrchestrator', () => {
+  it('throws if stageController or layers missing', () => {
+    expect(() => createLineClearOrchestrator({})).toThrow();
+    expect(() => createLineClearOrchestrator({ stageController: stubStage({}) })).toThrow();
+    expect(() => createLineClearOrchestrator({ lineClearLayers: stubLayers() })).toThrow();
+  });
+
+  it('on tetris with all flags true, fires every layer once', () => {
+    const layers = stubLayers();
+    const stage = stubStage({
+      tetris: { sparkle: true, flash: true, shockwave: true, veil: true },
+    });
+    const orch = createLineClearOrchestrator({ stageController: stage, lineClearLayers: layers });
+
+    orch.onClear({
+      rows: [3, 2, 1, 0], simultaneous: 4,
+      colors: [0xff0000, 0x00ff00, 0x0000ff, 0xffff00],
+      overallColor: 0x808080,
+    });
+
+    expect(layers.sparkle).toHaveBeenCalledTimes(1);
+    expect(layers.flash).toHaveBeenCalledTimes(1);
+    expect(layers.shockwave).toHaveBeenCalledTimes(1);
+    expect(layers.veil).toHaveBeenCalledTimes(1);
+
+    // Sparkle and flash get the per-row colors
+    expect(layers.sparkle).toHaveBeenCalledWith([3, 2, 1, 0], [0xff0000, 0x00ff00, 0x0000ff, 0xffff00]);
+    expect(layers.flash).toHaveBeenCalledWith([3, 2, 1, 0], [0xff0000, 0x00ff00, 0x0000ff, 0xffff00]);
+    // Shockwave gets overall color + row count
+    expect(layers.shockwave).toHaveBeenCalledWith([3, 2, 1, 0], 0x808080, 4);
+    // Veil gets just the row count
+    expect(layers.veil).toHaveBeenCalledWith(4);
+  });
+
+  it('on a single (recipe: sparkle only) gates flash/shockwave/veil OFF', () => {
+    const layers = stubLayers();
+    const stage = stubStage({
+      single: { sparkle: true, flash: false, shockwave: false, veil: false },
+    });
+    const orch = createLineClearOrchestrator({ stageController: stage, lineClearLayers: layers });
+
+    orch.onClear({ rows: [5], simultaneous: 1, colors: [0x6cf0ff], overallColor: 0x6cf0ff });
+
+    expect(layers.sparkle).toHaveBeenCalledTimes(1);
+    expect(layers.flash).not.toHaveBeenCalled();
+    expect(layers.shockwave).not.toHaveBeenCalled();
+    expect(layers.veil).not.toHaveBeenCalled();
+  });
+
+  it('on a triple (recipe: sparkle + shockwave) skips flash + veil', () => {
+    const layers = stubLayers();
+    const stage = stubStage({
+      triple: { sparkle: true, flash: false, shockwave: true, veil: false },
+    });
+    const orch = createLineClearOrchestrator({ stageController: stage, lineClearLayers: layers });
+
+    orch.onClear({ rows: [7, 6, 5], simultaneous: 3, colors: [1, 2, 3], overallColor: 0x6cf0ff });
+
+    expect(layers.sparkle).toHaveBeenCalledTimes(1);
+    expect(layers.shockwave).toHaveBeenCalledTimes(1);
+    expect(layers.flash).not.toHaveBeenCalled();
+    expect(layers.veil).not.toHaveBeenCalled();
+  });
+
+  it('falls back to white when overallColor missing on a shockwave-firing tier', () => {
+    const layers = stubLayers();
+    const stage = stubStage({
+      tetris: { sparkle: false, flash: false, shockwave: true, veil: false },
+    });
+    const orch = createLineClearOrchestrator({ stageController: stage, lineClearLayers: layers });
+
+    orch.onClear({ rows: [3, 2, 1, 0], simultaneous: 4, colors: [0, 0, 0, 0] });
+
+    expect(layers.shockwave).toHaveBeenCalledWith([3, 2, 1, 0], 0xffffff, 4);
+  });
+
+  it('no-ops cleanly when the recipe has no entry for the tier', () => {
+    const layers = stubLayers();
+    // Only "single" defined — a tetris should hit the missing-recipe early-return.
+    const stage = stubStage({
+      single: { sparkle: true, flash: false, shockwave: false, veil: false },
+    });
+    const orch = createLineClearOrchestrator({ stageController: stage, lineClearLayers: layers });
+
+    expect(() =>
+      orch.onClear({ rows: [3, 2, 1, 0], simultaneous: 4, colors: [0, 0, 0, 0], overallColor: 0xffffff })
+    ).not.toThrow();
+    expect(layers.sparkle).not.toHaveBeenCalled();
+  });
+
+  it('no-ops cleanly when individual layer callbacks are missing', () => {
+    const stage = stubStage({
+      tetris: { sparkle: true, flash: true, shockwave: true, veil: true },
+    });
+    // Only sparkle is wired — the orchestrator must not throw on the others.
+    const partialLayers = { sparkle: vi.fn() };
+    const orch = createLineClearOrchestrator({ stageController: stage, lineClearLayers: partialLayers });
+
+    expect(() =>
+      orch.onClear({ rows: [3, 2, 1, 0], simultaneous: 4, colors: [0, 0, 0, 0], overallColor: 0x808080 })
+    ).not.toThrow();
+    expect(partialLayers.sparkle).toHaveBeenCalled();
+  });
+
+  it('wires through registerDirector → bus → orchestrator end-to-end', () => {
+    const bus = new EventBus();
+    const layers = stubLayers();
+    const stage = stubStage({
+      tetris: { sparkle: true, flash: true, shockwave: true, veil: true },
+      single: { sparkle: true, flash: false, shockwave: false, veil: false },
+    });
+    registerDirector(bus, stubApi({ stageController: stage, lineClearLayers: layers }));
+
+    bus.emit(EVENTS.LINE_CLEAR, {
+      rows: [0], simultaneous: 1, colors: [0xaee7ff], overallColor: 0xaee7ff, scoreDelta: 100,
+    });
+    expect(layers.sparkle).toHaveBeenCalledTimes(1);
+    expect(layers.flash).not.toHaveBeenCalled();
+
+    bus.emit(EVENTS.LINE_CLEAR, {
+      rows: [3, 2, 1, 0], simultaneous: 4, colors: [1, 2, 3, 4], overallColor: 0x808080, scoreDelta: 800,
+    });
+    expect(layers.sparkle).toHaveBeenCalledTimes(2);
+    expect(layers.flash).toHaveBeenCalledTimes(1);
+    expect(layers.shockwave).toHaveBeenCalledTimes(1);
+    expect(layers.veil).toHaveBeenCalledTimes(1);
   });
 });

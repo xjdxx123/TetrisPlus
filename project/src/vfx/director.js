@@ -14,11 +14,30 @@
 // Usage:
 //   const stop = registerDirector(bus, {
 //     impactRing, hardDropTrail, sfx, levelUpFx,
+//     // Stage 8b — line-clear orchestration:
+//     stageController, lineClearLayers,
 //   });
 //   // … later, to tear down (tests, hot-reload):
 //   stop();
 
 import { EVENTS } from '../gameplay/events.js';
+import { tierForRows } from '../config/stages.js';
+
+/**
+ * @typedef {Object} LineClearLayers
+ * Recipe-gated emitters fired by the orchestrator. Each is optional; missing
+ * entries are skipped silently so subsystems can be wired incrementally.
+ * @property {(rows: number[], colors: number[]) => void} [sparkle]   stage-palette burst (Layer 2)
+ * @property {(rows: number[], colors: number[]) => void} [flash]     row-aligned flash slabs (Layer 5)
+ * @property {(rows: number[], color: number, rowCount: number) => void} [shockwave] expanding ring (Layer 3)
+ * @property {(rowCount: number) => void} [veil]                       camera-space tint (Layer 6)
+ */
+
+/**
+ * @typedef {Object} StageControllerLike
+ * Read-only interface the orchestrator needs from the stage controller.
+ * @property {{ clearRecipe?: Record<string, {sparkle?:boolean,flash?:boolean,shockwave?:boolean,veil?:boolean}> }} spec
+ */
 
 /**
  * @typedef {Object} DirectorApi
@@ -26,7 +45,62 @@ import { EVENTS } from '../gameplay/events.js';
  * @property {(cells: Array<{col:number,row:number}>, dropRows: number, color: number) => void} hardDropTrail
  * @property {(name: string, arg?: any) => void} sfx
  * @property {(level: number) => void} levelUpFx
+ * @property {StageControllerLike}  [stageController]   Stage 8b — present once stages are wired.
+ * @property {LineClearLayers}      [lineClearLayers]   Stage 8b — recipe-gated emitter callbacks.
  */
+
+/**
+ * LineClearOrchestrator — Stage 8b of plan_particle_2.md.
+ *
+ * Subscribes (via registerDirector) to LINE_CLEAR; reads
+ * `stageController.spec.clearRecipe[tier]` for the active stage; fires only
+ * the layer flags the recipe enables for that tier. The recipe is the
+ * single knob that turns "every clear fires every layer faintly" into
+ * "single is muted, triple is escalated, Tetris is cinematic" (plan §1.6.3).
+ *
+ * Pure logic — receives spawn callbacks, never touches THREE/DOM/audio.
+ *
+ * @param {{ stageController: StageControllerLike, lineClearLayers: LineClearLayers }} deps
+ */
+export function createLineClearOrchestrator({ stageController, lineClearLayers }) {
+  if (!stageController) throw new Error('LineClearOrchestrator requires stageController');
+  if (!lineClearLayers) throw new Error('LineClearOrchestrator requires lineClearLayers');
+
+  return {
+    /**
+     * @param {{ rows: number[], simultaneous: number, colors: number[], overallColor?: number }} payload
+     */
+    onClear({ rows, simultaneous, colors, overallColor }) {
+      const spec = stageController.spec;
+      const recipe = spec && spec.clearRecipe
+        ? spec.clearRecipe[tierForRows(simultaneous)]
+        : null;
+      if (!recipe) return;
+
+      // Layer 2 — stage-palette sparkle. Always present at every tier in the
+      // current stages; included in the recipe so a future "no-sparkle" stage
+      // can opt out without code changes.
+      if (recipe.sparkle && lineClearLayers.sparkle) {
+        lineClearLayers.sparkle(rows, colors);
+      }
+      // Layer 5 — flash slabs (row-aligned, color-tinted). Tetris-tier in
+      // the seed stages.
+      if (recipe.flash && lineClearLayers.flash) {
+        lineClearLayers.flash(rows, colors);
+      }
+      // Layer 3 — shockwave ring. Triple+ in the seed stages. The fallback
+      // color is white if the gameplay event omits overallColor.
+      if (recipe.shockwave && lineClearLayers.shockwave) {
+        lineClearLayers.shockwave(rows, overallColor != null ? overallColor : 0xffffff, simultaneous);
+      }
+      // Layer 6 — full-screen accent veil (camera-space tonemap bias).
+      // Tetris+ in the seed stages.
+      if (recipe.veil && lineClearLayers.veil) {
+        lineClearLayers.veil(simultaneous);
+      }
+    },
+  };
+}
 
 /**
  * Wire gameplay events to cinematic effects.
@@ -58,6 +132,20 @@ export function registerDirector(bus, api) {
       api.levelUpFx(level);
     })
   );
+
+  // Line clear: orchestrator gates the recipe layers. Wired only when the
+  // call site supplies the stage controller + layer callbacks; older call
+  // sites that don't pass them keep working with no LINE_CLEAR handling
+  // (clearLines() owns the model-side updates regardless).
+  if (api.stageController && api.lineClearLayers) {
+    const orchestrator = createLineClearOrchestrator({
+      stageController: api.stageController,
+      lineClearLayers: api.lineClearLayers,
+    });
+    offs.push(
+      bus.on(EVENTS.LINE_CLEAR, (payload) => orchestrator.onClear(payload))
+    );
+  }
 
   return () => {
     for (const off of offs) off();

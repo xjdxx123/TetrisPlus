@@ -17,6 +17,7 @@ import { createAfterimagePass } from '../rendering/post/afterimage.js';
 import { createChromaticPass } from '../rendering/post/chromatic.js';
 import { createFeatureBus } from '../audio/reactive/feature-bus.js';
 import { createFeatureDebugOverlay } from '../audio/reactive/debug-overlay.js';
+import { createBeatGrid } from '../audio/reactive/beat-grid.js';
 import { createPlaybackProgress } from '../audio/playback-progress.js';
 import { createBindings } from '../vfx/reactive/bindings.js';
 import { createEffectsPanel } from '../ui/effects-panel.js';
@@ -667,7 +668,10 @@ const _veilEl = (() => {
 })();
 const _veilFx = { active: false, t: 0, dur: 0.42, peak: 0.0 };
 function triggerLineClearVeil(rowCount) {
-  if (rowCount < 4) return; // Tetris+ only per §1.6.3
+  // Tetris+ gating used to live here as `if (rowCount < 4) return`; Stage 8b
+  // moved that decision to the LineClearOrchestrator so a stage that wants
+  // veil on triple just flips its recipe entry. rowCount is still passed
+  // because future tuning may want to scale veil intensity by tier.
   const pal = _stagePalette();
   const r = (pal.accentHex >> 16) & 0xff;
   const g = (pal.accentHex >> 8)  & 0xff;
@@ -1702,15 +1706,13 @@ function clearLines(rows) {
       }
     }
   }
-  // §1.6 line-clear effect — Layer 2 sparkle (stage palette) + Layer 6
-  // veil (Tetris+ only) + §1.3 attention-budget dim. Fires before
-  // triggerFlash so the sparkle's slow envelope is already developing
-  // when the in-board flash slabs and shockwave punch through it.
-  emitLineClearBurst(rows, rowColors);
-  triggerLineClearVeil(rows.length);
-
-  // Color-tinted flash slabs (G1)
-  triggerFlash(rows, rowColors);
+  // §1.6 line-clear layers (sparkle / flash / shockwave / veil) are now
+  // owned by the LineClearOrchestrator (vfx/director.js, Stage 8b). The
+  // bus.emit(EVENTS.LINE_CLEAR, ...) above is the single trigger; the
+  // active stage's `clearRecipe` decides which layers fire per tier.
+  // §1.3 attention-budget dim is still triggered indirectly inside
+  // emitLineClearBurst via triggerAttentionDim — that fires through the
+  // orchestrator for sparkle-enabled tiers.
 
   // Multi-line callout (G6) and floating score popup (G5)
   if (rows.length >= 2) triggerCallout(rows.length, overallColor);
@@ -2773,10 +2775,25 @@ function triggerScorePopup(amount, rowIndex, color) {
   // space and dissolves into the (already-spreading) particles.
   spawnScorePopupBurst(_popupWorldPos, color, intensity);
 
-  // (3) Shockwave ring on triple/tetris.
-  if (intensity >= 3) {
-    triggerShockwave(_popupWorldPos, color, intensity);
-  }
+  // The shockwave ring used to fire here on triple+; Stage 8b moved it to
+  // the LineClearOrchestrator so the stage's `clearRecipe` decides whether
+  // the layer participates. See triggerLineClearShockwave below.
+}
+
+// Stage 8b — shockwave entry called by the LineClearOrchestrator (recipe-
+// gated). Anchors at the bottom-most cleared row so the ring expands from
+// where the popup text lands. Same pool, same scaling curve as before — we
+// just lift the gate decision out to the orchestrator.
+const _orchShockwavePos = new THREE.Vector3();
+function triggerLineClearShockwave(rows, color, rowCount) {
+  // `rows` is sorted top-down by clearLines (largest row index first), so
+  // the last entry is the bottom-most cleared row.
+  const bottomRow = rows[rows.length - 1];
+  const worldY = -PLAY_H / 2 + (bottomRow + 0.5) * CELL;
+  _orchShockwavePos.set(0, worldY, 1.5);
+  // intensity drives ring radius (peakScale = 4 + intensity * 1.4); using
+  // rowCount keeps the previous curve (triple→8.2, tetris→9.6).
+  triggerShockwave(_orchShockwavePos, color, rowCount);
 }
 
 // =============================================================
@@ -2797,6 +2814,14 @@ function animate(dt, envTime) {
   // featureBus.tick is a safe no-op until the user gesture wakes the
   // AudioContext (audio.analyser is null up to that point).
   featureBus.tick(dt);
+  // Stage 5b — beat-grid scheduler. Cheap when not analyzed (early-return).
+  // Once BPM is cached, projects upcoming beat times from bgmEl.currentTime
+  // and dispatches beat / preBeat events — bindings consume `anticipation`.
+  beatGrid.tick();
+  // Stage 5b — multi-track BPM maintenance. Triggers windowed re-analysis
+  // when we have no BPM yet, or when the drift detector says the active
+  // track has changed tempo. Cooldown-gated; cheap on idle frames.
+  maintainBpmPipeline();
   bindings.tick();
   featureDebug.update();
   playbackProgress.update();
@@ -3187,6 +3212,18 @@ registerDirector(bus, {
   hardDropTrail: spawnHardDropTrail,
   sfx:           (name, arg) => playSfx(name, arg),
   levelUpFx:     triggerLevelUp,
+  // Stage 8b — LineClearOrchestrator. The stageController owns which stage
+  // is active (and thus which `clearRecipe` is read); each lineClearLayers
+  // entry is the existing inline emitter, gated now by recipe instead of
+  // always-firing. Single-line clears in the seed stages drop flash +
+  // shockwave + veil; Tetris+ keeps all four.
+  stageController,
+  lineClearLayers: {
+    sparkle:   (rows, rowColors)         => emitLineClearBurst(rows, rowColors),
+    flash:     (rows, rowColors)         => triggerFlash(rows, rowColors),
+    shockwave: (rows, color, rowCount)   => triggerLineClearShockwave(rows, color, rowCount),
+    veil:      (rowCount)                => triggerLineClearVeil(rowCount),
+  },
 });
 
 bus.on(EVENTS.GAME_OVER, ({ score, lines, level }) => {
@@ -3300,8 +3337,30 @@ const playVoice = (name)      => audio.playVoice(name);
 // Bindings is the SOLE place an audio stream meets a visual property —
 // no other module may straddle the boundary (plan_particle_2.md §1.5).
 const featureBus = createFeatureBus({ audio });
+
+// Stage 5b — beat grid (offline BPM + anticipatory scheduler).
+// The grid uses the BGM element's currentTime as its source of truth (NOT
+// audioContext.currentTime — that's monotonic since context creation, while
+// bgmEl.currentTime resets on loop and reflects scrubs). Analysis is a
+// one-shot run kicked off after audio.init() resolves (see triggerBpmAnalysis
+// below). Until then, grid.tick() is a safe no-op.
+const _bgmEl = document.getElementById('bgmAudio');
+const beatGrid = createBeatGrid({
+  getSongTimeSec: () => (_bgmEl ? _bgmEl.currentTime : 0),
+  lookaheadSec:   0.25,
+  analyzer: async (audioBuffer) => {
+    // Lazy import keeps web-audio-beat-detector out of the synchronous
+    // module-load critical path (the package + its broker is ~120KB and
+    // depends on a worker module). Boot is unaffected for users who never
+    // hear the BGM (muted from the start).
+    const { guess } = await import('web-audio-beat-detector');
+    return guess(audioBuffer);
+  },
+});
+
 const bindings = createBindings({
   feature: featureBus,
+  beatGrid,
   targets: {
     selectiveBloom,
     breathe,
@@ -3311,7 +3370,7 @@ const bindings = createBindings({
 // Live FeatureBus inspector — F key toggles. Visible by default during the
 // Stage 5 verification window; comment out `visibleByDefault: true` once the
 // audio→visual loop has been confirmed working.
-const featureDebug = createFeatureDebugOverlay({ feature: featureBus, audio, hotkey: 'KeyF', visibleByDefault: true });
+const featureDebug = createFeatureDebugOverlay({ feature: featureBus, audio, beatGrid, hotkey: 'KeyF', visibleByDefault: true });
 
 // Effects toggle panel — E key toggles. Each entry's `onChange` runs once
 // at boot to apply the initial state. The body tint cache lets us cleanly
@@ -3393,6 +3452,7 @@ if (typeof window !== 'undefined') {
   window.__nebula = nebula;
   window.__effectsPanel = effectsPanel;
   window.__stage = stageController;
+  window.__beat = beatGrid;
 }
 function setMuted(b) {
   audio.setMuted(b);
@@ -3410,11 +3470,121 @@ audioToggleBtn.addEventListener('click', (e) => {
 // AudioContext + media playback until this happens.
 const _audioBoot = () => {
   initAudio();
+  // Stage 5b — boot the live-capture BPM pipeline once the AudioContext
+  // exists. The recorder is spliced into the BGM graph; first analysis
+  // fires after enough audio has been buffered (default 20s window).
+  bootBpmPipeline();
   window.removeEventListener('keydown', _audioBoot);
   window.removeEventListener('pointerdown', _audioBoot);
 };
 window.addEventListener('keydown', _audioBoot);
 window.addEventListener('pointerdown', _audioBoot);
+
+// =============================================================
+// Live-capture BPM pipeline (Stage 5b multi-track support)
+// =============================================================
+// The vaporwave BGM is one ~50-min file containing multiple tracks each at
+// a different BPM. A one-shot full-file analysis returns a meaningless
+// average. Instead we:
+//   1. Splice an audio recorder into the BGM graph after init.
+//   2. Once it has buffered RECORDER_WINDOW_SEC of audio, trigger an
+//      analyzeWindow() pass.
+//   3. Subscribe to `onsets.kick` and feed each onset's song-time into
+//      beatGrid.recordOnset() — that powers drift detection.
+//   4. When beatGrid reports `isDrifting` (track has changed BPM), and
+//      we're past the cooldown, re-analyze a fresh window.
+//
+// The whole pipeline degrades gracefully: if any step fails, onset-driven
+// bindings still work; only the anticipatory layer goes idle.
+const RECORDER_WINDOW_SEC      = 20;     // audio kept in the rolling buffer
+const REANALYSIS_COOLDOWN_SEC  = 8;      // minimum gap between analyses
+let bgmRecorder = null;                  // set once bootBpmPipeline succeeds
+let lastAnalysisAtRealTime = -Infinity;  // performance.now()/1000 of last attempt
+let pipelineRunning = false;
+
+async function bootBpmPipeline() {
+  if (pipelineRunning) return;
+  pipelineRunning = true;
+  try {
+    await audio.init();
+    if (!audio.hasContext) return;
+    const built = await audio.createBgmRecorder({ durationSec: RECORDER_WINDOW_SEC });
+    if (!built) {
+      console.warn('[beat-grid] recorder unavailable — anticipation disabled');
+      return;
+    }
+    bgmRecorder = built.recorder;
+    // Subscribe each kick onset into the drift detector. Song-time is
+    // bgmEl.currentTime — the same clock the beat-grid scheduler uses.
+    featureBus.onsets.on('kick', () => {
+      if (!_bgmEl) return;
+      beatGrid.recordOnset(_bgmEl.currentTime);
+    });
+  } catch (err) {
+    console.warn('[beat-grid] pipeline boot failed:', err?.message || err);
+    pipelineRunning = false;
+  }
+}
+
+// Async analyzer factory used for both the first and subsequent analyses.
+// Lazy-imports web-audio-beat-detector so the worker isn't loaded until we
+// actually need it.
+let _wabd = null;
+async function getAnalyzer() {
+  if (_wabd) return _wabd;
+  const mod = await import('web-audio-beat-detector');
+  _wabd = mod.guess;
+  return _wabd;
+}
+
+// Snapshot the recorder, run windowed analysis. Records the song-time the
+// snapshot was taken at so beatGrid can translate the analyzer's
+// buffer-local offset into absolute song-time.
+async function runWindowedAnalysis() {
+  if (!bgmRecorder || !bgmRecorder.isReady()) return null;
+  if (beatGrid.isAnalyzing) return null;
+  const snap = bgmRecorder.snapshot();
+  if (!snap) return null;
+  const songTimeAtEnd = _bgmEl ? _bgmEl.currentTime : 0;
+  const windowStartSongTime = Math.max(0, songTimeAtEnd - snap.durationSec);
+  lastAnalysisAtRealTime = performance.now() / 1000;
+  try {
+    const analyzer = await getAnalyzer();
+    const result = await beatGrid.analyzeWindow(snap.buffer, windowStartSongTime, analyzer);
+    if (result) {
+      console.log(
+        `[beat-grid] BPM=${result.bpm.toFixed(2)} ` +
+        `offset=${result.offset.toFixed(3)}s ` +
+        `(window ${windowStartSongTime.toFixed(1)}–${songTimeAtEnd.toFixed(1)})`
+      );
+    }
+    return result;
+  } catch (err) {
+    console.warn('[beat-grid] windowed analysis failed:', err?.message || err);
+    return null;
+  }
+}
+
+// Called every render tick. Decides whether to fire a (re-)analysis based
+// on (a) recorder readiness, (b) absence of a current bpm, (c) drift, and
+// (d) cooldown. Cheap when nothing needs doing.
+function maintainBpmPipeline() {
+  if (!bgmRecorder || !bgmRecorder.isReady()) return;
+  if (beatGrid.isAnalyzing) return;
+  const nowReal = performance.now() / 1000;
+  const sinceLastAnalysis = nowReal - lastAnalysisAtRealTime;
+  if (sinceLastAnalysis < REANALYSIS_COOLDOWN_SEC) return;
+  // Trigger if we don't have a BPM yet OR if drift detector says we've
+  // crossed a track boundary.
+  if (!beatGrid.isAnalyzed || beatGrid.isDrifting) {
+    runWindowedAnalysis();   // not awaited — fire-and-forget
+  }
+}
+
+// Console handle for ad-hoc inspection / forced re-analysis.
+if (typeof window !== 'undefined') {
+  window.__beatReanalyze = () => { lastAnalysisAtRealTime = -Infinity; runWindowedAnalysis(); };
+}
 
 // ---- Announcer state machine ------------------------------------------------
 // Streak = total LINES cleared across consecutive clearing locks (not just
