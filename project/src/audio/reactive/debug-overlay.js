@@ -228,22 +228,19 @@ export function createFeatureDebugOverlay({
       }
       // Beat-grid status — BPM, phase, anticipation. Updated every frame; the
       // anticipation bar visibly fills during the 250ms before each beat.
+      // BPM values come from the per-track cache (audio/reactive/bpm-cache.js)
+      // — analyses run end-to-end on each track once and persist across
+      // reloads, so this row says either "the answer" or "still analyzing"
+      // for at most a few seconds per never-before-played track.
       if (beatRow && beatGrid) {
-        if (beatGrid.isAnalyzing) {
+        if (beatGrid.isAnalyzed) {
+          beatRow.bpm.textContent = `${beatGrid.bpm.toFixed(1)} bpm · offs ${beatGrid.offsetSec.toFixed(2)}s`;
+          beatRow.bpm.style.opacity = '0.9';
+          beatRow.bpm.style.color = '';
+        } else if (beatGrid.isAnalyzing) {
           beatRow.bpm.textContent = 'analyzing…';
           beatRow.bpm.style.color = '';
           beatRow.bpm.style.opacity = '0.55';
-        } else if (beatGrid.isAnalyzed) {
-          // Multi-track support: drift indicator surfaces when the running
-          // track no longer matches the cached BPM (next analysis window
-          // resets it). Color shifts so it's visible without text changes.
-          const drifting = beatGrid.isDrifting;
-          const driftMs = (beatGrid.driftMeanAbsSec * 1000) | 0;
-          beatRow.bpm.textContent = drifting
-            ? `${beatGrid.bpm.toFixed(1)} bpm · drift ${driftMs}ms ⚠`
-            : `${beatGrid.bpm.toFixed(1)} bpm · offs ${beatGrid.offsetSec.toFixed(2)}s`;
-          beatRow.bpm.style.opacity = '0.9';
-          beatRow.bpm.style.color = drifting ? '#ff5c8a' : '';
         } else if (beatGrid.analyzeError) {
           beatRow.bpm.textContent = '⚠ analysis failed';
           beatRow.bpm.style.opacity = '0.6';

@@ -7,12 +7,14 @@ import { registerDirector } from '../vfx/director.js';
 import { createShake } from '../camera/shake.js';
 import { createPunchZoom } from '../camera/punch-zoom.js';
 import { createAudioPlayback } from '../audio/playback.js';
+import { createBgmPlaylist, defaultVaporwaveTracks } from '../audio/bgm-playlist.js';
+import { createPlaylistPanel } from '../ui/playlist-panel.js';
 import { createStarfield } from '../world/starfield.js';
 import { createNebulaSky } from '../world/nebula-sky.js';
 import { createMoon } from '../world/moon.js';
 import { hueForLevel, pickFlashHue } from '../config/nebula-progression.js';
 import { paletteFromHue, STAGE_HUE_FOR_NAME } from '../config/palettes.js';
-import { loadSettings, saveSettings, loadStats, saveStats, _resetForTests as _resetStorageForTests } from '../engine/storage.js';
+import { loadSettings, saveSettings, loadStats, saveStats, loadBpmCache, saveBpmCache, _resetForTests as _resetStorageForTests } from '../engine/storage.js';
 import { Mode } from '../gameplay/mode.js';
 import { createSettingsPanel } from '../ui/settings-panel.js';
 import { makeToggleRow, makeHueSlider } from '../ui/panel-shared.js';
@@ -25,6 +27,7 @@ import { createChromaticPass } from '../rendering/post/chromatic.js';
 import { createFeatureBus } from '../audio/reactive/feature-bus.js';
 import { createFeatureDebugOverlay } from '../audio/reactive/debug-overlay.js';
 import { createBeatGrid } from '../audio/reactive/beat-grid.js';
+import { createBpmCache } from '../audio/reactive/bpm-cache.js';
 import { createPlaybackProgress } from '../audio/playback-progress.js';
 import { createBindings } from '../vfx/reactive/bindings.js';
 import { createEffectsPanel } from '../ui/effects-panel.js';
@@ -3185,10 +3188,6 @@ function animate(dt, envTime) {
   // Once BPM is cached, projects upcoming beat times from bgmEl.currentTime
   // and dispatches beat / preBeat events — bindings consume `anticipation`.
   beatGrid.tick();
-  // Stage 5b — multi-track BPM maintenance. Triggers windowed re-analysis
-  // when we have no BPM yet, or when the drift detector says the active
-  // track has changed tempo. Cooldown-gated; cheap on idle frames.
-  maintainBpmPipeline();
   bindings.tick();
   featureDebug.update();
   playbackProgress.update();
@@ -3728,18 +3727,18 @@ window.addEventListener('resize', () => {
 const _persistedAudio = (_persistedSettings && _persistedSettings.audio) || {};
 const audio = createAudioPlayback({
   voices: {
-    freshmeat:    'asset/sounds/freshmeat.wav',
-    rempage:      'asset/sounds/rempage.wav',
-    dominating:   'asset/sounds/dominating.wav',
-    unstoppable:  'asset/sounds/unstoppable.wav',
-    godlike:      'asset/sounds/godlike.wav',
-    wreckingsick: 'asset/sounds/wreckingsick.wav',
-    megakill:     'asset/sounds/megakill.wav',
-    ultrakill:    'asset/sounds/ultrakill.wav',
-    monsterkill:  'asset/sounds/monsterkill.wav',
-    holyshit:     'asset/sounds/holyshit.wav',
-    manbaout:     'asset/sounds/manbaout.mp3',
-    man:          'asset/sounds/man.mp3',
+    freshmeat:    'asset/sounds/effects/freshmeat.wav',
+    rempage:      'asset/sounds/effects/rempage.wav',
+    dominating:   'asset/sounds/effects/dominating.wav',
+    unstoppable:  'asset/sounds/effects/unstoppable.wav',
+    godlike:      'asset/sounds/effects/godlike.wav',
+    wreckingsick: 'asset/sounds/effects/wreckingsick.wav',
+    megakill:     'asset/sounds/effects/megakill.wav',
+    ultrakill:    'asset/sounds/effects/ultrakill.wav',
+    monsterkill:  'asset/sounds/effects/monsterkill.wav',
+    holyshit:     'asset/sounds/effects/holyshit.wav',
+    manbaout:     'asset/sounds/effects/manbaout.mp3',
+    man:          'asset/sounds/effects/man.mp3',
   },
   bgmEl: document.getElementById('bgmAudio'),
   volumes: {
@@ -3753,6 +3752,66 @@ const initAudio = () => audio.init();
 const playSfx   = (name, arg) => audio.playSfx(name, arg);
 const playVoice = (name)      => audio.playVoice(name);
 
+// =============================================================
+// BGM playlist — rotation through asset/sounds/bgm/.
+// =============================================================
+// The playlist drives the same <audio id="bgmAudio"> element the audio
+// module's analyser tap is wired to (the MediaElementSource is one-shot
+// per element, so we cannot create a second <audio> for crossfades — we
+// fade via audio.fadeBgmEnvelope on the bgmGain stage instead).
+//
+// Persistence: settings.audio.bgmTrackIndex remembers the last track. The
+// playlist seeds initialIndex from it; onTrackChange writes it back.
+const _bgmTracks = defaultVaporwaveTracks();
+const _initialBgmTrack = (() => {
+  const stored = _persistedAudio.bgmTrackIndex;
+  if (typeof stored !== 'number') return 0;
+  if (stored < 0 || stored >= _bgmTracks.length) return 0;
+  return stored | 0;
+})();
+
+// Pub/sub for the playlist UI — the manager calls these on track + playing
+// changes. Multiple subscribers (UI panel, console handle, future overlays)
+// each register their own listener.
+const _playlistTrackListeners   = new Set();
+const _playlistPlayingListeners = new Set();
+function _firePlaylistTrack(idx, track) {
+  for (const fn of _playlistTrackListeners) {
+    try { fn(idx, track); }
+    catch (err) { console.error('[bgm-playlist] track listener threw:', err); }
+  }
+}
+function _firePlaylistPlaying(playing) {
+  for (const fn of _playlistPlayingListeners) {
+    try { fn(playing); }
+    catch (err) { console.error('[bgm-playlist] playing listener threw:', err); }
+  }
+}
+
+const bgmPlaylist = createBgmPlaylist({
+  bgmEl: document.getElementById('bgmAudio'),
+  tracks: _bgmTracks,
+  initialIndex: _initialBgmTrack,
+  fadeMs: 280,
+  fadeEnvelope: (target, durationSec) => audio.fadeBgmEnvelope(target, durationSec),
+  onTrackChange: (idx, track) => {
+    _persistedAudio.bgmTrackIndex = idx;
+    _persistSettingsSnapshot();
+    // Apply the new track's cached {bpm, offset} (if any). This also resets
+    // the scheduler — pending schedules from the old track were anchored to
+    // its playhead and would fire on the new track's timeline otherwise.
+    // If the new track hasn't been analyzed yet, clearBpm() keeps anticipation
+    // idle until the cache resolves; the onAnalyzed listener above wires it
+    // back in mid-song the moment the analyzer lands.
+    try { applyActiveTrackBpm(); }
+    catch (err) { console.warn('[bgm-playlist] applyActiveTrackBpm threw:', err?.message || err); }
+    _firePlaylistTrack(idx, track);
+  },
+  onPlayingChange: (playing) => {
+    _firePlaylistPlaying(playing);
+  },
+});
+
 // Stage 5 — audio reactive feature bus + bindings layer.
 // FeatureBus reads the analyser tap exposed by audio/playback.js. Until the
 // user gesture wakes AudioContext, audio.analyser is null and feature.tick()
@@ -3761,24 +3820,35 @@ const playVoice = (name)      => audio.playVoice(name);
 // no other module may straddle the boundary (plan_particle_2.md §1.5).
 const featureBus = createFeatureBus({ audio });
 
-// Stage 5b — beat grid (offline BPM + anticipatory scheduler).
+// Stage 5b — beat grid (anticipatory beat scheduler).
 // The grid uses the BGM element's currentTime as its source of truth (NOT
 // audioContext.currentTime — that's monotonic since context creation, while
-// bgmEl.currentTime resets on loop and reflects scrubs). Analysis is a
-// one-shot run kicked off after audio.init() resolves (see triggerBpmAnalysis
-// below). Until then, grid.tick() is a safe no-op.
+// bgmEl.currentTime resets on loop and reflects scrubs). It receives BPM
+// values from the per-track bpmCache (below) on every playlist track change;
+// until the first cache hit lands, grid.tick() is a safe no-op.
 const _bgmEl = document.getElementById('bgmAudio');
 const beatGrid = createBeatGrid({
   getSongTimeSec: () => (_bgmEl ? _bgmEl.currentTime : 0),
   lookaheadSec:   0.25,
-  analyzer: async (audioBuffer) => {
-    // Lazy import keeps web-audio-beat-detector out of the synchronous
-    // module-load critical path (the package + its broker is ~120KB and
-    // depends on a worker module). Boot is unaffected for users who never
-    // hear the BGM (muted from the start).
+});
+
+// BPM cache — fetches each BGM file end-to-end, decodes, runs
+// web-audio-beat-detector once, and caches the {bpm, offset} keyed by URL.
+// Replaces the live-capture pipeline (audio-recorder + windowed analyzeWindow
+// + drift detector) that the old single-file vaporwave layout required.
+// Persists across reloads via engine/storage.js so subsequent boots skip
+// re-analysis entirely.
+const bpmCache = createBpmCache({
+  decode:   (arrayBuffer) => audio.decode(arrayBuffer),
+  analyzer: async () => {
+    // Lazy import — keeps the ~120KB web-audio-beat-detector worker out of
+    // the synchronous boot path. Triggered on the first track that needs
+    // analysis; subsequent calls reuse the cached factory in bpm-cache.js.
     const { guess } = await import('web-audio-beat-detector');
-    return guess(audioBuffer);
+    return guess;
   },
+  load: () => loadBpmCache(),
+  save: (blob) => saveBpmCache(blob),
 });
 
 // Stage 5b — façade exposing the active piece's edge-intensity uniform to
@@ -3952,6 +4022,10 @@ function _persistSettingsSnapshot() {
     audio: {
       muted: !!(audio && audio.muted),
       ...audioVols,
+      // Resume on the same track next launch — bgmPlaylist is always
+      // initialized before this helper can be called (settings panel boot
+      // is later in the file).
+      bgmTrackIndex: bgmPlaylist.index,
     },
     mode: Mode.current,
     // Snapshot the panel's pose AND its current visibility so a player
@@ -4233,6 +4307,34 @@ cssScene.add(settingsPanel.obj);
 // VFX tuning so you can jump to drops/breakdowns on demand.
 const playbackProgress = createPlaybackProgress({ bgmEl: document.getElementById('bgmAudio') });
 
+// =============================================================
+// Playlist panel (M) — transport + scrollable track list.
+// =============================================================
+// Hidden by default to keep the boot view uncluttered; the M hotkey or the
+// (future) bottom-right cluster button surfaces it. The panel reads through
+// the `bgmPlaylist` controller and the audio module's BGM volume; nothing
+// in the panel reaches into the scene or audio bus directly.
+const playlistPanel = createPlaylistPanel({
+  playlist: bgmPlaylist,
+  hotkey: 'KeyM',
+  visibleByDefault: false,
+  volume: {
+    value: (audio.volumes && audio.volumes().bgm) || 0.32,
+    onChange: (v) => { audio.setBgmVolume(v); _persistSettingsSnapshot(); },
+  },
+  // Subscribe-and-return-unsubscribe pattern so the panel can react to
+  // playlist changes that happen outside of its own click handlers (e.g.
+  // a track ending naturally and the playlist auto-advancing).
+  subscribeTrack: (fn) => {
+    _playlistTrackListeners.add(fn);
+    return () => _playlistTrackListeners.delete(fn);
+  },
+  subscribePlaying: (fn) => {
+    _playlistPlayingListeners.add(fn);
+    return () => _playlistPlayingListeners.delete(fn);
+  },
+});
+
 // Keep the effects-panel stage dropdown in sync if the stage is changed
 // from the console (`__stage.set('aurora')`) instead of via the dropdown.
 // Registered HERE rather than next to the nebula sub so it doesn't TDZ-hit
@@ -4246,6 +4348,8 @@ if (typeof window !== 'undefined') {
   window.__bindings = bindings;
   window.__featureDebug = featureDebug;
   window.__audio = audio;
+  window.__bgm = bgmPlaylist;
+  window.__playlistPanel = playlistPanel;
   window.__progress = playbackProgress;
   window.__nebula = nebula;
   window.__effectsPanel = effectsPanel;
@@ -4303,123 +4407,87 @@ settingsToggleBtn.addEventListener('click', (e) => {
   e.currentTarget.blur();
 });
 // First user gesture (key or pointer) unlocks audio. Browsers gate
-// AudioContext + media playback until this happens.
-const _audioBoot = () => {
-  initAudio();
-  // Stage 5b — boot the live-capture BPM pipeline once the AudioContext
-  // exists. The recorder is spliced into the BGM graph; first analysis
-  // fires after enough audio has been buffered (default 20s window).
-  bootBpmPipeline();
+// AudioContext + media playback until this happens. The BPM analysis
+// queue depends on audio.decode() (which needs the AudioContext), so we
+// await the init before starting the queue — otherwise the first 14
+// decode calls race the async context creation and reject.
+const _audioBoot = async () => {
+  // Detach the listeners synchronously so a rapid second key press doesn't
+  // re-enter the handler before initAudio() resolves.
   window.removeEventListener('keydown', _audioBoot);
   window.removeEventListener('pointerdown', _audioBoot);
+  try { await initAudio(); }
+  catch (err) { console.warn('[audio] init failed:', err?.message || err); }
+  // Kick off whole-track BPM analysis for every track in the playlist.
+  // bpmCache serializes the work and persists results — repeat boots skip
+  // any track whose URL is already cached.
+  startBpmAnalysisForPlaylist();
 };
 window.addEventListener('keydown', _audioBoot);
 window.addEventListener('pointerdown', _audioBoot);
 
 // =============================================================
-// Live-capture BPM pipeline (Stage 5b multi-track support)
+// Whole-track BPM pipeline
 // =============================================================
-// The vaporwave BGM is one ~50-min file containing multiple tracks each at
-// a different BPM. A one-shot full-file analysis returns a meaningless
-// average. Instead we:
-//   1. Splice an audio recorder into the BGM graph after init.
-//   2. Once it has buffered RECORDER_WINDOW_SEC of audio, trigger an
-//      analyzeWindow() pass.
-//   3. Subscribe to `onsets.kick` and feed each onset's song-time into
-//      beatGrid.recordOnset() — that powers drift detection.
-//   4. When beatGrid reports `isDrifting` (track has changed BPM), and
-//      we're past the cooldown, re-analyze a fresh window.
+// New layout: each BGM file is a single track with one tempo, so the cleanest
+// answer is to fetch + decode + analyze each file end-to-end exactly once,
+// cache the {bpm, offset} by URL, and feed it into beatGrid on every playlist
+// track switch. The cache module owns the queue + persistence; main.js wires
+// the seams.
 //
-// The whole pipeline degrades gracefully: if any step fails, onset-driven
-// bindings still work; only the anticipatory layer goes idle.
-const RECORDER_WINDOW_SEC      = 20;     // audio kept in the rolling buffer
-const REANALYSIS_COOLDOWN_SEC  = 8;      // minimum gap between analyses
-let bgmRecorder = null;                  // set once bootBpmPipeline succeeds
-let lastAnalysisAtRealTime = -Infinity;  // performance.now()/1000 of last attempt
-let pipelineRunning = false;
+// Failure modes:
+// - Track 404 / decode fails → that track's anticipation stays idle, the rest
+//   continue working.
+// - web-audio-beat-detector worker fails to load → all anticipation is idle,
+//   live audio reactivity (bands.bass, kick onsets, etc.) keeps working.
 
-async function bootBpmPipeline() {
-  if (pipelineRunning) return;
-  pipelineRunning = true;
-  try {
-    await audio.init();
-    if (!audio.hasContext) return;
-    const built = await audio.createBgmRecorder({ durationSec: RECORDER_WINDOW_SEC });
-    if (!built) {
-      console.warn('[beat-grid] recorder unavailable — anticipation disabled');
-      return;
-    }
-    bgmRecorder = built.recorder;
-    // Subscribe each kick onset into the drift detector. Song-time is
-    // bgmEl.currentTime — the same clock the beat-grid scheduler uses.
-    featureBus.onsets.on('kick', () => {
-      if (!_bgmEl) return;
-      beatGrid.recordOnset(_bgmEl.currentTime);
-    });
-  } catch (err) {
-    console.warn('[beat-grid] pipeline boot failed:', err?.message || err);
-    pipelineRunning = false;
+// Apply the cached entry for the active track, if any. Called at boot AND on
+// every track change. If the entry isn't yet cached, we clear the grid so
+// stale projections from the previous track aren't used.
+function applyActiveTrackBpm() {
+  const cur = bgmPlaylist.current().track;
+  if (!cur) { beatGrid.clearBpm(); return; }
+  const entry = bpmCache.get(cur.url);
+  if (entry) {
+    beatGrid.setBpm(entry.bpm, entry.offset);
+  } else {
+    beatGrid.clearBpm();
   }
 }
 
-// Async analyzer factory used for both the first and subsequent analyses.
-// Lazy-imports web-audio-beat-detector so the worker isn't loaded until we
-// actually need it.
-let _wabd = null;
-async function getAnalyzer() {
-  if (_wabd) return _wabd;
-  const mod = await import('web-audio-beat-detector');
-  _wabd = mod.guess;
-  return _wabd;
-}
+// When any track's analysis lands, if it's the *active* track, apply it
+// immediately. This is the "first-launch" path: the player presses a key,
+// the active track starts playing, and a few seconds later its BPM lands —
+// anticipation engages mid-song without needing a track switch.
+bpmCache.onAnalyzed((url) => {
+  const cur = bgmPlaylist.current().track;
+  if (cur && cur.url === url) applyActiveTrackBpm();
+});
 
-// Snapshot the recorder, run windowed analysis. Records the song-time the
-// snapshot was taken at so beatGrid can translate the analyzer's
-// buffer-local offset into absolute song-time.
-async function runWindowedAnalysis() {
-  if (!bgmRecorder || !bgmRecorder.isReady()) return null;
-  if (beatGrid.isAnalyzing) return null;
-  const snap = bgmRecorder.snapshot();
-  if (!snap) return null;
-  const songTimeAtEnd = _bgmEl ? _bgmEl.currentTime : 0;
-  const windowStartSongTime = Math.max(0, songTimeAtEnd - snap.durationSec);
-  lastAnalysisAtRealTime = performance.now() / 1000;
-  try {
-    const analyzer = await getAnalyzer();
-    const result = await beatGrid.analyzeWindow(snap.buffer, windowStartSongTime, analyzer);
-    if (result) {
-      console.log(
-        `[beat-grid] BPM=${result.bpm.toFixed(2)} ` +
-        `offset=${result.offset.toFixed(3)}s ` +
-        `(window ${windowStartSongTime.toFixed(1)}–${songTimeAtEnd.toFixed(1)})`
-      );
-    }
-    return result;
-  } catch (err) {
-    console.warn('[beat-grid] windowed analysis failed:', err?.message || err);
-    return null;
-  }
-}
+// Start: queue all tracks. The active track goes first so its BPM lands as
+// soon as possible; the rest run in playlist order behind it.
+function startBpmAnalysisForPlaylist() {
+  // Boot-time cache hit — apply immediately so the very first frame after
+  // the user gesture already has anticipation.
+  applyActiveTrackBpm();
 
-// Called every render tick. Decides whether to fire a (re-)analysis based
-// on (a) recorder readiness, (b) absence of a current bpm, (c) drift, and
-// (d) cooldown. Cheap when nothing needs doing.
-function maintainBpmPipeline() {
-  if (!bgmRecorder || !bgmRecorder.isReady()) return;
-  if (beatGrid.isAnalyzing) return;
-  const nowReal = performance.now() / 1000;
-  const sinceLastAnalysis = nowReal - lastAnalysisAtRealTime;
-  if (sinceLastAnalysis < REANALYSIS_COOLDOWN_SEC) return;
-  // Trigger if we don't have a BPM yet OR if drift detector says we've
-  // crossed a track boundary.
-  if (!beatGrid.isAnalyzed || beatGrid.isDrifting) {
-    runWindowedAnalysis();   // not awaited — fire-and-forget
-  }
+  const all = bgmPlaylist.tracks();
+  const cur = bgmPlaylist.current().track;
+  const ordered = cur
+    ? [cur, ...all.filter(t => t.url !== cur.url)]
+    : all;
+  // Fire-and-forget; bpmCache serializes internally so we don't spawn 14
+  // concurrent decodes.
+  bpmCache.analyzeAll(ordered.map(t => t.url));
 }
 
 // Console handle for ad-hoc inspection / forced re-analysis.
 if (typeof window !== 'undefined') {
-  window.__beatReanalyze = () => { lastAnalysisAtRealTime = -Infinity; runWindowedAnalysis(); };
+  window.__beatCache    = bpmCache;
+  window.__beatReanalyze = () => {
+    const cur = bgmPlaylist.current().track;
+    if (cur) bpmCache.invalidate(cur.url);
+  };
 }
 
 // ---- Announcer state machine ------------------------------------------------

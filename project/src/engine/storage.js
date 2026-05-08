@@ -10,6 +10,10 @@
 
 const KEY_SETTINGS = 'tetrisplus.settings.v1';
 const KEY_STATS    = 'tetrisplus.stats.v1';
+// BPM cache lives in its own key so it doesn't bloat the settings blob —
+// settings are rewritten on every slider commit, and a 14-track BPM table
+// has no business riding that hot path. Shape: `{[url]: {bpm, offset, analyzedAt}}`.
+const KEY_BPM      = 'tetrisplus.bpm.v1';
 
 // Authored defaults — copied into freshly-loaded blobs. Adding a field
 // here automatically backfills it on every load (deep-merge, see below).
@@ -30,6 +34,11 @@ const SETTINGS_DEFAULTS = Object.freeze({
     bgm:   0.32,
     voice: 0.95,
     sfx:   0.55,
+    // BGM playlist position — index into the tracks array maintained by
+    // src/audio/bgm-playlist.js. Hydrated at boot so the player resumes on
+    // the same track they last heard. New saves backfill missing fields,
+    // so existing players default to track 0.
+    bgmTrackIndex: 0,
   },
   mode: 'classic',
   // panel.hidden defaults to FALSE — the settings panel is the primary UI
@@ -199,6 +208,25 @@ export function saveStats(stats, opts = {}) {
   }
 }
 
+// BPM cache — a flat `{[url]: {bpm, offset, analyzedAt}}` blob. Unlike the
+// settings/stats persisters, BPM cache writes are infrequent (once per track
+// the very first time it's ever played on a device) so debounce isn't needed.
+// Wrapped in try/catch so an unparseable blob (manual edit, schema change)
+// degrades to "re-analyze everything next session" rather than crashing.
+
+/** Returns `{}` if nothing saved or parse failed. */
+export function loadBpmCache() {
+  const incoming = parseOrNull(readKey(KEY_BPM));
+  if (!incoming || typeof incoming !== 'object') return {};
+  return incoming;
+}
+
+/** Replace the on-disk cache. Whole-blob writes — caller manages the merge. */
+export function saveBpmCache(blob) {
+  if (!blob || typeof blob !== 'object') return;
+  writeKey(KEY_BPM, JSON.stringify(blob));
+}
+
 /** Test-only: wipe both keys + in-memory shadow. */
 export function _resetForTests() {
   _memShadow.clear();
@@ -208,10 +236,10 @@ export function _resetForTests() {
   _statsPending = null;
   const ls = safeStorage();
   if (ls) {
-    try { ls.removeItem(KEY_SETTINGS); ls.removeItem(KEY_STATS); }
+    try { ls.removeItem(KEY_SETTINGS); ls.removeItem(KEY_STATS); ls.removeItem(KEY_BPM); }
     catch { /* ignore */ }
   }
 }
 
-export const STORAGE_KEYS = Object.freeze({ settings: KEY_SETTINGS, stats: KEY_STATS });
+export const STORAGE_KEYS = Object.freeze({ settings: KEY_SETTINGS, stats: KEY_STATS, bpm: KEY_BPM });
 export const _DEFAULTS = Object.freeze({ settings: SETTINGS_DEFAULTS, stats: STATS_DEFAULTS });

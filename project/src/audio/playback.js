@@ -9,7 +9,10 @@
 //     frequency sweep + envelope, and a band-pass filtered noise burst with
 //     its own envelope.
 //   - BGM: streamed via HTMLAudioElement to avoid keeping the whole decoded
-//     PCM (~50 MB for the vaporwave track) in memory.
+//     PCM (each vaporwave-split track is ~3-4 MB; the source pre-split was
+//     ~50 MB) in memory. The `<audio>` element's `src` is assigned by the
+//     playlist (src/audio/bgm-playlist.js) — this module never reads or
+//     writes the URL.
 //
 // Browsers gate AudioContext + media playback until the first user gesture,
 // so init() is called from the first keydown/pointerdown and from the
@@ -253,54 +256,40 @@ export function createAudioPlayback({ voices = {}, bgmEl = null, volumes = {} } 
     return { bgm: vol.bgm, voice: vol.voice, sfx: vol.sfx };
   }
 
-  // Stage 5b — exposed so the beat-grid can decode the BGM into an
-  // AudioBuffer for offline BPM/downbeat analysis. Null when called before
-  // init(); caller must await audio.init() first.
+  // BGM playlist transition envelope — ramps bgmGain.gain (the gain stage
+  // *between* the MediaElementSource and the analyser/master) from its
+  // current value to `target` over `durationSec`. Used by the playlist
+  // (src/audio/bgm-playlist.js) to fade out before a track swap and fade
+  // back in after the new src loads.
+  //
+  // We ride bgmGain (not bgmEl.volume) so the user's volume slider keeps
+  // owning bgmEl.volume; envelope is a separate multiplicative stage. mute
+  // semantics are unaffected (mute zeros bgmEl.volume regardless of envelope).
+  // Returns a Promise that resolves after the ramp completes.
+  function fadeBgmEnvelope(target, durationSec = 0.25) {
+    if (!state.bgmGain || !state.ctx) return Promise.resolve();
+    const t = clamp01(target);
+    const ctx = state.ctx;
+    const now = ctx.currentTime;
+    const param = state.bgmGain.gain;
+    // Hold the current value at `now` so the upcoming ramp starts from
+    // here (an outstanding ramp would otherwise win the race).
+    param.cancelScheduledValues(now);
+    param.setValueAtTime(param.value, now);
+    if (durationSec <= 0) {
+      param.setValueAtTime(t, now);
+      return Promise.resolve();
+    }
+    param.linearRampToValueAtTime(t, now + durationSec);
+    return new Promise(resolve => setTimeout(resolve, durationSec * 1000));
+  }
+
+  // Exposed so the BPM cache (audio/reactive/bpm-cache.js) can decode each
+  // BGM track into an AudioBuffer for offline analysis. Rejects until
+  // init() has opened the AudioContext.
   function decode(arrayBuffer) {
     if (!state.ctx) return Promise.reject(new Error('audio context not ready'));
     return state.ctx.decodeAudioData(arrayBuffer);
-  }
-
-  // Stage 5b live-capture path. Builds an AudioRecorder bound to this
-  // module's AudioContext and adds it as a PARALLEL tap off bgmGain:
-  //
-  //                             ┌──► analyser ──► master ──► destination  (audible)
-  //                             │
-  //   bgm → MediaElement → bgmGain
-  //                             │
-  //                             └──► recorder ──► sinkGain(g=0) ──► destination  (silent capture)
-  //
-  // We deliberately do NOT splice in series — a ScriptProcessor returns
-  // silence on its output by default (we never write to e.outputBuffer
-  // because we only capture), so an in-series splice would mute the BGM.
-  // The recorder's internal sinkGain→destination keeps the processor
-  // "live" so onaudioprocess fires, without adding to the mix.
-  //
-  // Returns the recorder + detach() that removes the parallel connection
-  // and frees the recorder's internal nodes. Null if init() hasn't run or
-  // the BGM tap isn't online.
-  async function createBgmRecorder({ durationSec = 20 } = {}) {
-    if (!state.ctx || !state.bgmGain) return null;
-    let createAudioRecorder;
-    try {
-      ({ createAudioRecorder } = await import('./reactive/audio-recorder.js'));
-    } catch (e) {
-      console.warn('[audio] recorder module load failed:', e?.message || e);
-      return null;
-    }
-    let rec;
-    try {
-      rec = createAudioRecorder({ context: state.ctx, durationSec });
-    } catch (e) {
-      console.warn('[audio] recorder construction failed:', e?.message || e);
-      return null;
-    }
-    state.bgmGain.connect(rec.node);
-    const detach = () => {
-      try { state.bgmGain.disconnect(rec.node); } catch { /* ignore */ }
-      rec.stop();
-    };
-    return { recorder: rec, detach };
   }
 
   return {
@@ -311,9 +300,9 @@ export function createAudioPlayback({ voices = {}, bgmEl = null, volumes = {} } 
     setBgmVolume,
     setVoiceVolume,
     setSfxVolume,
+    fadeBgmEnvelope,
     volumes: getVolumes,
     decode,
-    createBgmRecorder,
     get muted() { return state.muted; },
     // Stage 5 — BGM tap for audio/reactive. Null until init() runs (and may
     // remain null if MediaElementSource creation failed). Subscribers must

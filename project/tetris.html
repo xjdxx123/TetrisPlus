@@ -351,7 +351,11 @@
        fine through the speakers but createMediaElementSource produces a
        silent capture — the analyser would read zeros forever. Same-origin
        assets are not exempt. -->
-  <audio id="bgmAudio" crossorigin="anonymous" src="asset/sounds/bgm_vaporwave.m4a" loop preload="auto"></audio>
+  <!-- BGM source is assigned dynamically by the playlist (src/audio/bgm-playlist.js).
+       `loop` is intentionally OFF here so the playlist's `ended` listener can
+       advance to the next track; the playlist re-applies looping when only one
+       track is in the rotation. -->
+  <audio id="bgmAudio" crossorigin="anonymous" preload="auto"></audio>
 
   <div class="levelup" id="levelup"></div>
   <div class="clear-callout" id="clearCallout"></div>

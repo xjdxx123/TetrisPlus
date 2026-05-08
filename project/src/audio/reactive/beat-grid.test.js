@@ -39,13 +39,20 @@ describe('createBeatGrid', () => {
     expect(grid.anticipation).toBe(0);
   });
 
-  it('analyze() is idempotent — second call returns cached result', async () => {
-    const a = vi.fn(async () => ({ bpm: 100, offset: 0 }));
+  it('analyze() runs the analyzer each call (overwrites — per-track flow)', async () => {
+    // Idempotency was an artifact of the single-file legacy where re-running
+    // the analyzer would have wasted CPU. The per-track pipeline expects
+    // overwrites — bpm-cache.js is the layer that dedupes work via its URL
+    // cache; beat-grid no longer needs to.
+    const a = vi.fn()
+      .mockResolvedValueOnce({ bpm: 100, offset: 0 })
+      .mockResolvedValueOnce({ bpm: 140, offset: 0.1 });
     const grid = createBeatGrid({ getSongTimeSec: () => 0, analyzer: a });
     await grid.analyze({});
-    await grid.analyze({});
-    expect(a).toHaveBeenCalledTimes(1);
     expect(grid.bpm).toBe(100);
+    await grid.analyze({});
+    expect(a).toHaveBeenCalledTimes(2);
+    expect(grid.bpm).toBe(140);
   });
 
   it('rejects an analyzer that returns no BPM and surfaces analyzeError', async () => {
@@ -204,183 +211,70 @@ describe('createBeatGrid', () => {
 });
 
 // ===================================================================
-// Stage 5b multi-track support — analyzeWindow + drift detection.
+// Per-track BPM injection (replaces analyzeWindow + drift detection).
+// New flow: bpm-cache.js runs whole-track analysis offline; main.js calls
+// setBpm/clearBpm on every playlist track change.
 // ===================================================================
 
-describe('beat-grid — analyzeWindow', () => {
-  it('treats the buffer as covering [windowStart, windowStart + duration]', async () => {
-    let songTime = 100;
-    const grid = createBeatGrid({ getSongTimeSec: () => songTime });
-    // Analyzer claims the first beat is 0.10s into the buffer; the buffer
-    // started at song-time 90 (windowStart). So absolute first beat = 90.10.
-    const fakeBuffer = { duration: 10 };
-    const result = await grid.analyzeWindow(fakeBuffer, 90, async () => ({ bpm: 120, offset: 0.10 }));
-    expect(result.bpm).toBe(120);
-    expect(result.offset).toBeCloseTo(90.10, 5);
-    expect(grid.offsetSec).toBeCloseTo(90.10, 5);
-  });
-
-  it('overwrites a prior analysis (multi-track switch)', async () => {
-    let songTime = 0;
-    const grid = createBeatGrid({
-      getSongTimeSec: () => songTime,
-      analyzer: async () => ({ bpm: 100, offset: 0 }),
-    });
-    await grid.analyze({});
-    expect(grid.bpm).toBe(100);
-    songTime = 300;  // we've moved into a new track
-    await grid.analyzeWindow({ duration: 10 }, 290, async () => ({ bpm: 140, offset: 0.05 }));
-    expect(grid.bpm).toBe(140);
-    expect(grid.offsetSec).toBeCloseTo(290.05, 5);
-  });
-
-  it('preserves prior bpm when re-analysis fails', async () => {
-    let songTime = 0;
-    const grid = createBeatGrid({
-      getSongTimeSec: () => songTime,
-      analyzer: async () => ({ bpm: 120, offset: 0 }),
-    });
-    await grid.analyze({});
-    expect(grid.bpm).toBe(120);
-    // Failing re-analysis must NOT wipe the cached bpm — the old projection
-    // is still better than nothing while we wait for the next attempt.
-    await grid.analyzeWindow({ duration: 10 }, 100, async () => { throw new Error('boom'); });
-    expect(grid.bpm).toBe(120);
-    expect(grid.analyzeError).toBeInstanceOf(Error);
-  });
-
-  it('updates bpmSetAtSongTimeSec to current song-time on success', async () => {
-    let songTime = 50;
-    const grid = createBeatGrid({ getSongTimeSec: () => songTime });
-    await grid.analyzeWindow({ duration: 10 }, 40, async () => ({ bpm: 120, offset: 0 }));
-    expect(grid.bpmSetAtSongTimeSec).toBeCloseTo(50, 5);
-  });
-});
-
-describe('beat-grid — drift detection', () => {
-  it('recordOnset is a no-op before BPM is known', () => {
+describe('beat-grid — setBpm', () => {
+  it('sets bpm and offset directly without an analyzer call', () => {
     const grid = createBeatGrid({ getSongTimeSec: () => 0 });
-    grid.recordOnset(1.0);
-    grid.recordOnset(2.0);
-    expect(grid.driftSampleCount).toBe(0);
-    expect(grid.isDrifting).toBe(false);
+    grid.setBpm(140, 0.25);
+    expect(grid.bpm).toBe(140);
+    expect(grid.offsetSec).toBeCloseTo(0.25, 5);
+    expect(grid.isAnalyzed).toBe(true);
   });
 
-  it('reports zero mean error when onsets land exactly on beats', async () => {
-    let songTime = 100;
-    const grid = createBeatGrid({
-      getSongTimeSec: () => songTime,
-      driftMinAgeSec: 0,  // disable cooldown for this test
-    });
-    // 120bpm → period 0.5s. Beats at 0, 0.5, 1.0, ...
-    await grid.analyzeWindow({ duration: 10 }, 0, async () => ({ bpm: 120, offset: 0 }));
-    songTime = 110;
-    grid.recordOnset(0.5);
-    grid.recordOnset(1.0);
-    grid.recordOnset(1.5);
-    grid.recordOnset(2.0);
-    grid.recordOnset(2.5);
-    expect(grid.driftMeanAbsSec).toBeCloseTo(0, 4);
-    expect(grid.isDrifting).toBe(false);
+  it('overwrites a prior bpm cleanly (track-switch path)', () => {
+    const grid = createBeatGrid({ getSongTimeSec: () => 0 });
+    grid.setBpm(120, 0);
+    grid.setBpm(160, 0.10);
+    expect(grid.bpm).toBe(160);
+    expect(grid.offsetSec).toBeCloseTo(0.10, 5);
   });
 
-  it('flags drift when onsets land systematically off the predicted beats', async () => {
-    let songTime = 100;
-    const grid = createBeatGrid({
-      getSongTimeSec: () => songTime,
-      driftToleranceMs: 40,
-      driftMinAgeSec: 0,
-      driftMinSamples: 4,
-    });
-    // 120bpm → beats at 0.5, 1.0, 1.5, 2.0, ...
-    await grid.analyzeWindow({ duration: 10 }, 0, async () => ({ bpm: 120, offset: 0.5 }));
-    songTime = 110;
-    // Onsets land 80ms after each beat — well past 40ms tolerance.
-    grid.recordOnset(0.58);
-    grid.recordOnset(1.08);
-    grid.recordOnset(1.58);
-    grid.recordOnset(2.08);
-    expect(grid.driftMeanAbsSec * 1000).toBeGreaterThan(40);
-    expect(grid.isDrifting).toBe(true);
+  it('resets scheduler state on every set', () => {
+    let songTime = 0;
+    const grid = createBeatGrid({ getSongTimeSec: () => songTime });
+    grid.setBpm(120, 0);
+    songTime = 0.6; grid.tick();   // crossed beat 0
+    expect(grid.lastBeatIdx).toBeGreaterThan(-1);
+    grid.setBpm(140, 0);            // new track — reset
+    expect(grid.lastBeatIdx).toBe(-1);
+    expect(grid.anticipation).toBe(0);
   });
 
-  it('does not flag drift below driftMinSamples', async () => {
-    let songTime = 100;
-    const grid = createBeatGrid({
-      getSongTimeSec: () => songTime,
-      driftMinAgeSec: 0,
-      driftMinSamples: 4,
-    });
-    await grid.analyzeWindow({ duration: 10 }, 0, async () => ({ bpm: 120, offset: 0 }));
-    songTime = 110;
-    // Three onsets — below threshold even if they're badly off.
-    grid.recordOnset(0.20);
-    grid.recordOnset(0.70);
-    grid.recordOnset(1.20);
-    expect(grid.driftSampleCount).toBe(3);
-    expect(grid.isDrifting).toBe(false);
+  it('clearBpm() reverts to pre-analysis state', () => {
+    const grid = createBeatGrid({ getSongTimeSec: () => 0 });
+    grid.setBpm(120, 0);
+    expect(grid.isAnalyzed).toBe(true);
+    grid.clearBpm();
+    expect(grid.isAnalyzed).toBe(false);
+    expect(grid.bpm).toBeNull();
   });
 
-  it('suppresses drift flag during the cooldown window after analysis', async () => {
-    let songTime = 100;
-    const grid = createBeatGrid({
-      getSongTimeSec: () => songTime,
-      driftToleranceMs: 40,
-      driftMinAgeSec: 4,    // 4s cooldown
-      driftMinSamples: 4,
-    });
-    await grid.analyzeWindow({ duration: 10 }, 90, async () => ({ bpm: 120, offset: 0 }));
-    // bpmSetAt = 100. Push onsets that would normally trip drift…
-    grid.recordOnset(0.20);
-    grid.recordOnset(0.70);
-    grid.recordOnset(1.20);
-    grid.recordOnset(1.70);
-    // …but song-time is still 100 (just analyzed) — cooldown blocks the flag.
-    expect(grid.isDrifting).toBe(false);
-    // Advance song-time past cooldown.
-    songTime = 105;
-    expect(grid.isDrifting).toBe(true);
+  it('rejects bogus inputs by clearing rather than crashing', () => {
+    const grid = createBeatGrid({ getSongTimeSec: () => 0 });
+    grid.setBpm(120, 0);
+    grid.setBpm(null);
+    expect(grid.isAnalyzed).toBe(false);
+    grid.setBpm(120, 0);
+    grid.setBpm(NaN, 0);
+    expect(grid.isAnalyzed).toBe(false);
+    grid.setBpm(120, 0);
+    grid.setBpm(0, 0);     // zero/negative bpm makes no sense
+    expect(grid.isAnalyzed).toBe(false);
   });
 
-  it('drift state is reset by a new analysis', async () => {
-    let songTime = 100;
-    const grid = createBeatGrid({
-      getSongTimeSec: () => songTime,
-      driftMinAgeSec: 0,
-    });
-    await grid.analyzeWindow({ duration: 10 }, 0, async () => ({ bpm: 120, offset: 0 }));
-    songTime = 110;
-    grid.recordOnset(0.20);
-    grid.recordOnset(0.70);
-    grid.recordOnset(1.20);
-    grid.recordOnset(1.70);
-    expect(grid.driftSampleCount).toBe(4);
-    // New analysis lands — drift state must clear.
-    await grid.analyzeWindow({ duration: 10 }, 100, async () => ({ bpm: 140, offset: 0 }));
-    expect(grid.driftSampleCount).toBe(0);
-    expect(grid.driftMeanAbsSec).toBe(0);
-    expect(grid.isDrifting).toBe(false);
-  });
-
-  it('rolls oldest entry out when window fills', async () => {
-    let songTime = 100;
-    const grid = createBeatGrid({
-      getSongTimeSec: () => songTime,
-      driftWindow: 4,
-      driftMinAgeSec: 0,
-    });
-    await grid.analyzeWindow({ duration: 10 }, 0, async () => ({ bpm: 120, offset: 0 }));
-    songTime = 110;
-    // Fill with 4 large-error onsets, then push 4 zero-error onsets — the
-    // mean should converge to ~zero after the window rotates.
-    // Beats at 0, 0.5, 1.0, 1.5 → these onsets each lag by 0.20s.
-    grid.recordOnset(0.20); grid.recordOnset(0.70);
-    grid.recordOnset(1.20); grid.recordOnset(1.70);
-    expect(grid.driftMeanAbsSec).toBeCloseTo(0.20, 2);
-    // Push 4 zero-error onsets — the rolling window now contains only these.
-    grid.recordOnset(2.0); grid.recordOnset(2.5);
-    grid.recordOnset(3.0); grid.recordOnset(3.5);
-    expect(grid.driftMeanAbsSec).toBeCloseTo(0, 3);
+  it('drops pending schedules on track switch', () => {
+    let songTime = 0;
+    const grid = createBeatGrid({ getSongTimeSec: () => songTime });
+    grid.setBpm(120, 0);
+    const fn = vi.fn();
+    grid.scheduleAt(0.5, fn);
+    grid.setBpm(140, 0);   // new track — pending schedule from old timeline must vanish
+    songTime = 1.0; grid.tick();
+    expect(fn).not.toHaveBeenCalled();
   });
 });
 

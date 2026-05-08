@@ -28,7 +28,21 @@
       "Bash(npx vitest *)",
       "Bash(npm audit *)",
       "Bash(xargs -I {} cat {})",
-      "Bash(awk -F: '$1>=3480 && $1<=3640')"
+      "Bash(awk -F: '$1>=3480 && $1<=3640')",
+      "Bash(pnpm test *)",
+      "Bash(npx eslint *)",
+      "Bash(echo \"PID=$!\")",
+      "Bash(curl -s -o /tmp/vite-page.html -w \"HTTP=%{http_code}\\\\n\" http://localhost:5179/tetris.html)",
+      "Bash(kill %1)",
+      "Bash(wait)",
+      "Bash(curl -sI http://localhost:5180/asset/sounds/bgm/bgm_01.m4a)",
+      "Bash(curl -sI http://localhost:5180/asset/sounds/bgm/bgm_14.m4a)",
+      "Bash(curl -sI http://localhost:5180/asset/sounds/effects/rempage.wav)",
+      "Bash(curl -sI http://localhost:5180/asset/sounds/effects/man.mp3)",
+      "Bash(curl -sI http://localhost:5180/asset/sounds/bgm_vaporwave.m4a)",
+      "Bash(curl -sI http://localhost:5180/asset/sounds/rempage.wav)",
+      "Bash(curl -sI http://localhost:5181/asset/sounds/bgm/bgm_01.m4a)",
+      "Bash(curl -s -o /tmp/page.html -w \"HTTP=%{http_code}\\\\n\" http://localhost:5181/tetris.html)"
     ]
   }
 }

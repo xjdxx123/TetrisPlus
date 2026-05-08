@@ -6,22 +6,21 @@
 // audio you need to know where the next beat *will be*, which means
 // pre-analyzed BPM + downbeat phase.
 //
-// This module:
-//   1. Runs offline BPM/downbeat detection on a decoded BGM buffer (via
-//      web-audio-beat-detector, injected for testability).
-//   2. Projects beat times: t_n = offsetSec + n * (60 / bpm).
-//   3. On every tick, given the current song-time, dispatches:
+// This module owns the *projection*, not the analysis. The caller (today
+// `audio/reactive/bpm-cache.js`) runs whole-track BPM analysis offline and
+// hands the result to `setBpm(bpm, offsetSec)`. From there the grid:
+//   1. Projects beat times: t_n = offsetSec + n * (60 / bpm).
+//   2. On every tick, given the current song-time, dispatches:
 //        'preBeat' once when each upcoming beat enters the lookahead
 //                  window (default 250ms ahead),
 //        'beat'    once when each beat's projected time has passed.
-//   4. Maintains a continuous `anticipation` value [0..1] that ramps up
+//   3. Maintains a continuous `anticipation` value [0..1] that ramps up
 //      across the lookahead window — bindings consume this directly to
 //      produce smooth pre-beat ramps without owning their own timers.
 //
-// Coupling discipline: the module knows nothing about Web Audio internals
-// (beyond the `analyzer` callback's signature). The caller decodes the
-// BGM, supplies a `getSongTimeSec()` thunk (bgmEl.currentTime), and the
-// scheduler does the rest. That keeps the file unit-testable in pure Node.
+// Pure module — no Web Audio, no DOM. The legacy `analyze(buffer)` method
+// remains for the existing test suite (it just delegates to setBpm), but
+// production code uses `setBpm` directly via the per-track cache.
 //
 // Sync-source choice: getSongTimeSec is the BGM element's currentTime, NOT
 // the AudioContext's currentTime. They drift. AudioContext.currentTime is
@@ -42,34 +41,26 @@
  * @param {Object} opts
  * @param {() => number} opts.getSongTimeSec   Source of truth for "where are we in the song"
  * @param {number}       [opts.lookaheadSec=0.25]  How far ahead to fire preBeat
- * @param {BeatAnalyzer} [opts.analyzer]       Injected for tests; defaults to web-audio-beat-detector's `guess`
- * @param {number}       [opts.driftWindow=8]      How many recent onsets to track for drift
- * @param {number}       [opts.driftMinSamples=4]  Min onsets needed before isDrifting can be true
- * @param {number}       [opts.driftToleranceMs=40] Mean |onset-vs-predicted| above this = drifting
- * @param {number}       [opts.driftMinAgeSec=4]   Suppress drift flag for this long after an analysis
+ * @param {BeatAnalyzer} [opts.analyzer]       Optional — only used by the legacy `analyze(buffer)`
+ *                                             helper that the test suite still calls. Production
+ *                                             code calls `setBpm(bpm, offset)` directly via the
+ *                                             per-track cache.
  */
 export function createBeatGrid({
   getSongTimeSec,
   lookaheadSec = 0.25,
   analyzer = null,
-  driftWindow = 8,
-  driftMinSamples = 4,
-  driftToleranceMs = 40,
-  driftMinAgeSec = 4,
 } = {}) {
   if (typeof getSongTimeSec !== 'function') {
     throw new Error('beat-grid requires getSongTimeSec function');
   }
   if (lookaheadSec <= 0) throw new Error('lookaheadSec must be > 0');
 
-  // Cached BPM result. null until analyze() resolves successfully.
+  // Cached BPM result. null until setBpm() lands.
   let bpm = null;
   let offsetSec = 0;
-  let analyzing = false;
+  let analyzing = false;       // surfaced by isAnalyzing for the debug overlay
   let analyzeError = null;
-  // Song-time at which the latest BPM was set. Used to suppress the drift
-  // flag right after an analysis lands (no tracks change BPM in 4 seconds).
-  let bpmSetAtSongTimeSec = -Infinity;
 
   // Scheduler state — tracks "what's the latest beat index whose time has
   // passed (or is approaching)" so we never double-fire.
@@ -78,15 +69,6 @@ export function createBeatGrid({
   let lastSongTimeSec = 0;
   let cachedAnticipation = 0;
   let cachedPhase = 0;
-
-  // Drift detector state — circular buffer of signed alignment errors
-  // (onsetTime - nearestBeatTime, in seconds). Each onset pushed via
-  // recordOnset() updates the rolling sum so isDrifting/driftMeanAbs are
-  // O(1) reads.
-  const driftErrors = new Float32Array(driftWindow);
-  let driftCount = 0;       // how many slots currently filled (≤ driftWindow)
-  let driftWriteIdx = 0;
-  let driftSumAbs = 0;      // sum of |errors| over filled slots
 
   // Subscriber sets, FeatureBus.onsets pattern.
   const subs = {
@@ -119,7 +101,8 @@ export function createBeatGrid({
     }
   }
 
-  // Reset scheduler indices — called on song-time scrub-backward / loop.
+  // Reset scheduler indices — called on song-time scrub-backward / loop and
+  // on every track switch (the new playhead is at 0 of a different song).
   function resetSchedulerState() {
     lastBeatIdx = -1;
     lastPreBeatIdx = -1;
@@ -131,27 +114,52 @@ export function createBeatGrid({
     pendingSchedules.length = 0;
   }
 
-  function resetDriftState() {
-    for (let i = 0; i < driftWindow; i++) driftErrors[i] = 0;
-    driftCount = 0;
-    driftWriteIdx = 0;
-    driftSumAbs = 0;
+  /**
+   * Apply a {bpm, offset} pair from the per-track cache. This is the
+   * production entry point — the new pipeline runs whole-track analysis
+   * up-front (`audio/reactive/bpm-cache.js`) and feeds results in here on
+   * every track change.
+   *
+   * Resets scheduler state so the projection starts clean from the new
+   * track's first beat. Passing `bpm=null` (or omitting it) clears the
+   * grid back to the pre-analysis state — useful while a new track's
+   * analysis is still running.
+   *
+   * @param {number|null} bpmIn
+   * @param {number}      [offsetIn=0]   Song-time of the first beat (sec)
+   */
+  function setBpm(bpmIn, offsetIn = 0) {
+    if (bpmIn == null || !isFinite(bpmIn) || bpmIn <= 0) {
+      bpm = null;
+      offsetSec = 0;
+      analyzeError = null;
+      resetSchedulerState();
+      return;
+    }
+    bpm = bpmIn;
+    offsetSec = isFinite(offsetIn) ? offsetIn : 0;
+    analyzeError = null;
+    resetSchedulerState();
   }
 
+  /** Convenience: drop the active BPM (e.g. while a new track is decoding). */
+  function clearBpm() { setBpm(null); }
+
   /**
-   * Run BPM/downbeat detection. Internal — called by both analyze (full
-   * file: buffer covers song-time [0, duration]) and analyzeWindow
-   * (rolling capture: buffer covers [endSongTime - duration, endSongTime]).
+   * Legacy whole-buffer helper retained for the test suite. New production
+   * code should run analysis through `audio/reactive/bpm-cache.js` and call
+   * `setBpm(bpm, offset)` directly. This wrapper just runs the injected
+   * analyzer on the buffer and forwards the result into setBpm.
    *
-   * Sets cached `bpm` + absolute `offsetSec` (song-time of first beat).
-   * Resets scheduler + drift state on success so projections start clean.
+   * Unlike the previous semantics, each call is allowed to overwrite —
+   * idempotency was a property the old single-file flow needed; the
+   * per-track flow does not.
    *
-   * Unlike the original analyze() this is NOT idempotent — analyzeWindow
-   * must be able to overwrite the cached BPM when a new track plays.
+   * @param {AudioBuffer} audioBuffer
+   * @param {BeatAnalyzer} [analyzerOverride]
    */
-  async function _runAnalysis(audioBuffer, windowStartSongTime, allowOverwrite, analyzerOverride) {
+  async function analyze(audioBuffer, analyzerOverride = null) {
     if (analyzing) return null;
-    if (!allowOverwrite && bpm != null) return { bpm, offset: offsetSec };
     const fn = analyzerOverride || analyzer;
     if (typeof fn !== 'function') {
       analyzeError = new Error('no analyzer injected; pass `analyzer` to createBeatGrid or analyze()');
@@ -164,88 +172,16 @@ export function createBeatGrid({
       if (!result || typeof result.bpm !== 'number' || !isFinite(result.bpm) || result.bpm <= 0) {
         throw new Error('analyzer returned invalid bpm');
       }
-      bpm = result.bpm;
       const localOffset = typeof result.offset === 'number' ? result.offset : 0;
-      // Translate the buffer-local first-beat offset into absolute song-time.
-      // For the legacy analyze() path, windowStartSongTime is 0 so offsetSec
-      // is just the analyzer's offset. For analyzeWindow, the buffer covers
-      // [windowStart, windowEnd] so the absolute first beat is windowStart + offset.
-      offsetSec = windowStartSongTime + localOffset;
-      bpmSetAtSongTimeSec = getSongTimeSec();
-      resetSchedulerState();
-      resetDriftState();
+      setBpm(result.bpm, localOffset);
       return { bpm, offset: offsetSec };
     } catch (err) {
       analyzeError = err;
       console.warn('[beat-grid] BPM analysis failed:', err?.message || err);
-      // Don't wipe a previously-good bpm just because a re-analysis failed —
-      // the old projection is better than none.
-      if (!allowOverwrite) bpm = null;
       return null;
     } finally {
       analyzing = false;
     }
-  }
-
-  /**
-   * One-shot analysis: the buffer is treated as covering song-time
-   * [0, buffer.duration]. Idempotent (no-op once bpm is set).
-   * @param {AudioBuffer} audioBuffer
-   * @param {BeatAnalyzer} [analyzerOverride]
-   */
-  function analyze(audioBuffer, analyzerOverride = null) {
-    return _runAnalysis(audioBuffer, 0, false, analyzerOverride);
-  }
-
-  /**
-   * Windowed analysis: the buffer covers [windowStartSongTime,
-   * windowStartSongTime + buffer.duration] in song-time. Replaces any
-   * existing bpm — used to switch tempo when a new track starts.
-   * @param {AudioBuffer} audioBuffer
-   * @param {number}      windowStartSongTime  song-time at the start of the captured window
-   * @param {BeatAnalyzer} [analyzerOverride]
-   */
-  function analyzeWindow(audioBuffer, windowStartSongTime, analyzerOverride = null) {
-    return _runAnalysis(audioBuffer, windowStartSongTime, true, analyzerOverride);
-  }
-
-  /**
-   * Push an onset's song-time into the drift detector. Computes the signed
-   * error onsetTime - nearestPredictedBeatTime; the rolling mean |error|
-   * powers `isDrifting`. No-op if BPM hasn't been set yet (no predictions
-   * to compare against).
-   * @param {number} songTimeSec
-   */
-  function recordOnset(songTimeSec) {
-    if (bpm == null) return;
-    if (!isFinite(songTimeSec)) return;
-    const period = 60 / bpm;
-    const phaseFromOffset = (songTimeSec - offsetSec) / period;
-    const nearestIdx = Math.round(phaseFromOffset);
-    const predicted = offsetSec + nearestIdx * period;
-    const err = songTimeSec - predicted;     // signed seconds
-    // Update rolling |error| sum: subtract the slot we're overwriting.
-    if (driftCount === driftWindow) {
-      driftSumAbs -= Math.abs(driftErrors[driftWriteIdx]);
-    } else {
-      driftCount++;
-    }
-    driftErrors[driftWriteIdx] = err;
-    driftSumAbs += Math.abs(err);
-    driftWriteIdx = (driftWriteIdx + 1) % driftWindow;
-  }
-
-  function driftMeanAbsSec() {
-    if (driftCount === 0) return 0;
-    return driftSumAbs / driftCount;
-  }
-
-  function isDrifting() {
-    if (bpm == null) return false;
-    if (driftCount < driftMinSamples) return false;
-    const ageSec = getSongTimeSec() - bpmSetAtSongTimeSec;
-    if (ageSec < driftMinAgeSec) return false;
-    return driftMeanAbsSec() * 1000 > driftToleranceMs;
   }
 
   /**
@@ -336,9 +272,9 @@ export function createBeatGrid({
   return {
     on,
     tick,
-    analyze,
-    analyzeWindow,
-    recordOnset,
+    setBpm,
+    clearBpm,
+    analyze,             // legacy whole-buffer helper retained for tests
     scheduleAt,
     reset: resetSchedulerState,
 
@@ -352,12 +288,6 @@ export function createBeatGrid({
     get anticipation()  { return cachedAnticipation; },
     get phase()         { return cachedPhase; },
     get lastBeatIdx()   { return lastBeatIdx; },
-    get bpmSetAtSongTimeSec() { return bpmSetAtSongTimeSec; },
-    // Drift detector accessors — main.js polls these to decide when to
-    // trigger a re-analysis.
-    get driftMeanAbsSec()   { return driftMeanAbsSec(); },
-    get driftSampleCount()  { return driftCount; },
-    get isDrifting()        { return isDrifting(); },
     get nextBeatTimeSec() {
       if (bpm == null) return null;
       const period = 60 / bpm;
