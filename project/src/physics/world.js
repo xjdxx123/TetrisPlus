@@ -123,6 +123,17 @@ export class PhysicsWorld {
     this._bodies = new Map();
     this._nextId = 1;
 
+    // Force-Physics pivot (plan v2 §2.3.1): compound bodies need
+    // per-collider tracking so layer-clear can remove individual
+    // colliders without destroying the whole body.
+    //   _colliders: colliderId → { handle, bodyId, colorIfAny }
+    //   _bodyColliders: bodyId → array of colliderIds
+    /** @type {Map<number, { handle: any, bodyId: number, color: number }>} */
+    this._colliders = new Map();
+    /** @type {Map<number, number[]>} */
+    this._bodyColliders = new Map();
+    this._nextColliderId = 1;
+
     /** @type {any[]} */
     this._staticHandles = [];
 
@@ -180,29 +191,173 @@ export class PhysicsWorld {
    * @returns {number} bodyId
    */
   addBody(x, y, z = 0, opts = {}) {
+    // Single-cuboid body — implemented as a compound body with one
+    // collider so the bookkeeping stays uniform with addCompoundBody.
+    return this.addCompoundBody([{ x, y, z }], opts);
+  }
+
+  /**
+   * Spawn a compound rigid body composed of N unit-cube colliders, one
+   * at each `(x, y, z)` cell position in the input. The body's center
+   * of mass is the centroid of the cells; each collider's local
+   * translation is the cell's offset from that centroid. This is the
+   * core primitive for Force-Physics tetrominoes (plan v2 §2.3.1):
+   * an L-piece is `addCompoundBody([(0,0,0),(0,1,0),(0,2,0),(1,0,0)])`.
+   *
+   * Returns the body ID. The collider IDs are assigned internally and
+   * exposed via `getColliderPositions()`. Per-collider removal goes
+   * through `removeCollider(colliderId)`; a body whose last collider
+   * is removed is auto-deleted (so the host doesn't leak ghost bodies).
+   *
+   * @param {Array<{x:number, y:number, z?:number}>} cells
+   * @param {{
+   *   color?: number,
+   *   damping?: number,
+   *   angularDamping?: number,
+   *   velocity?: {x:number,y:number,z:number},
+   * }} [opts]
+   * @returns {number} bodyId
+   */
+  addCompoundBody(cells, opts = {}) {
+    if (!Array.isArray(cells) || cells.length === 0) {
+      throw new Error('addCompoundBody requires at least one cell');
+    }
     const RAPIER = this._RAPIER;
+
+    // Centroid — body's translation. Local collider translations are
+    // cell - centroid so the body's frame is centered on the piece.
+    let cx = 0, cy = 0, cz = 0;
+    for (const c of cells) {
+      cx += c.x;
+      cy += c.y;
+      cz += (c.z || 0);
+    }
+    cx /= cells.length;
+    cy /= cells.length;
+    cz /= cells.length;
+
     const desc = RAPIER.RigidBodyDesc.dynamic()
-      .setTranslation(x, y, z)
-      .setLinearDamping(0.05)   // gentle global damping helps the stack settle
-      .setAngularDamping(0.10)
+      .setTranslation(cx, cy, cz)
+      .setLinearDamping(opts.damping ?? 0.05)
+      .setAngularDamping(opts.angularDamping ?? 0.10)
       .setCanSleep(true);
     if (opts.velocity) {
       desc.setLinvel(opts.velocity.x | 0, opts.velocity.y | 0, opts.velocity.z | 0);
     }
     const body = this._world.createRigidBody(desc);
 
-    const colliderDesc = RAPIER.ColliderDesc.cuboid(0.5, 0.5, 0.5)
-      .setFriction(this._opts.friction)
-      .setRestitution(this._opts.restitution)
-      // Activate continuous collision detection — fast-moving cubes
-      // (a hard-dropped piece converted to bodies at lock) shouldn't
-      // tunnel through the floor before resting.
-      .setActiveCollisionTypes(RAPIER.ActiveCollisionTypes.DEFAULT);
-    this._world.createCollider(colliderDesc, body);
+    const bodyId = this._nextId++;
+    this._bodies.set(bodyId, body);
 
-    const id = this._nextId++;
-    this._bodies.set(id, body);
-    return id;
+    const colliderIds = [];
+    const color = (typeof opts.color === 'number') ? (opts.color | 0) : 0xffffff;
+    for (const cell of cells) {
+      const cd = RAPIER.ColliderDesc.cuboid(0.5, 0.5, 0.5)
+        .setTranslation(cell.x - cx, cell.y - cy, (cell.z || 0) - cz)
+        .setFriction(this._opts.friction)
+        .setRestitution(this._opts.restitution)
+        .setActiveCollisionTypes(RAPIER.ActiveCollisionTypes.DEFAULT);
+      const collider = this._world.createCollider(cd, body);
+      const colliderId = this._nextColliderId++;
+      this._colliders.set(colliderId, { handle: collider, bodyId, color });
+      colliderIds.push(colliderId);
+    }
+    this._bodyColliders.set(bodyId, colliderIds);
+    return bodyId;
+  }
+
+  /**
+   * Apply a one-shot linear impulse (kg·m/s) to the body's center of
+   * mass. Used for player-driven left/right "nudges" in Force Physics.
+   *
+   * @param {number} bodyId
+   * @param {{x:number, y:number, z:number}} vec
+   */
+  applyImpulse(bodyId, vec) {
+    const body = this._bodies.get(bodyId);
+    if (!body || !vec) return;
+    body.applyImpulse({ x: +vec.x || 0, y: +vec.y || 0, z: +vec.z || 0 }, true);
+  }
+
+  /**
+   * Apply a one-shot angular impulse (kg·m²/s) about the world axes.
+   * Used for player-driven rotation in Force Physics — Z-axis impulse
+   * spins the piece around the screen-perpendicular axis.
+   *
+   * @param {number} bodyId
+   * @param {{x:number, y:number, z:number}} vec
+   */
+  applyTorqueImpulse(bodyId, vec) {
+    const body = this._bodies.get(bodyId);
+    if (!body || !vec) return;
+    body.applyTorqueImpulse({ x: +vec.x || 0, y: +vec.y || 0, z: +vec.z || 0 }, true);
+  }
+
+  /**
+   * Set the body's linear velocity directly. Used for hard drop —
+   * instantly sets a strong downward velocity instead of an additive
+   * impulse, so a hard-dropped piece moves at a known speed regardless
+   * of its prior motion.
+   *
+   * @param {number} bodyId
+   * @param {{x:number, y:number, z:number}} vec
+   */
+  setLinvel(bodyId, vec) {
+    const body = this._bodies.get(bodyId);
+    if (!body || !vec) return;
+    body.setLinvel({ x: +vec.x || 0, y: +vec.y || 0, z: +vec.z || 0 }, true);
+  }
+
+  /**
+   * Sleep state of a single body. Used by PhysicsSession to detect
+   * "the active piece has settled" — Rapier auto-sleeps bodies whose
+   * velocity stays below threshold for ~0.5s.
+   *
+   * @param {number} bodyId
+   * @returns {boolean}  true when sleeping, false when awake or unknown
+   */
+  isBodySleeping(bodyId) {
+    const body = this._bodies.get(bodyId);
+    return body ? body.isSleeping() : false;
+  }
+
+  /**
+   * Remove a single collider from its parent body. When the parent's
+   * collider count drops to 0, the parent body is auto-removed too.
+   * Returns true on a real removal; false if the colliderId is unknown
+   * (idempotent on repeated removes).
+   *
+   * Used for Force-Physics layer clear: detectLayers identifies cleared
+   * collider IDs; the host calls removeCollider per cleared ID. The
+   * surviving colliders stay attached to their parent body and the
+   * remaining cubes settle naturally under gravity.
+   *
+   * @param {number} colliderId
+   * @returns {boolean}
+   */
+  removeCollider(colliderId) {
+    const entry = this._colliders.get(colliderId);
+    if (!entry) return false;
+    // The `wakeUp` flag is true so neighbors that were resting on this
+    // collider get re-evaluated this step; otherwise they'd float.
+    this._world.removeCollider(entry.handle, true);
+    this._colliders.delete(colliderId);
+
+    const list = this._bodyColliders.get(entry.bodyId);
+    if (list) {
+      const idx = list.indexOf(colliderId);
+      if (idx >= 0) list.splice(idx, 1);
+      if (list.length === 0) {
+        // Body has no colliders left — clean up.
+        this._bodyColliders.delete(entry.bodyId);
+        const body = this._bodies.get(entry.bodyId);
+        if (body) {
+          this._world.removeRigidBody(body);
+          this._bodies.delete(entry.bodyId);
+        }
+      }
+    }
+    return true;
   }
 
   /**
@@ -214,6 +369,14 @@ export class PhysicsWorld {
   removeBody(bodyId) {
     const body = this._bodies.get(bodyId);
     if (!body) return false;
+    // Clean up tracked colliders before nuking the body so the
+    // collider registry doesn't keep stale entries pointing at a
+    // freed Rapier handle.
+    const list = this._bodyColliders.get(bodyId);
+    if (list) {
+      for (const colliderId of list) this._colliders.delete(colliderId);
+      this._bodyColliders.delete(bodyId);
+    }
     this._world.removeRigidBody(body);
     this._bodies.delete(bodyId);
     return true;
@@ -251,6 +414,47 @@ export class PhysicsWorld {
       out.push({ bodyId, x: t.x, y: t.y, z: t.z });
     }
     return out;
+  }
+
+  /**
+   * Snapshot every live collider's WORLD-space position (Force-Physics
+   * pivot, plan v2 §2.3.1). Compound bodies have multiple colliders
+   * each — this is what `detectLayers` operates on so a "layer" is a
+   * connected component of cubes irrespective of which parent body
+   * they belong to.
+   *
+   * Each entry includes the parent `bodyId`, the `colliderId` (for
+   * removeCollider after layer detect), the world-space position, and
+   * the color stashed at addCompoundBody time.
+   *
+   * @returns {Array<{ colliderId: number, bodyId: number, x: number, y: number, z: number, color: number }>}
+   */
+  getColliderPositions() {
+    const out = [];
+    for (const [colliderId, entry] of this._colliders) {
+      const t = entry.handle.translation();
+      out.push({
+        colliderId, bodyId: entry.bodyId,
+        x: t.x, y: t.y, z: t.z,
+        color: entry.color,
+      });
+    }
+    return out;
+  }
+
+  /**
+   * Body's world-space rotation as a quaternion `{x, y, z, w}`. Used by
+   * the renderer to copy parent transforms onto child cube meshes.
+   * Null when the body is unknown.
+   *
+   * @param {number} bodyId
+   * @returns {{x:number, y:number, z:number, w:number} | null}
+   */
+  getBodyRotation(bodyId) {
+    const body = this._bodies.get(bodyId);
+    if (!body) return null;
+    const r = body.rotation();
+    return { x: r.x, y: r.y, z: r.z, w: r.w };
   }
 
   /**
@@ -301,6 +505,8 @@ export class PhysicsWorld {
       this._world = null;
     }
     this._bodies.clear();
+    this._colliders.clear();
+    this._bodyColliders.clear();
     this._staticHandles.length = 0;
   }
 
