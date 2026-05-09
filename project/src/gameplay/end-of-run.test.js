@@ -328,6 +328,187 @@ describe('recordEndOfRun — custom updateBest hook', () => {
   });
 });
 
+describe('recordEndOfRun — modern-rules stats (plan §13 #2)', () => {
+  // Helper: a stats blob that already has the modern-rules slots,
+  // matching the live STATS_DEFAULTS shape.
+  function withModernSlots() {
+    return {
+      highScore: 0,
+      modeBests: {
+        classic: {
+          score: 0, lines: 0, level: 1, attempts: 0,
+          bestB2bChain: 0, bestCombo: 0, perfectClears: 0, tspinClears: 0,
+        },
+        sprint: {
+          score: 0, lines: 0, level: 1, attempts: 0,
+          completed: false, bestTimeMs: null, bestCombo: 0,
+        },
+        versus: {
+          score: 0, lines: 0, level: 1, attempts: 0,
+          wins: 0, losses: 0, draws: 0, eloMmr: 1200,
+          bestGarbageCancelled: 0,
+          bestB2bChain: 0, bestCombo: 0, perfectClears: 0, tspinClears: 0,
+        },
+      },
+      totals: { linesCleared: 0, piecesPlaced: 0, playTimeMs: 0 },
+    };
+  }
+
+  it('cumulative tspinClears = sum of all four T-spin buckets', () => {
+    const hooks = makeHooks(withModernSlots());
+    recordEndOfRun({
+      score: 1000, lines: 5, level: 1,
+      modeKey: 'classic', reason: 'topout',
+      sessionStartMs: 0, piecesPlacedThisRun: 10, linesClearedThisRun: 5,
+      runStats: { tspinSingles: 2, tspinDoubles: 1, tspinTriples: 0, tspinMinis: 3 },
+    }, hooks);
+    expect(hooks.snapshot().modeBests.classic.tspinClears).toBe(6);
+  });
+
+  it('tspinClears accumulates across multiple runs', () => {
+    const hooks = makeHooks(withModernSlots());
+    recordEndOfRun({
+      score: 100, lines: 1, level: 1,
+      modeKey: 'classic', reason: 'topout',
+      sessionStartMs: 0, piecesPlacedThisRun: 1, linesClearedThisRun: 1,
+      runStats: { tspinSingles: 2 },
+    }, hooks);
+    recordEndOfRun({
+      score: 100, lines: 1, level: 1,
+      modeKey: 'classic', reason: 'topout',
+      sessionStartMs: 0, piecesPlacedThisRun: 1, linesClearedThisRun: 1,
+      runStats: { tspinSingles: 3, tspinMinis: 1 },
+    }, hooks);
+    expect(hooks.snapshot().modeBests.classic.tspinClears).toBe(6);
+  });
+
+  it('bestB2bChain takes the MAX of (prior, runStats.maxB2b)', () => {
+    const hooks = makeHooks(withModernSlots());
+    recordEndOfRun({
+      score: 100, lines: 1, level: 1,
+      modeKey: 'classic', reason: 'topout',
+      sessionStartMs: 0, piecesPlacedThisRun: 1, linesClearedThisRun: 1,
+      runStats: { maxB2b: 3 },
+    }, hooks);
+    expect(hooks.snapshot().modeBests.classic.bestB2bChain).toBe(3);
+    // A worse run does NOT reduce the record.
+    recordEndOfRun({
+      score: 100, lines: 1, level: 1,
+      modeKey: 'classic', reason: 'topout',
+      sessionStartMs: 0, piecesPlacedThisRun: 1, linesClearedThisRun: 1,
+      runStats: { maxB2b: 1 },
+    }, hooks);
+    expect(hooks.snapshot().modeBests.classic.bestB2bChain).toBe(3);
+    // A better run advances it.
+    recordEndOfRun({
+      score: 100, lines: 1, level: 1,
+      modeKey: 'classic', reason: 'topout',
+      sessionStartMs: 0, piecesPlacedThisRun: 1, linesClearedThisRun: 1,
+      runStats: { maxB2b: 5 },
+    }, hooks);
+    expect(hooks.snapshot().modeBests.classic.bestB2bChain).toBe(5);
+  });
+
+  it('bestCombo takes the MAX of (prior, runStats.maxCombo)', () => {
+    const hooks = makeHooks(withModernSlots());
+    recordEndOfRun({
+      score: 0, lines: 0, level: 1,
+      modeKey: 'sprint', reason: 'topout',
+      sessionStartMs: 0, piecesPlacedThisRun: 1, linesClearedThisRun: 0,
+      runStats: { maxCombo: 7 },
+    }, hooks);
+    expect(hooks.snapshot().modeBests.sprint.bestCombo).toBe(7);
+  });
+
+  it('perfectClears is cumulative across runs', () => {
+    const hooks = makeHooks(withModernSlots());
+    recordEndOfRun({
+      score: 100, lines: 1, level: 1,
+      modeKey: 'classic', reason: 'topout',
+      sessionStartMs: 0, piecesPlacedThisRun: 1, linesClearedThisRun: 1,
+      runStats: { perfectClears: 1 },
+    }, hooks);
+    recordEndOfRun({
+      score: 100, lines: 1, level: 1,
+      modeKey: 'classic', reason: 'topout',
+      sessionStartMs: 0, piecesPlacedThisRun: 1, linesClearedThisRun: 1,
+      runStats: { perfectClears: 2 },
+    }, hooks);
+    expect(hooks.snapshot().modeBests.classic.perfectClears).toBe(3);
+  });
+
+  it('Versus: bestGarbageCancelled tracks the highest single-round tally', () => {
+    const hooks = makeHooks(withModernSlots());
+    recordEndOfRun({
+      score: 0, lines: 5, level: 1,
+      modeKey: 'versus', reason: 'topout',
+      sessionStartMs: 0, piecesPlacedThisRun: 10, linesClearedThisRun: 5,
+      runStats: { garbageCancelled: 12 },
+    }, hooks);
+    expect(hooks.snapshot().modeBests.versus.bestGarbageCancelled).toBe(12);
+    // A lower follow-up doesn't shrink the record.
+    recordEndOfRun({
+      score: 0, lines: 5, level: 1,
+      modeKey: 'versus', reason: 'topout',
+      sessionStartMs: 0, piecesPlacedThisRun: 10, linesClearedThisRun: 5,
+      runStats: { garbageCancelled: 4 },
+    }, hooks);
+    expect(hooks.snapshot().modeBests.versus.bestGarbageCancelled).toBe(12);
+  });
+
+  it('Sprint: only `bestCombo` is tunable (other modern fields not present)', () => {
+    const hooks = makeHooks(withModernSlots());
+    recordEndOfRun({
+      score: 0, lines: 0, level: 1,
+      modeKey: 'sprint', reason: 'topout',
+      sessionStartMs: 0, piecesPlacedThisRun: 1, linesClearedThisRun: 0,
+      runStats: {
+        tspinSingles: 5, tspinMinis: 2,
+        perfectClears: 1, maxB2b: 4, maxCombo: 6,
+      },
+    }, hooks);
+    const sprint = hooks.snapshot().modeBests.sprint;
+    // Only bestCombo writes (Sprint's slot defines only that one).
+    expect(sprint.bestCombo).toBe(6);
+    // bestB2bChain / perfectClears / tspinClears slots don't exist in
+    // Sprint's default — they remain undefined (not silently created).
+    expect(sprint.bestB2bChain).toBeUndefined();
+    expect(sprint.perfectClears).toBeUndefined();
+    expect(sprint.tspinClears).toBeUndefined();
+  });
+
+  it('runStats omitted entirely → no modern-rules writes (legacy callers safe)', () => {
+    const hooks = makeHooks(withModernSlots());
+    const before = hooks.snapshot().modeBests.classic;
+    recordEndOfRun({
+      score: 100, lines: 1, level: 1,
+      modeKey: 'classic', reason: 'topout',
+      sessionStartMs: 0, piecesPlacedThisRun: 1, linesClearedThisRun: 1,
+      // runStats intentionally absent
+    }, hooks);
+    const after = hooks.snapshot().modeBests.classic;
+    expect(after.tspinClears).toBe(before.tspinClears);
+    expect(after.perfectClears).toBe(before.perfectClears);
+    expect(after.bestB2bChain).toBe(before.bestB2bChain);
+    expect(after.bestCombo).toBe(before.bestCombo);
+  });
+
+  it('runStats coerces missing per-field zeros (defensive)', () => {
+    const hooks = makeHooks(withModernSlots());
+    recordEndOfRun({
+      score: 100, lines: 1, level: 1,
+      modeKey: 'classic', reason: 'topout',
+      sessionStartMs: 0, piecesPlacedThisRun: 1, linesClearedThisRun: 1,
+      runStats: { tspinSingles: 2 }, // others omitted
+    }, hooks);
+    const c = hooks.snapshot().modeBests.classic;
+    expect(c.tspinClears).toBe(2);
+    expect(c.perfectClears).toBe(0);
+    expect(c.bestB2bChain).toBe(0);
+    expect(c.bestCombo).toBe(0);
+  });
+});
+
 describe('recordEndOfRun — write semantics', () => {
   it('flushes synchronously (saveStats called with flush:true)', () => {
     const hooks = makeHooks();

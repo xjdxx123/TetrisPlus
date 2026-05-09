@@ -106,7 +106,13 @@ describe('storage — stats', () => {
     expect(s.highScore).toBe(0);
     expect(s.totals.linesCleared).toBe(0);
     // Phase-1 of the rules engine added `attempts` to every mode-best slot.
-    expect(s.modeBests.classic).toEqual({ score: 0, lines: 0, level: 1, attempts: 0 });
+    // Plan §13 #2 added the modern-rules slots — `bestB2bChain`, `bestCombo`,
+    // `perfectClears`, `tspinClears`. All zero-defaulted; backfilled on
+    // existing saves via deep-merge.
+    expect(s.modeBests.classic).toEqual({
+      score: 0, lines: 0, level: 1, attempts: 0,
+      bestB2bChain: 0, bestCombo: 0, perfectClears: 0, tspinClears: 0,
+    });
     // Every mode key gets a default slot — backfilled on existing saves
     // via the deep-merge load path, so older blobs don't break.
     for (const key of ['classic', 'marathon', 'sprint', 'ultra', 'zen', 'versus']) {

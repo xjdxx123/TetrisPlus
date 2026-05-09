@@ -36,6 +36,17 @@
  *   behaviour is "score-based": replace best.score/lines/level when the
  *   new score is higher. Zen overrides this to track longestSessionMs +
  *   cumulative totalLines instead.
+ *
+ * @property {{
+ *   tspinSingles?: number, tspinDoubles?: number, tspinTriples?: number,
+ *   tspinMinis?: number, perfectClears?: number, maxB2b?: number,
+ *   maxCombo?: number, garbageCancelled?: number,
+ * }} [runStats]
+ *   Modern-rules per-run accumulators (plan §13 next-moves item 2).
+ *   Game.getRunStats() returns this shape; the writer mixes the
+ *   high-water marks into the per-mode best (`bestB2bChain`,
+ *   `bestCombo`, `bestGarbageCancelled`) and adds the cumulative
+ *   counts (`perfectClears`, `tspinClears`) to the per-mode tally.
  */
 
 /**
@@ -66,6 +77,7 @@ export function recordEndOfRun(summary, hooks) {
     goalMultiplier = 1.0,
     runTimeMs = null,
     updateBest = null,
+    runStats = null,
   } = summary || {};
   if (!hooks || typeof hooks.loadStats !== 'function' || typeof hooks.saveStats !== 'function') {
     throw new Error('recordEndOfRun requires { loadStats, saveStats } hooks');
@@ -123,6 +135,44 @@ export function recordEndOfRun(summary, hooks) {
       if (prev == null || runTimeMs < prev) {
         best.bestTimeMs = runTimeMs;
       }
+    }
+  }
+
+  // Modern-rules per-mode best fields (plan §13 next-moves item 2).
+  // Mixed in for every mode regardless of `reason` — a topped-out run
+  // can still set a `bestB2bChain` or `bestCombo` record on the way to
+  // the topout. `tspinClears` and `perfectClears` are CUMULATIVE counts
+  // (added to the existing tally); `bestB2bChain`, `bestCombo`,
+  // `bestGarbageCancelled` are MAX of (prior, this run).
+  //
+  // Each field is gated on `runStats` providing a numeric value AND on
+  // `best` already having that field initialized via storage defaults
+  // — that gating means Sprint's slot (which only defines `bestCombo`,
+  // not `bestB2bChain`) silently skips fields it doesn't track.
+  if (runStats && typeof runStats === 'object') {
+    const tspinThisRun = (runStats.tspinSingles  | 0)
+                       + (runStats.tspinDoubles  | 0)
+                       + (runStats.tspinTriples  | 0)
+                       + (runStats.tspinMinis    | 0);
+    const perfectThisRun = runStats.perfectClears | 0;
+    const maxB2bThisRun  = runStats.maxB2b   | 0;
+    const maxComboRun    = runStats.maxCombo | 0;
+    const cancelledRun   = runStats.garbageCancelled | 0;
+
+    if (typeof best.tspinClears === 'number') {
+      best.tspinClears += tspinThisRun;
+    }
+    if (typeof best.perfectClears === 'number') {
+      best.perfectClears += perfectThisRun;
+    }
+    if (typeof best.bestB2bChain === 'number' && maxB2bThisRun > best.bestB2bChain) {
+      best.bestB2bChain = maxB2bThisRun;
+    }
+    if (typeof best.bestCombo === 'number' && maxComboRun > best.bestCombo) {
+      best.bestCombo = maxComboRun;
+    }
+    if (typeof best.bestGarbageCancelled === 'number' && cancelledRun > best.bestGarbageCancelled) {
+      best.bestGarbageCancelled = cancelledRun;
     }
   }
 

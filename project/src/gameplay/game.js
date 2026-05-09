@@ -177,6 +177,31 @@ export class Game {
     // `_combo - 1` (the "combo step" — 0 for first clear of a streak).
     this._combo = 0;
 
+    // Modern-rules per-run accumulators (plan §13 next-moves item 2).
+    // Tallied during the run; consumed by `gameplay/end-of-run.js` to
+    // write per-mode bests. All counts are PER-RUN — reset on `reset()`
+    // and on a fresh `Game` construction.
+    //
+    //   tspinSingles / tspinDoubles / tspinTriples : count of regular
+    //     T-spin clears at each row count (no T-spin Triples Mini —
+    //     mini multiline doesn't exist in the guideline).
+    //   tspinMinis    : count of Mini-classified T-spins (any cleared).
+    //   perfectClears : count of board-empty clears.
+    //   maxB2b        : highest `_b2b` value reached during the run.
+    //   maxCombo      : highest `_combo` value reached during the run.
+    //   garbageCancelled : sum of cancellation amounts (Versus only;
+    //     other modes never receive garbage so the field stays 0).
+    this._runStats = {
+      tspinSingles:     0,
+      tspinDoubles:     0,
+      tspinTriples:     0,
+      tspinMinis:       0,
+      perfectClears:    0,
+      maxB2b:           0,
+      maxCombo:         0,
+      garbageCancelled: 0,
+    };
+
     // Subscribe to inbound garbage. v1 single-bus: bot's emission lands
     // here. v2 dual-sim: per-game bus + host bridge calls applyGarbage()
     // directly, but this subscription remains harmless (no other emitters).
@@ -223,6 +248,16 @@ export class Game {
     let total = 0;
     for (const e of this._garbageQueue) total += e.rows;
     return total;
+  }
+
+  /**
+   * Read-only snapshot of the modern-rules per-run accumulators
+   * (plan §13 next-moves item 2). Consumed by end-of-run.js to write
+   * per-mode bests. Returns a fresh object so callers can't mutate the
+   * internal counters.
+   */
+  getRunStats() {
+    return { ...this._runStats };
   }
 
   // ─── State snapshots ─────────────────────────────────────────────────
@@ -588,6 +623,19 @@ export class Game {
         score:   tspinScore,
         side:    this._side,
       });
+      // Per-run stats (plan §13 #2). Mini and regular T-spins each get
+      // their own bucket; regular splits by row count for the HUD's
+      // "T-spin Single / Double / Triple" scoreboard. No-clear T-spins
+      // count as well — they're a real technique, just no row reward.
+      if (tspinKind === 'mini') {
+        this._runStats.tspinMinis += 1;
+      } else {
+        if      (fullRows.length === 1) this._runStats.tspinSingles += 1;
+        else if (fullRows.length === 2) this._runStats.tspinDoubles += 1;
+        else if (fullRows.length === 3) this._runStats.tspinTriples += 1;
+        // 0-clear regular T-spins are tracked via the score bonus only;
+        // they don't fit the Single/Double/Triple buckets.
+      }
       if (fullRows.length === 0 && tspinScore > 0) {
         this._score += tspinScore;
         this._bus.emit(EVENTS.SCORE_DELTA, {
@@ -712,6 +760,10 @@ export class Game {
       this._b2b = 0;
     }
 
+    // Per-run stats high-water marks (plan §13 #2).
+    if (this._b2b   > this._runStats.maxB2b)   this._runStats.maxB2b   = this._b2b;
+    if (this._combo > this._runStats.maxCombo) this._runStats.maxCombo = this._combo;
+
     const newLevel = this._rules.levelForLines(this._lines);
     if (newLevel > this._level) {
       this._level = newLevel;
@@ -741,6 +793,7 @@ export class Game {
     // fully empty. Carries the +10 garbage info; versus's
     // onLinesCleared has already composed the actual GARBAGE_SENT.
     if (isPerfectClear) {
+      this._runStats.perfectClears += 1;
       this._bus.emit(EVENTS.PERFECT_CLEAR, {
         cleared: rows.length,
         score:   pcBonus,
@@ -838,6 +891,7 @@ export class Game {
       }
     }
     if (cancelled > 0) {
+      this._runStats.garbageCancelled += cancelled;
       this._bus.emit(EVENTS.GARBAGE_CANCELLED, { rows: cancelled, side: this._side });
     }
     const remaining = requested - cancelled;
@@ -983,6 +1037,11 @@ export class Game {
     this._b2b           = 0;
     this._combo         = 0;
 
+    this._runStats = {
+      tspinSingles: 0, tspinDoubles: 0, tspinTriples: 0, tspinMinis: 0,
+      perfectClears: 0, maxB2b: 0, maxCombo: 0, garbageCancelled: 0,
+    };
+
     this.spawnPiece();
   }
 
@@ -1033,6 +1092,7 @@ export class Game {
       lastKickIndex:  this._lastKickIndex,
       b2b:            this._b2b,
       combo:          this._combo,
+      runStats:       { ...this._runStats },
       rngState: (this._rng && typeof this._rng.state === 'number') ? this._rng.state : null,
     };
   }
@@ -1085,6 +1145,21 @@ export class Game {
     this._lastKickIndex  = (typeof blob.lastKickIndex === 'number') ? (blob.lastKickIndex | 0) : -1;
     this._b2b            = (typeof blob.b2b === 'number') ? Math.max(0, blob.b2b | 0) : 0;
     this._combo          = (typeof blob.combo === 'number') ? Math.max(0, blob.combo | 0) : 0;
+    // Per-run stats round-trip — defensively coerce each field to a
+    // non-negative integer so a malformed/missing blob can't corrupt
+    // the live counters.
+    if (blob.runStats && typeof blob.runStats === 'object') {
+      const r = blob.runStats;
+      const num = (v) => (typeof v === 'number' && Number.isFinite(v)) ? Math.max(0, v | 0) : 0;
+      this._runStats.tspinSingles     = num(r.tspinSingles);
+      this._runStats.tspinDoubles     = num(r.tspinDoubles);
+      this._runStats.tspinTriples     = num(r.tspinTriples);
+      this._runStats.tspinMinis       = num(r.tspinMinis);
+      this._runStats.perfectClears    = num(r.perfectClears);
+      this._runStats.maxB2b           = num(r.maxB2b);
+      this._runStats.maxCombo         = num(r.maxCombo);
+      this._runStats.garbageCancelled = num(r.garbageCancelled);
+    }
     if (typeof blob.rngState === 'number'
         && this._rng
         && typeof this._rng.setState === 'function') {

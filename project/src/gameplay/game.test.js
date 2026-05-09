@@ -1604,6 +1604,174 @@ describe('Game — garbage spawn-delay window (plan §12.5 M5)', () => {
   });
 });
 
+// ─── §13 polish: runStats accumulators (plan §13 next-moves item 2) ──
+
+describe('Game — _runStats accumulators (plan §13 #2)', () => {
+  it('initial getRunStats returns all zeros', () => {
+    const { game } = makeGame();
+    expect(game.getRunStats()).toEqual({
+      tspinSingles: 0, tspinDoubles: 0, tspinTriples: 0, tspinMinis: 0,
+      perfectClears: 0, maxB2b: 0, maxCombo: 0, garbageCancelled: 0,
+    });
+  });
+
+  it('returns a fresh object so mutation does not leak into Game', () => {
+    const { game } = makeGame();
+    const a = game.getRunStats();
+    a.tspinSingles = 999;
+    expect(game.getRunStats().tspinSingles).toBe(0);
+  });
+
+  it('T-spin Single increments tspinSingles', () => {
+    const { game } = makeGame();
+    function blk(c, r) { game.board[r][c] = 0xff0000; }
+    for (let c = 0; c < game.cols; c++) if (c < 3 || c > 5) blk(c, 2);
+    blk(3, 1); blk(5, 1); blk(3, 3);
+    game._activePiece = { key: 'T', col: 3, row: 0, rot: 1, color: PIECE_COLORS.T };
+    game.tryRotate(1);
+    game.lockPiece();
+    expect(game.getRunStats().tspinSingles).toBe(1);
+  });
+
+  it('T-spin Mini increments tspinMinis (not tspinSingles)', () => {
+    const { game } = makeGame();
+    function blk(c, r) { game.board[r][c] = 0xff0000; }
+    blk(3, 8);
+    blk(3, 6); blk(5, 6);
+    game._activePiece = { key: 'T', col: 3, row: 5, rot: 3, color: PIECE_COLORS.T };
+    game.tryRotate(1);
+    game.lockPiece();
+    const s = game.getRunStats();
+    expect(s.tspinMinis).toBe(1);
+    expect(s.tspinSingles).toBe(0);
+  });
+
+  it('Perfect Clear increments perfectClears counter', () => {
+    const { game } = makeGame();
+    game.spawnPiece('T');
+    fillRow(game, 0);
+    game.clearLines([0]);
+    expect(game.getRunStats().perfectClears).toBe(1);
+  });
+
+  it('maxB2b tracks the high-water mark of _b2b', () => {
+    const { game } = makeGame();
+    game.spawnPiece('T');
+    game.board[15][0] = 0x111111;
+    function buildTetris() {
+      for (let r = 0; r < 4; r++) {
+        for (let c = 1; c < game.cols; c++) game.board[r][c] = 0xff0000;
+      }
+    }
+    buildTetris();
+    game.clearLines([0, 1, 2, 3]);
+    expect(game.getRunStats().maxB2b).toBe(1);
+    buildTetris();
+    game.clearLines([0, 1, 2, 3]);
+    expect(game.getRunStats().maxB2b).toBe(2);
+    fillRow(game, 0);
+    game.clearLines([0]);
+    expect(game.getRunStats().maxB2b).toBe(2);
+  });
+
+  it('maxCombo tracks the high-water mark of _combo', () => {
+    const { game } = makeGame();
+    game.spawnPiece('T');
+    game.board[15][5] = 0x111111;
+    for (let i = 0; i < 4; i++) {
+      fillRow(game, 0);
+      game.clearLines([0]);
+    }
+    expect(game.getRunStats().maxCombo).toBe(4);
+    game.spawnPiece('T');
+    game.hardDrop();
+    game.lockPiece();
+    expect(game.getRunStats().maxCombo).toBe(4);
+  });
+
+  it('Versus: cancellation accumulates into garbageCancelled', () => {
+    const bus = new EventBus({ replayBufferSize: 0, recorderSize: 0 });
+    const game = new Game({
+      rules: buildRules('versus', { bus }), bus, rng: seededRng(1), garbageDelayMs: 0,
+    });
+    game.applyGarbage(3, 5);
+    bus.emit(EVENTS.GARBAGE_OUTGOING, { rows: 5, target: 'opponent' });
+    expect(game.getRunStats().garbageCancelled).toBe(3);
+    game.applyGarbage(4, 6);
+    bus.emit(EVENTS.GARBAGE_OUTGOING, { rows: 2, target: 'opponent' });
+    expect(game.getRunStats().garbageCancelled).toBe(5);
+  });
+
+  it('reset() zeros all _runStats counters', () => {
+    const { game } = makeGame();
+    game._runStats.tspinDoubles  = 3;
+    game._runStats.maxB2b        = 7;
+    game._runStats.perfectClears = 2;
+    game.reset();
+    expect(game.getRunStats()).toEqual({
+      tspinSingles: 0, tspinDoubles: 0, tspinTriples: 0, tspinMinis: 0,
+      perfectClears: 0, maxB2b: 0, maxCombo: 0, garbageCancelled: 0,
+    });
+  });
+
+  it('serialize/restore round-trip preserves _runStats', () => {
+    const { game } = makeGame();
+    game._runStats.tspinSingles    = 1;
+    game._runStats.tspinDoubles    = 2;
+    game._runStats.tspinTriples    = 3;
+    game._runStats.tspinMinis      = 4;
+    game._runStats.perfectClears   = 5;
+    game._runStats.maxB2b          = 6;
+    game._runStats.maxCombo        = 7;
+    game._runStats.garbageCancelled = 8;
+    const blob = game.serialize();
+    expect(blob.runStats).toEqual({
+      tspinSingles: 1, tspinDoubles: 2, tspinTriples: 3, tspinMinis: 4,
+      perfectClears: 5, maxB2b: 6, maxCombo: 7, garbageCancelled: 8,
+    });
+
+    const bus2 = new EventBus({ replayBufferSize: 0, recorderSize: 0 });
+    const g2 = new Game({ rules: buildRules('classic'), bus: bus2, rng: seededRng(1) });
+    g2.restore(blob);
+    expect(g2.getRunStats()).toEqual({
+      tspinSingles: 1, tspinDoubles: 2, tspinTriples: 3, tspinMinis: 4,
+      perfectClears: 5, maxB2b: 6, maxCombo: 7, garbageCancelled: 8,
+    });
+  });
+
+  it('restore tolerates a missing runStats blob (legacy save)', () => {
+    const { game } = makeGame();
+    const blob = game.serialize();
+    delete blob.runStats;
+    const bus2 = new EventBus({ replayBufferSize: 0, recorderSize: 0 });
+    const g2 = new Game({ rules: buildRules('classic'), bus: bus2, rng: seededRng(1) });
+    expect(() => g2.restore(blob)).not.toThrow();
+    expect(g2.getRunStats().tspinSingles).toBe(0);
+  });
+
+  it('restore coerces malformed runStats fields to safe zeros (defensive)', () => {
+    const { game } = makeGame();
+    const blob = game.serialize();
+    blob.runStats = {
+      tspinSingles: -1, tspinDoubles: 'three', tspinTriples: NaN,
+      tspinMinis: undefined, perfectClears: null,
+      maxB2b: 5, maxCombo: 3, garbageCancelled: 99,
+    };
+    const bus2 = new EventBus({ replayBufferSize: 0, recorderSize: 0 });
+    const g2 = new Game({ rules: buildRules('classic'), bus: bus2, rng: seededRng(1) });
+    g2.restore(blob);
+    const s = g2.getRunStats();
+    expect(s.tspinSingles).toBe(0);
+    expect(s.tspinDoubles).toBe(0);
+    expect(s.tspinTriples).toBe(0);
+    expect(s.tspinMinis).toBe(0);
+    expect(s.perfectClears).toBe(0);
+    expect(s.maxB2b).toBe(5);
+    expect(s.maxCombo).toBe(3);
+    expect(s.garbageCancelled).toBe(99);
+  });
+});
+
 // ─── Side tag plumbing ────────────────────────────────────────────────
 
 describe('Game — side tag in event payloads', () => {

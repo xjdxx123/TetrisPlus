@@ -58,33 +58,54 @@ const SETTINGS_DEFAULTS = Object.freeze({
   panel: { x: 0, y: 0, z: 6, yaw: 0, pitch: 0, hidden: false },
 });
 
+// Modern-rules per-mode best slots (plan §13 next-moves item 2).
+// Mixed in to every mode that records a meaningful run — `bestB2bChain`
+// (longest Back-to-Back chain reached), `bestCombo` (longest combo step
+// reached), `perfectClears` (cumulative count across all attempts),
+// `tspinClears` (cumulative count of T-spin clears, regular + mini, with
+// at least one cleared row).
+//
+// Forward-compatible: storage's deep-merge backfills missing keys on
+// load, so any save written before §12 silently gains zero-defaults
+// for these on the first read.
+const MODERN_RULES_DEFAULTS = Object.freeze({
+  bestB2bChain:  0,
+  bestCombo:     0,
+  perfectClears: 0,
+  tspinClears:   0,
+});
+
 const STATS_DEFAULTS = Object.freeze({
   highScore: 0,
   modeBests: {
     // `attempts` is bumped at every MODE_END (regardless of reason), so a
     // player who tops out in the first 5 seconds still contributes to the
     // count. Existing pre-refactor blobs backfill this to 0 via deep-merge.
-    classic:  { score: 0, lines: 0, level: 1, attempts: 0 },
+    classic:  { score: 0, lines: 0, level: 1, attempts: 0,                                                  ...MODERN_RULES_DEFAULTS },
     // Marathon adds `completed` (whether the player has *ever* cleared
     // 150 lines) and `bestTimeMs` (fastest completion). null bestTimeMs
     // sentinel means no completion on record yet — distinct from 0ms which
     // would be a real (impossible) duration.
-    marathon: { score: 0, lines: 0, level: 1, attempts: 0, completed: false, bestTimeMs: null },
+    marathon: { score: 0, lines: 0, level: 1, attempts: 0, completed: false, bestTimeMs: null,              ...MODERN_RULES_DEFAULTS },
     // Sprint records ONLY bestTimeMs + attempts + completed — score is
     // always 0 so the score/lines/level fields never receive meaningful
     // writes. They're kept for shape uniformity with the deep-merge.
-    sprint:   { score: 0, lines: 0, level: 1, attempts: 0, completed: false, bestTimeMs: null },
-    ultra:    { score: 0, lines: 0, level: 1, attempts: 0 },
+    // Modern-rules: only `bestCombo` is tunable in Sprint (T-spin score
+    // is gated to 0 by the rules pack, but combo length is still real).
+    sprint:   { score: 0, lines: 0, level: 1, attempts: 0, completed: false, bestTimeMs: null, bestCombo: 0 },
+    ultra:    { score: 0, lines: 0, level: 1, attempts: 0,                                                  ...MODERN_RULES_DEFAULTS },
     // Zen's "best" is the longest session, not score. `totalLines` is
     // a CUMULATIVE counter across all Zen sessions — Zen is the slow-
     // burn mode (plan §3.5 #5). The score/lines/level fields stay for
     // shape uniformity but are never written to.
-    zen:      { score: 0, lines: 0, level: 1, attempts: 0, longestSessionMs: 0, totalLines: 0 },
+    zen:      { score: 0, lines: 0, level: 1, attempts: 0, longestSessionMs: 0, totalLines: 0,              ...MODERN_RULES_DEFAULTS },
     // Versus tracks wins/losses (+ ELO reserved for online — plan §3.6 #5).
     // The score/lines/level fields stay for shape uniformity; the score-
     // based default best-update path is skipped (resetsHighScoreSlot:false
-    // in the rules pack) so they're never written to.
-    versus:   { score: 0, lines: 0, level: 1, attempts: 0, wins: 0, losses: 0, draws: 0, eloMmr: 1200 },
+    // in the rules pack) so they're never written to. `bestGarbageCancelled`
+    // is the highest single-round cancellation tally — a versus-only metric.
+    versus:   { score: 0, lines: 0, level: 1, attempts: 0, wins: 0, losses: 0, draws: 0, eloMmr: 1200,
+                bestGarbageCancelled: 0,                                                                   ...MODERN_RULES_DEFAULTS },
   },
   totals: {
     linesCleared:  0,
