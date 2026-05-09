@@ -1634,10 +1634,16 @@ const trailFx = []; // {slot, life, maxLife, startOpacity}
 
 const impactFx = { active: false, t: 0, dur: 0.6 };
 const _impactPos = new THREE.Vector3();
-function triggerImpactRing(x, y, color) {
-  // Ground rings at the lock row's floor, centered under the piece
+function triggerImpactRing(x, y, z, color) {
+  // 3D mode (plan v2 §2.1) supplies a real `z` so the ring + sparks
+  // + flash light land under the piece. Older 2D call sites that passed
+  // (x, y, color) hit the back-compat shim below — `z` arrives as the
+  // color int and shifts everything to the right; detect that by
+  // checking whether the 4th arg is missing.
+  if (color === undefined) { color = z; z = 0; }
+  // Ground rings at the lock row's floor, centered under the piece.
   for (const r of [_impactRing1, _impactRing2, _impactRing3]) {
-    r.mesh.position.set(x, y + 0.02, 0);
+    r.mesh.position.set(x, y + 0.02, z);
     r.mat.color.setHex(color);
     r.mesh.scale.setScalar(0.4);
     r.mat.opacity = 0;
@@ -1647,15 +1653,16 @@ function triggerImpactRing(x, y, color) {
   impactFx.t = 0;
   impactFx.active = true;
 
-  // Ground sparks — reuse the existing GPU sparkle pool
-  _impactPos.set(x, y + 0.1, 0);
+  // Ground sparks — reuse the existing GPU sparkle pool. Same z as
+  // the rings so the burst reads as one impact event.
+  _impactPos.set(x, y + 0.1, z);
   spawnSparkles(_impactPos, color, 32);
 
   // Tinted flash light at the impact point — pulled from the same pool the
   // line-clear flash uses, so a hard-drop-into-clear flow shares slots.
   const ls = acquireFlashLight();
   if (ls) {
-    ls.light.position.set(x, y + 0.6, 0);
+    ls.light.position.set(x, y + 0.6, z);
     ls.light.color.setHex(color);
     ls.light.intensity = 14;
     flashes.push({ slot: ls, life: 0, maxLife: 0.35, kind: 'light' });
@@ -1669,7 +1676,12 @@ function triggerImpactRing(x, y, color) {
 function spawnHardDropTrail(cells, dropRows, color) {
   if (dropRows <= 0) return;
   const trailHeight = (dropRows + 1) * CELL;
-  for (const { col, row } of cells) {
+  // 3D mode lands the trail at the piece's actual depth so the streak
+  // sits in the same z-slice as the cubes that just fell. 2D modes
+  // report depth=0 (the front slice's cell index) which resolves to
+  // scene z=0 — i.e., the well's mid-plane — matching legacy behavior.
+  const playD = is3DMode() ? PLAY_D_3D : PLAY_D;
+  for (const { col, row, depth } of cells) {
     let slot = null;
     for (const s of trailPool) if (!s.busy) { slot = s; break; }
     if (!slot) break;
@@ -1677,7 +1689,8 @@ function spawnHardDropTrail(cells, dropRows, color) {
     const x = -PLAY_W / 2 + (col + 0.5) * CELL;
     const yEndCenter = -PLAY_H / 2 + (row + 0.5) * CELL;
     const yMid = yEndCenter + (dropRows * CELL) / 2;
-    slot.mesh.position.set(x, yMid, 0);
+    const z = -playD / 2 + ((depth | 0) + 0.5) * CELL;
+    slot.mesh.position.set(x, yMid, z);
     slot.mesh.scale.set(1, trailHeight, 1);
     slot.mesh.material.color.setHex(color);
     // §3.5 trailMul: 0..1 scales the spawn opacity. At 0 the trail is
@@ -1953,19 +1966,28 @@ function hardDrop() {
   // subscribers rely on (impact ring shows BEFORE the shatter).
   pieceVel.y -= 8 + result.dropRows * 0.4;
   shake.impulse(0.15 + result.dropRows * 0.02);
-  let xSum = 0, xCount = 0;
+  // Centroid of the bottom-row cells in scene space. In 3D mode the
+  // piece can land at any depth slice (0..DEPTH_3D-1); compute Z the
+  // same way as X so the impact ring + sparks + flash light all land
+  // under the piece instead of at the well's center plane (z=0).
+  // 2D modes report depth=0 uniformly → ringZ resolves to scene z=0
+  // (the front slice's center) which matches the legacy behavior.
+  const playD = is3DMode() ? PLAY_D_3D : PLAY_D;
+  let xSum = 0, zSum = 0, count = 0;
   for (const cell of result.cells) {
     if (cell.row === result.minRow) {
       xSum += -PLAY_W / 2 + (cell.col + 0.5) * CELL;
-      xCount++;
+      zSum += -playD / 2 + ((cell.depth | 0) + 0.5) * CELL;
+      count++;
     }
   }
-  const ringX = xSum / xCount;
+  const ringX = xSum / count;
+  const ringZ = zSum / count;
   const ringY = -PLAY_H / 2 + result.minRow * CELL;
   bus.emit(EVENTS.HARD_DROP, {
     dropRows: result.dropRows,
     color:    result.color,
-    ringX, ringY,
+    ringX, ringY, ringZ,
     minRow:   result.minRow,
     cells:    result.cells,
   });

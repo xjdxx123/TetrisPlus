@@ -32,12 +32,30 @@ describe('director', () => {
 
     const cells = [{ col: 3, row: 1 }];
     bus.emit(EVENTS.HARD_DROP, {
-      ringX: 1.5, ringY: -2, color: 0x22e6ff, cells, dropRows: 7, minRow: 1,
+      ringX: 1.5, ringY: -2, ringZ: 0, color: 0x22e6ff, cells, dropRows: 7, minRow: 1,
     });
 
-    expect(api.impactRing).toHaveBeenCalledWith(1.5, -2, 0x22e6ff);
+    // Plan v2 §2.1 — impactRing now takes a 4th `z` arg so 3D-mode
+    // hard drops can place the ring at the piece's actual depth. 2D
+    // sites pass ringZ=0 (the well's mid-plane) which matches the
+    // legacy visual.
+    expect(api.impactRing).toHaveBeenCalledWith(1.5, -2, 0, 0x22e6ff);
     expect(api.hardDropTrail).toHaveBeenCalledWith(cells, 7, 0x22e6ff);
     expect(api.sfx).toHaveBeenCalledWith('drop');
+  });
+
+  it('HARD_DROP without ringZ (legacy 2D-only emitters) defaults z to 0', () => {
+    // Older or test sites that don't include ringZ in the payload
+    // should still hit the 2D-mid-plane (z=0) — back-compat for any
+    // emitters that haven't been updated to the 3D-aware shape.
+    const bus = new EventBus();
+    const api = stubApi();
+    registerDirector(bus, api);
+
+    bus.emit(EVENTS.HARD_DROP, {
+      ringX: 0, ringY: 0, color: 0xffffff, cells: [], dropRows: 1, minRow: 0,
+    });
+    expect(api.impactRing).toHaveBeenCalledWith(0, 0, 0, 0xffffff);
   });
 
   it('translates LEVEL_UP into levelUpFx', () => {

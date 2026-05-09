@@ -55,8 +55,13 @@ import { tierForRows } from '../config/stages.js';
 
 /**
  * @typedef {Object} DirectorApi
- * @property {(x: number, y: number, color: number) => void} impactRing
- * @property {(cells: Array<{col:number,row:number}>, dropRows: number, color: number) => void} hardDropTrail
+ * @property {(x: number, y: number, z: number, color: number) => void} impactRing
+ *   Place the impact ring + sparks at scene world position (x, y, z).
+ *   `z` is the depth-axis center of the bottom-row cells under the
+ *   piece — 0 in 2D modes (the well's mid-plane); the per-piece
+ *   depth in 3D mode so the visual lands under the piece instead of
+ *   at the well's center.
+ * @property {(cells: Array<{col:number,row:number,depth?:number}>, dropRows: number, color: number) => void} hardDropTrail
  * @property {(name: string, arg?: any) => void} sfx
  * @property {(level: number) => void} levelUpFx
  * @property {StageControllerLike}  [stageController]   Stage 8b — present once stages are wired.
@@ -231,8 +236,11 @@ export function registerDirector(bus, api) {
   // light trail along the dropped path, and a punchy SFX. Trail length scales
   // with drop distance so a long drop reads visibly heavier than a short one.
   offs.push(
-    bus.on(EVENTS.HARD_DROP, ({ ringX, ringY, color, cells, dropRows }) => {
-      api.impactRing(ringX, ringY, color);
+    bus.on(EVENTS.HARD_DROP, ({ ringX, ringY, ringZ, color, cells, dropRows }) => {
+      // ringZ is plumbed for 3D mode (plan v2 §2.1) — older sites that
+      // don't pass it default to 0 (the 2D mid-plane), keeping the
+      // legacy 2D feel unchanged.
+      api.impactRing(ringX, ringY, (ringZ != null ? ringZ : 0), color);
       api.hardDropTrail(cells, dropRows, color);
       api.sfx('drop');
     })

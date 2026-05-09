@@ -779,7 +779,12 @@ export class Game {
     const color = this._activePiece.color;
     const summary = {
       dropRows: dropped,
-      cells: cells.map(({ col, row }) => ({ col, row })),
+      // Carry depth so the host's HARD_DROP impact ring + sparks land at
+      // the piece's actual depth in 3D mode (otherwise they default to
+      // z=0 — the well's center — and the visual decouples from where
+      // the piece actually settled). 2D pieces report depth=0 uniformly
+      // so this is invisible there.
+      cells: cells.map(({ col, row, depth }) => ({ col, row, depth: depth | 0 })),
       minRow,
       color,
     };
