@@ -62,7 +62,23 @@ import { tierForRows } from '../config/stages.js';
  * @property {StageControllerLike}  [stageController]   Stage 8b — present once stages are wired.
  * @property {LineClearLayers}      [lineClearLayers]   Stage 8b — recipe-gated emitter callbacks.
  * @property {BeatGridLike}         [beatGrid]          Optional — enables beat-quantized scheduling.
+ * @property {(force: number) => void} [shake]
+ *   Optional — camera shake impulse (typically 0..2 range). When provided,
+ *   the §12 director recipes use it for B2B chain amplification and
+ *   Perfect Clear punch. When omitted, the recipes silently skip the
+ *   shake portion and emit SFX only.
  */
+
+// §12 modern-rules visual constants (plan_gameplay_2.md §1.2).
+//
+// Color overrides applied to LINE_CLEAR's overallColor / shockwave when
+// the underlying clear carries a special clearType or isPerfectClear /
+// isB2B flag. The orchestrator picks the highest-priority override:
+//   PC > T-spin > B2B > normal.
+const TSPIN_VIOLET    = 0xb84cff; // matches PIECE_COLORS.T
+const TSPIN_MINI_DIM  = 0x7e3ab3; // softer violet — Mini reads as smaller punch
+const PERFECT_CLEAR_GOLD = 0xffd400;
+const B2B_CYAN        = 0x6cf0ff;
 
 /**
  * LineClearOrchestrator — Stage 8b + beat-quantized scheduling.
@@ -123,16 +139,47 @@ export function createLineClearOrchestrator({ stageController, lineClearLayers, 
     bg.scheduleAt(bg.nextBeatTimeSec, fn);
   }
 
+  /**
+   * Modern-rules color override for the shockwave/envReaction layers.
+   * Picks the highest-priority special on a clear: Perfect Clear → gold,
+   * T-spin → violet, T-spin Mini → softer violet, B2B (without other
+   * special) → cyan tint. Returns `null` to leave the default
+   * `overallColor` (or stage accent) intact.
+   *
+   * @param {{clearType?: string, isB2B?: boolean, isPerfectClear?: boolean}} flags
+   * @returns {number|null}
+   */
+  function modernAccentOverride(flags) {
+    if (flags && flags.isPerfectClear) return PERFECT_CLEAR_GOLD;
+    if (flags && flags.clearType === 'tspin') return TSPIN_VIOLET;
+    if (flags && flags.clearType === 'mini')  return TSPIN_MINI_DIM;
+    if (flags && flags.isB2B)                  return B2B_CYAN;
+    return null;
+  }
+
   return {
     /**
-     * @param {{ rows: number[], simultaneous: number, colors: number[], overallColor?: number }} payload
+     * @param {{
+     *   rows: number[], simultaneous: number,
+     *   colors: number[], overallColor?: number,
+     *   clearType?: string, isB2B?: boolean, isPerfectClear?: boolean,
+     * }} payload
      */
-    onClear({ rows, simultaneous, colors, overallColor }) {
+    onClear({ rows, simultaneous, colors, overallColor, clearType, isB2B, isPerfectClear }) {
       const spec = stageController.spec;
       const recipe = spec && spec.clearRecipe
         ? spec.clearRecipe[tierForRows(simultaneous)]
         : null;
       if (!recipe) return;
+
+      // Plan v2 §1.2 — modern-rules color/intensity override. Promotes
+      // the clear's tier-derived recipe with a §12-flavored accent for
+      // shockwave / envReaction so a T-spin Double doesn't feel
+      // visually identical to a plain Double. The intensity argument
+      // (last shockwave / envReaction param) gets a +1 bump on B2B
+      // continuations so the chain reads as escalating.
+      const modernAccent = modernAccentOverride({ clearType, isB2B, isPerfectClear });
+      const intensityBoost = isB2B ? 1 : 0;
 
       // Layer 2 — stage-palette sparkle. Always present at every tier in the
       // current stages; tied to the cleared-row cascade visually, so it
@@ -145,20 +192,25 @@ export function createLineClearOrchestrator({ stageController, lineClearLayers, 
       if (recipe.flash && lineClearLayers.flash) {
         fireOrSchedule(() => lineClearLayers.flash(rows, colors));
       }
-      // Layer 3 — shockwave ring. Beat-quantized.
+      // Layer 3 — shockwave ring. Beat-quantized. Modern-rules accent
+      // overrides the row-mean color when present.
       if (recipe.shockwave && lineClearLayers.shockwave) {
-        const color = overallColor != null ? overallColor : 0xffffff;
-        fireOrSchedule(() => lineClearLayers.shockwave(rows, color, simultaneous));
+        const fallback = overallColor != null ? overallColor : 0xffffff;
+        const color = modernAccent != null ? modernAccent : fallback;
+        fireOrSchedule(() => lineClearLayers.shockwave(rows, color, simultaneous + intensityBoost));
       }
       // Layer 6 — full-screen accent veil. Beat-quantized.
       if (recipe.veil && lineClearLayers.veil) {
-        fireOrSchedule(() => lineClearLayers.veil(simultaneous));
+        fireOrSchedule(() => lineClearLayers.veil(simultaneous + intensityBoost));
       }
       // Layer 7 — environment reaction (outside the case). Beat-quantized.
-      // Stage accent (not block color) — §1.6.2 rule 2.
+      // Stage accent (not block color) — §1.6.2 rule 2 — but the
+      // §12 modern-rules override takes precedence so a Perfect Clear
+      // makes the room react gold even on a non-gold stage.
       if (recipe.envReaction && lineClearLayers.envReaction) {
-        const accent = (spec && spec.accentHex != null) ? spec.accentHex : 0xffffff;
-        fireOrSchedule(() => lineClearLayers.envReaction(rows, accent, simultaneous));
+        const stageAccent = (spec && spec.accentHex != null) ? spec.accentHex : 0xffffff;
+        const accent = modernAccent != null ? modernAccent : stageAccent;
+        fireOrSchedule(() => lineClearLayers.envReaction(rows, accent, simultaneous + intensityBoost));
       }
     },
   };
@@ -211,6 +263,61 @@ export function registerDirector(bus, api) {
       bus.on(EVENTS.LINE_CLEAR, (payload) => orchestrator.onClear(payload))
     );
   }
+
+  // ─── §12 modern-rules cinematic recipes (plan_gameplay_2.md §1.2) ─────
+  //
+  // The LINE_CLEAR orchestrator above already recolors the shockwave /
+  // envReaction layers when the underlying clear is a T-spin / B2B /
+  // Perfect Clear. The recipes below add the AUDIO+HAPTIC cues that
+  // can't be inferred from a row-clear payload alone — SFX names that
+  // main.js maps to its sample bank, and camera-shake impulses for the
+  // "this clear hit harder than a regular Tetris" feel.
+  //
+  // No new layer apis required. Recipes silently skip when the host
+  // didn't wire `sfx` or `shake` (older call sites stay functional).
+
+  // T-spin: every detected spin gets an SFX cue, including the
+  // 0-clear case (which the LINE_CLEAR orchestrator misses entirely
+  // since no row cleared). Mini and regular use distinct sample names
+  // so the host can route to different sounds.
+  offs.push(
+    bus.on(EVENTS.T_SPIN, ({ kind, cleared }) => {
+      if (typeof api.sfx !== 'function') return;
+      if (kind === 'mini') api.sfx('tspin-mini', { cleared });
+      else                  api.sfx('tspin',      { cleared });
+    })
+  );
+
+  // B2B chain: only celebrate continuations (count >= 2) — the first
+  // difficult clear of a chain is announced by the underlying Tetris
+  // / T-spin already. Camera shake amplifies with chain length:
+  //   chain 2  → 0.4 force
+  //   chain 3  → 0.6 force
+  //   chain 4+ → capped at 0.8
+  // Force values calibrated against the existing hard-drop impulse
+  // (~0.15) and rows-cleared force (~0.25 + 0.22*N) so a B2B Tetris
+  // reads as "the room punched on top of the regular clear" without
+  // overpowering the existing camera math.
+  offs.push(
+    bus.on(EVENTS.B2B_CHAIN, ({ count }) => {
+      if (count < 2) return;
+      if (typeof api.sfx === 'function') api.sfx('b2b', { count });
+      if (typeof api.shake === 'function') {
+        const force = Math.min(0.8, 0.4 + (count - 2) * 0.2);
+        api.shake(force);
+      }
+    })
+  );
+
+  // Perfect Clear: the rare hero moment. Single fanfare SFX + medium
+  // camera punch. The LINE_CLEAR orchestrator gilds the shockwave +
+  // envReaction layers; PC adds audio+haptic on top.
+  offs.push(
+    bus.on(EVENTS.PERFECT_CLEAR, ({ cleared }) => {
+      if (typeof api.sfx === 'function') api.sfx('perfect-clear', { cleared });
+      if (typeof api.shake === 'function') api.shake(0.7);
+    })
+  );
 
   return () => {
     for (const off of offs) off();

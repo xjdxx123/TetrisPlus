@@ -329,3 +329,156 @@ describe('LineClearOrchestrator — beat quantization', () => {
     expect(layers.veil).toHaveBeenCalledTimes(1);
   });
 });
+
+// ===================================================================
+// §12 modern-rules cinematic recipes (plan_gameplay_2.md §1.2).
+// ===================================================================
+describe('director — §12 modern-rules recipes', () => {
+  it('T_SPIN regular fires sfx("tspin", {cleared}) regardless of cleared count', () => {
+    const bus = new EventBus();
+    const api = stubApi();
+    registerDirector(bus, api);
+    bus.emit(EVENTS.T_SPIN, { kind: 'tspin', cleared: 0, score: 400, side: 'player' });
+    bus.emit(EVENTS.T_SPIN, { kind: 'tspin', cleared: 2, score: 1200, side: 'player' });
+    expect(api.sfx).toHaveBeenCalledWith('tspin', { cleared: 0 });
+    expect(api.sfx).toHaveBeenCalledWith('tspin', { cleared: 2 });
+  });
+
+  it('T_SPIN mini fires sfx("tspin-mini") (distinct sample name)', () => {
+    const bus = new EventBus();
+    const api = stubApi();
+    registerDirector(bus, api);
+    bus.emit(EVENTS.T_SPIN, { kind: 'mini', cleared: 1, score: 200, side: 'player' });
+    expect(api.sfx).toHaveBeenCalledWith('tspin-mini', { cleared: 1 });
+  });
+
+  it('B2B_CHAIN with count=1 is suppressed (the first difficult clear is not a chain yet)', () => {
+    const bus = new EventBus();
+    const api = stubApi({ shake: vi.fn() });
+    registerDirector(bus, api);
+    bus.emit(EVENTS.B2B_CHAIN, { count: 1, side: 'player' });
+    expect(api.sfx).not.toHaveBeenCalled();
+    expect(api.shake).not.toHaveBeenCalled();
+  });
+
+  it('B2B_CHAIN with count >= 2 fires sfx + shake (force scales with chain length)', () => {
+    const bus = new EventBus();
+    const api = stubApi({ shake: vi.fn() });
+    registerDirector(bus, api);
+    bus.emit(EVENTS.B2B_CHAIN, { count: 2, side: 'player' });
+    bus.emit(EVENTS.B2B_CHAIN, { count: 3, side: 'player' });
+    bus.emit(EVENTS.B2B_CHAIN, { count: 5, side: 'player' });
+    expect(api.sfx).toHaveBeenCalledTimes(3);
+    expect(api.shake).toHaveBeenCalledTimes(3);
+    // chain 2 → 0.4, chain 3 → 0.6, chain ≥ 4 capped at 0.8.
+    // Float arithmetic — assert with closeTo since 0.4 + 0.2 isn't
+    // exactly 0.6 in IEEE-754.
+    const calls = api.shake.mock.calls;
+    expect(calls[0][0]).toBeCloseTo(0.4, 5);
+    expect(calls[1][0]).toBeCloseTo(0.6, 5);
+    expect(calls[2][0]).toBeCloseTo(0.8, 5);
+  });
+
+  it('PERFECT_CLEAR fires sfx + medium-strength shake', () => {
+    const bus = new EventBus();
+    const api = stubApi({ shake: vi.fn() });
+    registerDirector(bus, api);
+    bus.emit(EVENTS.PERFECT_CLEAR, { cleared: 4, score: 2000, garbage: 10, side: 'player' });
+    expect(api.sfx).toHaveBeenCalledWith('perfect-clear', { cleared: 4 });
+    expect(api.shake).toHaveBeenCalledWith(0.7);
+  });
+
+  it('§12 recipes silently skip when api lacks shake / sfx (legacy call sites)', () => {
+    const bus = new EventBus();
+    const api = stubApi();
+    api.sfx = undefined;   // older host that doesn't wire sfx
+    registerDirector(bus, api);
+    expect(() => {
+      bus.emit(EVENTS.B2B_CHAIN, { count: 3, side: 'player' });
+      bus.emit(EVENTS.PERFECT_CLEAR, { cleared: 4, side: 'player' });
+      bus.emit(EVENTS.T_SPIN, { kind: 'tspin', cleared: 1, side: 'player' });
+    }).not.toThrow();
+  });
+});
+
+describe('LineClearOrchestrator — §12 modern-rules color overrides', () => {
+  it('clearType="tspin" overrides shockwave color with violet', () => {
+    const layers = stubLayers();
+    const stage = stubStage({ tetris: { shockwave: true } });
+    const orch = createLineClearOrchestrator({ stageController: stage, lineClearLayers: layers });
+
+    orch.onClear({
+      rows: [3, 2, 1, 0], simultaneous: 4, colors: [1, 2, 3, 4],
+      overallColor: 0x808080, clearType: 'tspin', isB2B: false, isPerfectClear: false,
+    });
+    expect(layers.shockwave).toHaveBeenCalledWith([3, 2, 1, 0], 0xb84cff, 4);
+  });
+
+  it('clearType="mini" overrides shockwave with the dimmer violet variant', () => {
+    const layers = stubLayers();
+    const stage = stubStage({ single: { shockwave: true } });
+    const orch = createLineClearOrchestrator({ stageController: stage, lineClearLayers: layers });
+
+    orch.onClear({
+      rows: [0], simultaneous: 1, colors: [0xb84cff],
+      overallColor: 0x808080, clearType: 'mini',
+    });
+    expect(layers.shockwave).toHaveBeenCalledWith([0], 0x7e3ab3, 1);
+  });
+
+  it('isPerfectClear takes priority over clearType (gold beats violet)', () => {
+    const layers = stubLayers();
+    const stage = stubStage({ double: { shockwave: true } });
+    const orch = createLineClearOrchestrator({ stageController: stage, lineClearLayers: layers });
+
+    orch.onClear({
+      rows: [1, 0], simultaneous: 2, colors: [1, 2],
+      overallColor: 0x808080, clearType: 'tspin', isPerfectClear: true,
+    });
+    expect(layers.shockwave).toHaveBeenCalledWith([1, 0], 0xffd400, 2);
+  });
+
+  it('isB2B alone (no clearType) tints shockwave cyan + bumps intensity by 1', () => {
+    const layers = stubLayers();
+    const stage = stubStage({ tetris: { shockwave: true, veil: true } });
+    const orch = createLineClearOrchestrator({ stageController: stage, lineClearLayers: layers });
+
+    orch.onClear({
+      rows: [3, 2, 1, 0], simultaneous: 4, colors: [1, 2, 3, 4],
+      overallColor: 0x808080, isB2B: true,
+    });
+    // Color cyan, rowCount + 1 (intensity boost).
+    expect(layers.shockwave).toHaveBeenCalledWith([3, 2, 1, 0], 0x6cf0ff, 5);
+    expect(layers.veil).toHaveBeenCalledWith(5);
+  });
+
+  it('plain LINE_CLEAR (no §12 flags) keeps the existing overallColor route', () => {
+    const layers = stubLayers();
+    const stage = stubStage({ tetris: { shockwave: true } });
+    const orch = createLineClearOrchestrator({ stageController: stage, lineClearLayers: layers });
+
+    orch.onClear({
+      rows: [3, 2, 1, 0], simultaneous: 4, colors: [1, 2, 3, 4],
+      overallColor: 0x808080,
+    });
+    expect(layers.shockwave).toHaveBeenCalledWith([3, 2, 1, 0], 0x808080, 4);
+  });
+
+  it('envReaction also uses the modern accent override (gold PC even on a non-gold stage)', () => {
+    const layers = stubLayers();
+    layers.envReaction = vi.fn();
+    const stage = {
+      spec: {
+        accentHex: 0x6cf0ff, // cyan stage
+        clearRecipe: { tetris: { envReaction: true } },
+      },
+    };
+    const orch = createLineClearOrchestrator({ stageController: stage, lineClearLayers: layers });
+    orch.onClear({
+      rows: [3, 2, 1, 0], simultaneous: 4, colors: [1, 2, 3, 4],
+      overallColor: 0x808080, isPerfectClear: true,
+    });
+    // Gold (PC), not the cyan stage accent.
+    expect(layers.envReaction).toHaveBeenCalledWith([3, 2, 1, 0], 0xffd400, 4);
+  });
+});

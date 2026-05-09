@@ -4044,6 +4044,11 @@ registerDirector(bus, {
   hardDropTrail: spawnHardDropTrail,
   sfx:           (name, arg) => playSfx(name, arg),
   levelUpFx:     triggerLevelUp,
+  // Plan v2 §1.2 — director uses this for B2B chain continuations
+  // (force scales with chain length) and Perfect Clear punch. The
+  // shake module's `impulse` is already the right shape (one-off
+  // additive force that decays via shake.update); pass it directly.
+  shake:         (force) => shake.impulse(force),
   // Stage 8b — LineClearOrchestrator. The stageController owns which stage
   // is active (and thus which `clearRecipe` is read); each lineClearLayers
   // entry is the existing inline emitter, gated now by recipe instead of
