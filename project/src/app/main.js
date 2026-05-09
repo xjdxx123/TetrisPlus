@@ -1375,6 +1375,19 @@ function makeCube(color, opts = {}) {
 const caseGroup = new THREE.Group();
 scene.add(caseGroup);
 
+// Sub-group that holds ONLY the static chrome (walls / bottom / frame /
+// rims / lights / inner floor). Gameplay-FX meshes (impact rings,
+// flash lights, trails) stay parented directly under caseGroup so
+// they're shared across both sides in versus mode.
+//
+// Why a sub-group: in versus mode (§3.7 sub-phase 7e) we
+// `chromeGroup.clone(true)` and mount the clone at the opponent's
+// X-offset so the bot's well has its own frame around it. Cloning
+// a Group recursively duplicates its mesh children but shares
+// geometry + material refs — adding a second copy is cheap.
+const chromeGroup = new THREE.Group();
+caseGroup.add(chromeGroup);
+
 // Glass shell — built as 4 individual side walls + bottom (no top, like reference).
 // Uses the custom fresnel-driven glass shader (above): nearly invisible at
 // face-on view, bright glassy rim at grazing angles. This is what gives the
@@ -1397,7 +1410,7 @@ function addWall(w, h, d, x, y, z) {
   // looking through the front wall washes out the energized-piece glow that
   // is clearly visible from above (where no wall is in the line of sight).
   m.renderOrder = -1;
-  caseGroup.add(m);
+  chromeGroup.add(m);
   return m;
 }
 // Front, back, left, right
@@ -1419,7 +1432,7 @@ const bottom = new THREE.Mesh(bottomGeo, bottomMat);
 bottom.position.y = -PLAY_H/2 - 0.06;
 // Same rationale as walls: render before transparent overlays.
 bottom.renderOrder = -1;
-caseGroup.add(bottom);
+chromeGroup.add(bottom);
 
 // Edge frame — bright glowing wires around the entire case (top rim, vertical edges, bottom rim)
 const frameOuterGeo = new THREE.BoxGeometry(
@@ -1436,7 +1449,7 @@ const frameMat = new THREE.LineBasicMaterial({
   depthWrite: false,
 });
 const frame = new THREE.LineSegments(frameEdges, frameMat);
-caseGroup.add(frame);
+chromeGroup.add(frame);
 
 // Inner edge frame — traces the interior of the play volume so the case
 // reads as a contained box even when the outer frame is camera-occluded.
@@ -1450,7 +1463,7 @@ const innerFrameMat = new THREE.LineBasicMaterial({
   depthWrite: false,
 });
 const innerFrame = new THREE.LineSegments(innerFrameEdges, innerFrameMat);
-caseGroup.add(innerFrame);
+chromeGroup.add(innerFrame);
 
 // Bright top rim — extra-prominent (like the reference's lit top edge)
 const topRimGeo = new THREE.BoxGeometry(
@@ -1467,12 +1480,12 @@ const topRim = new THREE.LineSegments(topRimEdges, new THREE.LineBasicMaterial({
   depthWrite: false,
 }));
 topRim.position.y = PLAY_H / 2;
-caseGroup.add(topRim);
+chromeGroup.add(topRim);
 
 // Inner light strip running around the top rim (additive)
 const rimLightStrip = new THREE.PointLight(0xaee7ff, 1.2, 14, 1.6);
 rimLightStrip.position.set(0, PLAY_H/2 + 0.4, 0);
-caseGroup.add(rimLightStrip);
+chromeGroup.add(rimLightStrip);
 
 // Inner grid lines on back wall (subtle gameplay aid)
 const backGridMat = new THREE.LineBasicMaterial({
@@ -1494,7 +1507,7 @@ for (let j = 0; j <= ROWS; j++) {
 }
 backGridGeo.setAttribute('position', new THREE.Float32BufferAttribute(backVerts, 3));
 const backGrid = new THREE.LineSegments(backGridGeo, backGridMat);
-caseGroup.add(backGrid);
+chromeGroup.add(backGrid);
 
 // Floor inside case — polished reflective surface so cubes get a faint reflection
 const innerFloorGeo = new THREE.PlaneGeometry(PLAY_W, PLAY_D);
@@ -1511,7 +1524,7 @@ innerFloorMat.userData.enableBloom = false;
 const innerFloor = new THREE.Mesh(innerFloorGeo, innerFloorMat);
 innerFloor.rotation.x = -Math.PI / 2;
 innerFloor.position.y = -PLAY_H / 2 + 0.015;
-caseGroup.add(innerFloor);
+chromeGroup.add(innerFloor);
 
 // Static flash-light pool — pre-allocated PointLights for line-clear flashes.
 // Adding/removing PointLights at runtime forces Three.js to recompile every
@@ -1704,14 +1717,20 @@ let game           = null;
 let boardView      = null;
 let versusSession  = null;
 
-// Dual-board layout constants for versus mode. The existing case mesh
-// sits at caseGroup origin; the player's well stays there (so the
-// chrome wraps it as before). The opponent's well is mounted at
-// +OPPONENT_OFFSET_X with no chrome — duplicating the case mesh per
-// side is a polish item, not the §3.7 7e deliverable.
+// Dual-board layout constants for versus mode. Player's well sits at
+// the case origin (existing chrome wraps it); the opponent's well is
+// at +OPPONENT_OFFSET_X with a *cloned* chrome around it (see
+// `chromeGroup` and the `opponentChromeClone` lifecycle below).
 const OPPONENT_OFFSET_X    = 14;
 const VERSUS_CAM_POS       = new THREE.Vector3(21, 4, 34);
 const VERSUS_CAM_TARGET    = new THREE.Vector3(7, 0, 0);
+
+// Cloned chrome for the opponent's side — built on entering versus,
+// torn down on leaving. THREE.Group.clone(true) does a recursive
+// shallow-clone: meshes get new transform wrappers but share geometry
+// + material refs with the original, and Light subclasses (PointLight)
+// produce real new lights at the cloned positions. Cheap to add.
+let opponentChromeClone = null;
 
 let activePiece = null;
 let nextQueue = [];
@@ -2639,10 +2658,13 @@ Mode._wireLifecycle({
         },
       });
       // Layout: player's well at the case origin (existing chrome
-      // wraps it); opponent's well off to the right (no chrome — see
-      // OPPONENT_OFFSET_X comment above for the rationale).
+      // wraps it); opponent's well at +OPPONENT_OFFSET_X with a
+      // *cloned* chrome wrapping it. Both sides now have proper
+      // case mesh — the user feedback called out the missing
+      // opponent container; this is the fix.
       versusSession.dualBoard.leftAnchor.position.x  = 0;
       versusSession.dualBoard.rightAnchor.position.x = OPPONENT_OFFSET_X;
+      _attachOpponentChrome();
       // Alias the player side into the legacy refs so the gameplay
       // function wrappers (tryMove, hardDrop, etc.) keep driving
       // gameP1 unchanged.
@@ -2676,6 +2698,7 @@ Mode._wireLifecycle({
         playSfx,
       });
       if (typeof versusBot !== 'undefined') versusBot.reset();
+      _detachOpponentChrome();
       exitVersusCamera();
       if (restart) {
         resetRunState();
@@ -2983,6 +3006,38 @@ function exitVersusCamera() {
   camTween.t = 0;
   camTween.dur = 0.9;
   camTween.active = true;
+}
+
+/**
+ * Build (or rebuild) the opponent's chrome by cloning chromeGroup
+ * and shifting it to OPPONENT_OFFSET_X. Idempotent — calling twice
+ * disposes the prior clone first. Called from versus onStart.
+ *
+ * THREE.Group.clone(true) does a recursive clone: meshes are new
+ * Object3D wrappers but share geometry + material refs with the
+ * original, so a frame-color swap from applyMood() updates both
+ * sides automatically. Light subclasses (PointLight) produce real
+ * new lights at the cloned local positions.
+ */
+function _attachOpponentChrome() {
+  _detachOpponentChrome();
+  opponentChromeClone = chromeGroup.clone(true);
+  opponentChromeClone.position.x = OPPONENT_OFFSET_X;
+  caseGroup.add(opponentChromeClone);
+}
+
+/** Tear down the opponent's chrome. Called when leaving versus mode. */
+function _detachOpponentChrome() {
+  if (!opponentChromeClone) return;
+  if (opponentChromeClone.parent) opponentChromeClone.parent.remove(opponentChromeClone);
+  opponentChromeClone.traverse(node => {
+    // Lights cloned via Group.clone don't hold any unique GPU resources
+    // (just JS-side state), so no explicit dispose is needed. Meshes
+    // share geometry + material with the original, so we MUST NOT
+    // dispose those — that would break the original chrome too.
+    if (node.parent) {/* no-op, just walking */}
+  });
+  opponentChromeClone = null;
 }
 
 // =============================================================
