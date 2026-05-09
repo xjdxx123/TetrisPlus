@@ -42,6 +42,7 @@ specified them; v2 won't redesign these, only build on top.
 | **§2.3 Pure Physics — Phase E** | v2 §2.3 | `physics` registered in `Mode.AVAILABLE` / LABELS / DESCRIPTIONS / CONFIG (with `isExperimental: true` flag). New `physics` slot in `STATS_DEFAULTS.modeBests` (`bestLayersCleared` / `totalLayersCleared`). Custom `updateBest` hook on the rules pack. New `ui/physics-badge.js` HUD module: live Cubes / Awake / Layers metrics with violet pulse on each PHYSICS_LAYER_CLEARED. Stats-tab formatter extended: physics primary = score; secondary = "best run N · M total layers". |
 | **§2.3 Pure Physics — Phase F** | v2 §2.3 | `vfx/director.js` extended with a PHYSICS_LAYER_CLEARED subscriber: per-layer violet shockwave at the layer's centerY, sfx('physics-layer'), camera shake scaling with simultaneous count (0.3 / 0.5 / 0.7). Skips silently when host lacks lineClearLayers / sfx / shake wiring. 4 new tests. |
 | **§2.3 Pure Physics — Phase F+** | v2 §2.3 | Render integration: `BoardView` gains `noLockMeshes` opt that gates PIECE_LOCK / LINE_CLEAR / GARBAGE_APPLIED / ZEN_RESCUE handlers. New `world/physics-board-view.js` parallel renderer that snapshots `world.getPositions()` per frame, creates a cube mesh per new body (color from `session.getBodyColor(id)`), updates positions to match physics, and disposes meshes for removed bodies (with optional shatter). PhysicsSession extended with `_bodyColors` map + `getBodyColor(id)` accessor. main.js Mode.start gains a `physics` branch that lazy-loads Rapier via `session.start()`, constructs BoardView with `noLockMeshes:true`, mounts PhysicsBoardView alongside, and wires `session.tick()` + `physicsView.tick()` into the animate loop. 16 new tests (5 PhysicsSession color tracking + 11 PhysicsBoardView). |
+| **§2.3 Pure Physics — Force-Physics pivot** | v2 §2.3.1 (planned, not yet implemented) | Post-shipping rethink: tetrominoes become compound bodies (one rigid body, multiple colliders); player input is force/impulse/torque rather than grid-snap; layer clear is no-shatter (dissolve fade). Detailed in §2.3.1. Phases G–L map the rework on top of A–F+ — about half of shipped code is reusable, half needs rework. ~5 days estimated. |
 
 ### 0.2 Architectural property to preserve
 
@@ -260,8 +261,12 @@ T-spins / Perfect Clears feeling under-celebrated.
 
 ### 2.3 Pure Physics (§8) — ~5 days · **Phase A shipped**
 
-**Status.** Spec is in v1 §8. **Phase A ✅ shipped** as a foundation;
-phases B–F (Rapier integration through VFX polish) remain.
+**Status.** Spec is in v1 §8. **Phases A–F+ ✅ shipped**; only F++
+(per-collision dust) remains as polish on the v1 design.
+**Post-shipping pivot:** §2.3.1 below proposes a Force-Physics
+revision (compound bodies + force-driven input + no-shatter layer
+clear). Not yet implemented — the pivot supersedes parts of the
+v1 design and adds Phases G–L.
 **v2 update.** Physics mode by design breaks determinism —
 recorded in v1 §11 and `gameplay/rules/versus.js` header. The §12
 modern rules' `_b2b` / `_combo` / T-spin detection all assume the
@@ -270,6 +275,12 @@ physics rules pack sets `goalMultiplier = 1.0` and ignores the
 clearType arg in its `lineScore` so §12 paths can't promote the
 score (a Tetris in physics mode is just 4 layers × 100, no T-spin
 bonus possible).
+
+**Post-pivot note:** with compound bodies (§2.3.1), the rules
+pack stays unchanged. `lineScore(rowCount, level)` still receives
+"layers cleared this tick" regardless of whether the cleared
+colliders came from one parent body or many. The pack doesn't see
+the body model at all — that's the host bridge's domain.
 
 **Phase plan (revised in v2):**
 
@@ -281,7 +292,14 @@ bonus possible).
 | **E — Mode integration + HUD** | physics in Mode.AVAILABLE, storage slot, ui/physics-badge.js, mode-stats formatter | ✅ shipped | ½ day |
 | **F — VFX integration (recipe)** | director.js subscriber: per-layer violet shockwave + sfx + camera shake on PHYSICS_LAYER_CLEARED | ✅ shipped | ½ day |
 | **F+ — Render integration** | BoardView `noLockMeshes` opt; `world/physics-board-view.js` parallel renderer; PhysicsSession color tracking; main.js host wiring (Mode.start branch + animate-loop tick) | ✅ shipped | 1 day |
-| F++ — Per-collision dust (deferred) | Rapier contact events → vfx/emitters/dust spawn at impact points. Cosmetic polish; not gating any other work. | open | ½ day |
+| F++ — Per-collision dust (deferred, on v1 OR v2) | Rapier contact events → vfx/emitters/dust spawn at impact points. Cosmetic polish; not gating any other work. More compelling post-pivot (piece-on-piece "thunk" cue rather than per-cube spam). | open | ½ day |
+| **— Force-Physics pivot (proposed, see §2.3.1) —** | | | |
+| G — Compound body + force API in PhysicsWorld | `addCompoundBody`, `applyImpulse`, `applyTorqueImpulse`, `setLinvel`, `removeCollider`, `getColliderPositions` | open | 1 day |
+| H — PhysicsSession lifecycle redesign (active body, lock detection) | One active compound body, force-driven input methods, sleep / hard-drop lock detection, spawn-next flow | open | 1.5 days |
+| I — Force-driven input wiring | main.js's tryMove/tryRotate/etc. branches in physics mode to call `physicsSession.applyMove` / `applyRotate` / etc. | open | ½ day |
+| J — Compound renderer rework | `PhysicsBoardView` keyed by `colliderId` instead of `bodyId`; per-tick compound body → world transform → child mesh placement; dissolve animation on removal | open | 1 day |
+| K — Layer clear without shatter | detectLayers identifies cleared colliders → `removeCollider` per cleared collider; auto-remove parent body when its collider count hits 0; renderer dissolves removed meshes | open | ½ day |
+| L — Physics tuning + playtest | Force-value calibration (lateral / torque / drop magnitudes), material tuning (friction / restitution / damping), sleep-threshold tuning for lock detection | open | ½ day |
 
 **Phase A — what shipped (`<TBD-sha>`):**
 - `gameplay/experimental/physics/rules.js` — `buildPhysicsRules()` with
@@ -397,6 +415,111 @@ chapter. ~½ day; documented as F++ in the phase table above.
 
 ---
 
+#### 2.3.1 Design pivot — Force Physics (post-shipping rethink)
+
+After Phase F+ landed (the renderer that follows physics body
+positions), playtest exposed two structural problems with the
+v1 design:
+
+1. **Grid-snap controls feel disconnected from the physics.** The
+   active piece moves in discrete cell steps (instant teleport),
+   then on lock the cells become 4 SEPARATE dynamic bodies. There's
+   a discontinuity at lock: before, controls feel like classic
+   Tetris; after, the cubes splash outward like an explosion. The
+   player's input never *causes* the physics — the piece is moved
+   by grid math, then handed off to physics as a fait accompli.
+
+2. **Per-cube bodies + shatter creates visual chaos.** A locked
+   piece's 4 cubes drift apart immediately because each is its own
+   rigid body. Layer-clear shatters them further. The result is a
+   stack that's hard to read — wedged shrapnel, not Tetris-shaped
+   pieces.
+
+The pivot — **Force Physics** — rebuilds the player↔simulation seam:
+
+- **One compound rigid body per tetromino.** Rapier supports adding
+  multiple `cuboid` colliders to a single rigid body. An L-piece is
+  one body with 4 colliders attached at the right offsets. The
+  body never splits — it lands as a Tetris-shaped piece.
+
+- **Player input applies forces / impulses / torques** to the active
+  body, not grid-position deltas:
+  - **Left / Right** → lateral linear-velocity impulse (`±5 cells/sec`)
+  - **Rotate CW / CCW** → torque-impulse around Z axis (`±2 N·m`)
+  - **Soft drop** (Down arrow) → mild downward velocity boost (`-3 cells/sec`)
+  - **Hard drop** (Spacebar) → strong downward impulse (`-15 cells/sec` instantly + commits the piece to "locked stack" status when it next sleeps)
+
+- **No shatter on layer clear.** When the connected-component layer
+  detector identifies a cleared slab (10+ colliders within a Y-band),
+  the host:
+    1. Identifies which colliders belong to the layer.
+    2. Removes those colliders from their parent compound bodies
+       (Rapier's `world.removeCollider(handle)`).
+    3. If a parent body has zero remaining colliders, removes the
+       body too.
+    4. Otherwise, the body stays — with fewer colliders — and the
+       remaining cubes settle naturally under gravity. (A surviving
+       single-cube body falls like a single block; a surviving 3-cube
+       L-shape continues to be one body with 3 colliders.)
+    5. Visually: the cleared cubes **dissolve** with a soft fade
+       (opacity 1 → 0 over 250ms) plus a subtle violet glow pulse.
+       No shrapnel, no shatter particles.
+
+##### Phase classification — what stays / what reworks / what's obsolete
+
+| Shipped phase | Stays valid? | Needs rework | Obsolete |
+|---|---|---|---|
+| **A — rules pack** | ✅ Mostly. `lineScore`, `endCondition`, `physicsTopoutY` unchanged. | — | — |
+| **A — layer-detection algorithm** | ✅ Algorithm is the same — operates on collider centers (was: body centers). The detector is collider-aware, not body-aware. | — | — |
+| **B — `physics/world.js` PhysicsWorld wrapper** | Partial. `loadRapier` / `createPhysicsWorld` / step / dispose all stay. | `addBody(x,y,z)` joined by `addCompoundBody(cells, opts)`. New impulse / torque / setLinvel APIs. `removeCollider` granularity instead of `removeBody`. | — |
+| **C+D — PhysicsSession** | Partial. Bus subscription pattern, lifecycle, layer-detection driver all stay. | PIECE_LOCK no longer maps cells → N bodies. Instead the active piece lifecycle is owned by the session: spawn (compound body), apply forces (player input), settle/lock (sleep heuristic), spawn next. | The 1-body-per-cell mental model is gone. |
+| **E — mode availability + HUD badge** | ✅ Fully. The badge displays cube count / awake count / layers — counts now mean "collider count" / "awake body count" but the read-out is the same. | — | — |
+| **F — VFX celebration recipe** | Partial. Per-layer violet shockwave + sfx + camera shake stays. | The shockwave's `rowCount` arg uses `layer.size` (collider count); per-collider dissolve replaces shatter. | The shatter-on-cube path is dropped. |
+| **F+ — render integration** | Partial. `BoardView.noLockMeshes` opt + main.js Mode-start branch + animate-loop tick all stay. | `PhysicsBoardView` redesigned — meshes are now keyed by `colliderId` not `bodyId`; tracks compound-body transforms (translation + rotation) and applies to each child mesh. Dissolve-out replaces the bodyless-mesh path. | The 1-mesh-per-body simplification is gone. |
+
+##### New phases for the Force-Physics revision
+
+| Phase | Scope | Effort |
+|---|---|---|
+| **G — PhysicsWorld compound + force API** | `addCompoundBody(cells, opts) → bodyId`; `applyImpulse(bodyId, vec)`; `applyTorqueImpulse(bodyId, vec)`; `setLinvel(bodyId, vec)`; `removeCollider(handle)` (replaces granular removeBody for layer clears); `getColliderPositions() → [{bodyId, colliderId, x, y, z}]` (replaces `getPositions()`). All against real Rapier in tests. | 1 day |
+| **H — PhysicsSession lifecycle redesign** | Active body slot (the player's current piece). `spawnActiveTetromino(shape, color)` builds a compound body. `applyMove(dir)` / `applyRotate(dir)` / `applySoftDrop` / `applyHardDrop` route to PhysicsWorld force methods. Lock detection: sleep heuristic (body's awake bit `false` for ≥ 30 ticks → committed) or hard-drop trigger (`commit` flag on next tick after a hard-drop impulse). On commit: spawn next piece. | 1.5 days |
+| **I — Force-driven input wiring (main.js)** | The host's keyboard intent layer (`tryMove` / `tryRotate` / `softDrop` / `hardDrop`) branches: in physics mode, route to `physicsSession.applyMove` etc. instead of `game.tryMove`. Game becomes piece-spawn / score-bookkeeping only; Game's grid path is essentially dormant in physics mode. | ½ day |
+| **J — Compound renderer rework** | `PhysicsBoardView` keyed by `colliderId`. Per tick: compound body → world transform; for each child collider, apply parent transform + collider-local offset to the corresponding mesh. Dissolve animation (opacity tween) on collider removal. | 1 day |
+| **K — Layer-clear without shatter** | Detect cleared colliders (existing detectLayers algorithm). Host calls `world.removeCollider(handle)` for each. If a body's collider count drops to 0, `removeBody`. Notify renderer to start dissolve animation. Update `bodyColors` map / collider-color map. | ½ day |
+| **L — Physics tuning + playtest** | Calibrate force values: lateral impulse, torque, soft-drop boost, hard-drop magnitude. Tune compound-body materials (friction / restitution / damping) so settling feels intentional, not slippery. Tune sleep threshold for lock detection. | ½ day |
+
+**Total Force-Physics rework:** ~5 days. Aligned with the original
+v1 estimate; the shipped A–F+ work isn't wasted but is roughly
+half-applicable, so the time mostly lands on G–L.
+
+##### Why this is worth doing
+
+The v1 design was a competent "Tetris with a physics simulation
+running afterward." The pivot makes physics the *medium* —
+every input the player makes is a physical force, every cube on
+the board is part of a real rigid body, and the experience
+becomes "what happens when Tetris is a real toy in a real
+gravity well, not a grid game." That's the original §8.2 promise
+of physics mode (archived plan_gameplay_1.md):
+
+> *In physics mode, the simulation is approximate — pieces lean,
+> slip, settle into wedges. The visual identity becomes "blocks
+> falling like a Tetris game **should** fall."*
+
+The v1 hit half of that — pieces leaned and settled — but the
+input model still felt like grid Tetris with a physics afterimage.
+The pivot closes that gap.
+
+##### What this changes for the F++ "per-collision dust" item
+
+F++ becomes more compelling. With compound bodies, collisions are
+between full pieces (not individual cubes), and the dust effect
+becomes a meaningful "thunk" cue at piece-on-piece contact rather
+than per-cube spam. F++ remains deferred but its design is clearer
+post-pivot.
+
+---
+
 ## 3. Risks (v2 forward-looking)
 
 The v1 §11 risk table is largely retired (most rows now ✅
@@ -411,6 +534,8 @@ risks that remain *open* plus new ones discovered in v2 work.
 | Garbage-bar pips are too subtle / fade too fast for casual play | Low | Low | Item 1.3 adds a pip linger animation; further tweaks gated on playtest. |
 | Sprint's "T-spin: score 0" rule is community-controversial (mode chooses to ignore the bonus to keep "time-only" semantics) | Low | Low | T_SPIN events still fire so the HUD callout appears; the score field is 0 by Sprint's `lineScore: () => 0`. Documented in `gameplay/rules/sprint.js` header. |
 | Schedule slippage as 3D + online + physics overlap | High (only if all three ship in same window) | Medium | Stage-gate: ship one experimental chapter at a time; pause-or-promote at the 30-day mark per `plan_particle_2.md` §10 culture. |
+| Force-Physics pivot disrupts already-shipped Phase A–F+ work | Medium (only if pivot ships) | Medium | Phase classification table in §2.3.1 maps which shipped pieces stay valid (A's algorithm + rules pack, E's HUD, parts of B/C+D/F/F+); the pivot is additive (G–L) on top of the kept pieces, not a wholesale rewrite. ~5 days estimated. |
+| Force-Physics input feel ("the piece is too floaty / too sticky / too hard to control") | Medium (only post-pivot) | Medium | Phase L is dedicated playtest + force-value tuning; force constants are central in PhysicsSession's input methods so a single-file change retunes the feel. Defer the 30-day promote-or-delete decision until L lands. |
 
 ---
 
@@ -425,12 +550,14 @@ risks that remain *open* plus new ones discovered in v2 work.
 
 ### 4.2 Remaining (speculative chapters)
 
-5. **2.3 Pure Physics (experimental)** — 5 days (independent; pause-or-promote)
+5. **2.3 Pure Physics — Force-Physics pivot** — ~5 days (Phases G–L per §2.3.1; supersedes parts of the shipped A–F+ work)
 6. **2.1 3D Tetris (experimental)** — 8 days (pause-or-promote)
 7. **2.2 Online Versus** — 16 days (the §1.2 prerequisite is now met)
 
-**Total speculative:** 29 days; expect 1–2 chapters to actually ship
-based on the 30-day promote-or-delete policy.
+**Total speculative:** 29 days (was: 5 + 8 + 16; physics chapter
+re-counts since A–F+ shipped + G–L is the pivot rework); expect
+1–2 chapters to actually ship based on the 30-day
+promote-or-delete policy.
 
 ### 4.3 Parallelization notes
 
