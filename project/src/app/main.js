@@ -1717,6 +1717,13 @@ let game           = null;
 let boardView      = null;
 let versusSession  = null;
 
+// Additional bus subscriptions on the opponent's *private* bus
+// (`versusSession.gameP2.bus`) for visual feedback that the global-bus
+// subscribers can't see. Score popups for the bot's line clears live
+// here. Tracked + disposed on mode change so a stale subscriber from
+// the previous round doesn't fire on a freshly-spawned session.
+const _opponentVizUnsubs = [];
+
 // Dual-board layout constants for versus mode. Player's well sits at
 // the case origin (existing chrome wraps it); the opponent's well is
 // at +OPPONENT_OFFSET_X with a *cloned* chrome around it (see
@@ -2622,6 +2629,7 @@ Mode._wireLifecycle({
     // disposed redundantly (game/boardView may alias session.gameP1/
     // viewP1 from a prior versus run); BoardView/Game.dispose are
     // idempotent so the double-call is safe.
+    _disposeOpponentViz();
     if (versusSession) versusSession.dispose();
     if (boardView)     boardView.dispose();
     if (game)          game.dispose();
@@ -2665,6 +2673,7 @@ Mode._wireLifecycle({
       versusSession.dualBoard.leftAnchor.position.x  = 0;
       versusSession.dualBoard.rightAnchor.position.x = OPPONENT_OFFSET_X;
       _attachOpponentChrome();
+      _attachOpponentViz();
       // Alias the player side into the legacy refs so the gameplay
       // function wrappers (tryMove, hardDrop, etc.) keep driving
       // gameP1 unchanged.
@@ -3040,6 +3049,36 @@ function _detachOpponentChrome() {
   opponentChromeClone = null;
 }
 
+/** Drop all bus subscriptions on the opponent's private bus. */
+function _disposeOpponentViz() {
+  for (const u of _opponentVizUnsubs) {
+    try { u(); } catch { /* ignore */ }
+  }
+  _opponentVizUnsubs.length = 0;
+}
+
+/**
+ * Wire visual feedback for the bot's gameplay events on the opponent's
+ * *private* bus. The global-bus subscribers (cinematic FX, audio, HUD)
+ * fire only on player events because gameP2 is on `busP2` — without
+ * this hook the bot's clears would shatter cubes (BoardView's job)
+ * but produce no score popup, no callout, no signal that anything
+ * happened. We deliberately mirror only the per-side cues (popup);
+ * global cues (slowmo / camera shake / punch / callout) stay
+ * player-only so the screen doesn't react to the opponent's plays.
+ */
+function _attachOpponentViz() {
+  _disposeOpponentViz();
+  if (!versusSession) return;
+  const opp = versusSession.gameP2.bus;
+  _opponentVizUnsubs.push(opp.on(EVENTS.LINE_CLEAR, ({ rows, scoreDelta, overallColor }) => {
+    if (!rows || rows.length === 0) return;
+    // rows is sorted top-down — last entry is the bottom-most cleared row.
+    const anchorRow = rows[rows.length - 1];
+    triggerScorePopup(scoreDelta, anchorRow, overallColor, OPPONENT_OFFSET_X);
+  }));
+}
+
 // =============================================================
 // Punch-zoom for multi-line clears
 // Quick dolly toward target then ease back; sized by combo length.
@@ -3312,11 +3351,14 @@ function spawnScorePopupBurst(worldPos, color, intensity) {
 
 // ---- Public entry: replaces the legacy 2D popup ----------------------------
 const _popupWorldPos = new THREE.Vector3();
-function triggerScorePopup(amount, rowIndex, color) {
+function triggerScorePopup(amount, rowIndex, color, worldX = 0) {
   // Anchor the burst at the cleared row's world center, slightly toward
-  // camera so it pops in front of cubes.
+  // camera so it pops in front of cubes. `worldX` defaults to 0 (the
+  // player's well center); §3.7 sub-phase 7e polish passes the opponent
+  // anchor's X-offset so the bot's clears get their own popup at the
+  // correct side of the dual-board layout.
   const worldY = -PLAY_H / 2 + (rowIndex + 0.5) * CELL;
-  _popupWorldPos.set(0, worldY, 1.5);
+  _popupWorldPos.set(worldX, worldY, 1.5);
 
   // (1) Text popup
   const slot = acquireScorePopup();
