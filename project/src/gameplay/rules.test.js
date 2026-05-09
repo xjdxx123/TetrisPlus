@@ -110,4 +110,16 @@ describe('rules — fallback / unknown keys', () => {
     expect(typeof r.physicsTopoutY).toBe('number');
     expect(r.initialModeView.kind).toBe('physics');
   });
+
+  it('experimental "3d" key is registered (plan v2 §2.1)', () => {
+    const r = buildRules('3d');
+    expect(r.key).toBe('3d');
+    // 3D uses exponential per-layer scoring — single layer = 1000 × level.
+    expect(r.lineScore(1, 1)).toBe(1000);
+    expect(r.lineScore(4, 1)).toBe(8000);
+    // dimensions + pieceSet are the new declarations 3D introduces.
+    expect(r.dimensions).toEqual({ COLS: 10, ROWS: 20, DEPTH: 10 });
+    expect(r.pieceSet).toBe('tetracubes');
+    expect(r.initialModeView.kind).toBe('3d');
+  });
 });

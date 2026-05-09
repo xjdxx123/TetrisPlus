@@ -30,6 +30,31 @@ component layer-detection pass. Phase A (this directory) ships:
 Phases B–F (Rapier integration, body lifecycle, mode HUD, VFX)
 land in follow-up sessions on top of this foundation.
 
+### `./3d/` — 3D Tetris (plan v2 §2.1)
+
+The playfield becomes a 10 × 20 × 10 cuboid; pieces are 4-cell
+tetracubes that rotate under the full cube rotation group (24
+elements). Phase A (this directory) ships the pure-logic foundation:
+
+- `tetracubes.js` — the 8 free tetracubes (5 flat: I/O/T/L/S; one
+  branch; chiral right/left screws). Each base orientation is a sparse
+  `[x,y,z]` cell list normalized to the origin corner.
+- `rotation.js` — 90° axis rotations + `enumerateRotations` over the
+  cube group. Total unique orientations across all 8 pieces: 90.
+- `layer-detection.js` — discrete-grid Y-slab scan. A layer is full
+  when every (x, z) in the COLS×DEPTH footprint is occupied. Also
+  exports `settleAfterClear` (drop survivors after clearing) and
+  `LAYER_CLEAR_SCORE` (the [0, 1000, 3000, 5000, 8000] table).
+- `rules.js` — pack with `key: '3d'`, exponential layer-clear scoring,
+  declared `dimensions: {COLS,ROWS,DEPTH}` and `pieceSet: 'tetracubes'`
+  for the host's piece-registry switch. §12 modern rules are explicitly
+  opted out (`goalMultiplier: 1.0`, `clearType` ignored) — see
+  archived plan_gameplay_1.md §6.8 for the reasoning.
+
+Phases B–G (3D board representation, camera mode, render path,
+3D HUD layout, mode-tab UX, kick tables, VFX) land in follow-up
+sessions on top of this foundation.
+
 ## Promotion policy
 
 A mode in this directory is reviewed at the 30-day mark from its

@@ -23,6 +23,11 @@ import { buildVersusRules }   from './rules/versus.js';
 // follow-up phases. The pack is pure JS and ships without the wasm
 // dependency, so importing it here doesn't bloat the core bundle.
 import { buildPhysicsRules }  from './experimental/physics/rules.js';
+// Speculative — 3D Tetris (plan v2 §2.1, archived §6). Phase A ships
+// the rules pack + tetracube piece library + 3D rotation + layer
+// detection — all pure JS. Host integration (3D board representation,
+// camera mode, render path) lives in follow-up phases.
+import { build3DRules }       from './experimental/3d/rules.js';
 
 /**
  * @typedef {Object} EndResult
@@ -133,9 +138,10 @@ function buildClassicRules(opts = {}) {
 }
 
 // Registry of mode-key → builder. Phases 1–6 modes (Classic / Marathon /
-// Sprint / Ultra / Zen / Versus) plus the speculative `physics` mode
-// (plan v2 §2.3, behind the experimental wall). Unknown keys fall back
-// to classic so a stale persisted mode-key doesn't crash the boot path.
+// Sprint / Ultra / Zen / Versus) plus the speculative `physics` and
+// `3d` modes (plan v2 §2.1 / §2.3, both behind the experimental wall).
+// Unknown keys fall back to classic so a stale persisted mode-key
+// doesn't crash the boot path.
 const BUILDERS = Object.freeze({
   classic:  buildClassicRules,
   marathon: buildMarathonRules,
@@ -144,6 +150,7 @@ const BUILDERS = Object.freeze({
   zen:      buildZenRules,
   versus:   buildVersusRules,
   physics:  buildPhysicsRules,
+  '3d':     build3DRules,
 });
 
 /**

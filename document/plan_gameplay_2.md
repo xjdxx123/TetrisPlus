@@ -228,9 +228,12 @@ v2 doesn't restate the specs — they live in `archived/plan_gameplay_1.md`
 §6, §7, §8 — but it does update the **prerequisites and ordering**
 in light of what's now shipped.
 
-### 2.1 3D Tetris (§6) — ~8 days
+### 2.1 3D Tetris (§6) — ~8 days · **Phase A shipped**
 
-**Status.** Spec is in v1 §6. Not started.
+**Status.** Spec is in v1 §6. **Phase A ✅ shipped** (on
+`feat/3d-tetris`) as a pure-JS foundation; phases B–G (3D board
+representation, camera, rendering, HUD, mode-tab UX, kick tables,
+VFX) remain.
 **Prereq updates.** §3.7's `Game` class is the unblocker — 3D
 ships as its own `Game` variant with a 3D board representation,
 not a fork of `app/main.js`. The seeded RNG + serialize/restore
@@ -244,7 +247,64 @@ corner check uses 4 corners). 3D would need to either:
       around a 3D pivot — much harder, ill-defined).
   v2 recommendation: **(a)** for the experimental release, with
   modern rules as a future extension if 3D promotes out of
-  experimental.
+  experimental. Phase A's rules pack hard-codes (a) via
+  `goalMultiplier: 1.0` and a `clearType`-ignoring `lineScore`.
+
+**Phase plan:**
+
+| Phase | Scope | Status | Effort |
+|---|---|---|---|
+| **A — Pure logic + scaffolding** | tetracubes, 3D rotation, layer detection, rules pack, registry entry | ✅ shipped | ½ day |
+| B — Host bridge | `Game` 3D-aware board representation; piece spawn / collision / lock in 3D; depth=1 fallback for 2D modes | open | 1 day |
+| C — Camera + render | tilted-ortho default rig, 45°-snap orbit, slice/X-ray hotkeys, instanced-cube render at 10×10×20 | open | 2 days |
+| D — Input + 3D kick table | 3 rotation axes (yaw/pitch/roll); documented 6-face + 12-edge kick offsets per archived §6.4 | open | 1 day |
+| E — HUD layout | top-bar variants of the side panels (the 10×10 footprint won't fit the 2D side layout); piece preview at low-res isometric | open | 1 day |
+| F — Mode-tab UX | mode visibility flag, settings opt-in, beginner/advanced toggle (6.3.1 vs 6.3.3) | open | ½ day |
+| G — VFX | layer-clear shatter cascade adapted for 10×10 footprint; "reveal the floor" beat | open | 1 day |
+
+**Phase A — what shipped (`feat/3d-tetris`):**
+- `gameplay/experimental/3d/tetracubes.js` — 8-piece library.
+  Five flat (I/O/T/L/S, reuse 2D PIECE_COLORS), one branch (3D T,
+  cube rises at the midpoint), chiral right/left screws (distinct
+  pieces because the cube rotation group has no reflections).
+  Sparse `[x,y,z]` cell lists, normalized to the origin corner.
+- `gameplay/experimental/3d/rotation.js` — 90° `rotateX/Y/Z`,
+  `normalize`, `canonicalize`, `enumerateRotations`. The
+  enumerator walks (rotateX^a · rotateY^b · rotateZ^c) for
+  a,b,c ∈ {0..3}, dedupes via canonical key, returns ≤24 unique
+  orientations. Total over all 8 pieces: **90 distinct
+  orientations** (3+3+12+24+12+12+12+12).
+- `gameplay/experimental/3d/layer-detection.js` — `detectFullLayers`
+  (per-Y bucket count against COLS×DEPTH), `settleAfterClear`
+  (cells above each cleared layer drop by the count strictly
+  below), and the `LAYER_CLEAR_SCORE = [0, 1000, 3000, 5000, 8000]`
+  table from archived §6.5.
+- `gameplay/experimental/3d/rules.js` — pack with `key: '3d'`,
+  declared `dimensions: { COLS:10, ROWS:20, DEPTH:10 }`,
+  `pieceSet: 'tetracubes'` for the host's piece-registry switch,
+  and a 3D `updateBest` that tracks `bestLayerCount` (largest
+  single-lock clear) + cumulative `totalLayersCleared`. Registered
+  in `rules.js#BUILDERS` so `buildRules('3d')` works.
+- `gameplay/experimental/README.md` — adds the 3D-mode section
+  alongside the existing physics entry.
+- 100 new tests (10 tetracubes + 25 rotation + 20 layer-detection
+  + 25 rules + 1 registry integration). Pure JS — no THREE, no
+  Rapier, no DOM. Test surface: 800 → 900, all green.
+
+**Phase B prep notes:**
+- `gameplay/board.js` is currently 2D (`Cell[Y][X]`). For 3D, the
+  cleanest extension is `Cell[Z][Y][X]` storage indexed by
+  `dimensions.DEPTH` — for 2D modes `DEPTH = 1` and the existing
+  `for (z = 0; z < 1; z++)` loop is a no-op. The `Game` class
+  reads `rules.dimensions` at construction time; nothing else
+  about `Game` needs to know what dimensionality it's running.
+- Spawn-collision topout: same path as Classic — host checks the
+  spawn cell against the board and ends the run on collision. The
+  rules pack's `endCondition` stays a no-op (matches the rest
+  except the timer-based modes).
+- The §3.7 `BotController` is grid-aware; a 3D bot is its own
+  AI problem and out of scope for Phase B. Versus / online don't
+  apply to 3D in v2.
 
 ### 2.2 Online Versus (§7) — ~16 days
 
