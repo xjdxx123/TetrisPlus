@@ -1337,7 +1337,219 @@ Concrete files that change for each phase, mapped to the architecture in `plan_a
 
 ---
 
-## 12. Final Word
+## 12. Modern Tetris Mechanics
+
+Added in the post-§3.7 revision — captures the work to bring the
+project's rules in line with the modern competitive Tetris guideline
+(TETR.IO / Puyo Puyo Tetris / Tetris 99 baseline). The shape today is a
+"competent casual approximation": correct garbage table for plain
+clears, basic kick offsets, flat combo. The gaps (T-spins, B2B, PC,
+modern combo, garbage cancellation, full SRS) are what §12 covers.
+
+### 12.1 Why now
+
+After §3.7 landed, the determinism + per-instance Game properties exist
+— which is exactly what modern rules need to be implementable cleanly.
+Specifically:
+
+- T-spin detection has to track `_lastAction` (was the last successful
+  move a rotation?). That's per-Game state — Game class makes it cheap.
+- B2B chain + Perfect Clear are score multipliers that have to persist
+  across rounds in some modes; they ride the Game state that already
+  exists for `_score` / `_combo`.
+- Garbage cancellation reshapes the queue from "FIFO timed pop" into
+  "stack you can debit from" — that's a queue-semantic change Game
+  already owns, not the host.
+- Full SRS kicks are pure rotation logic — no Game state, but tests are
+  much easier when they spawn through `new Game({...})` instead of
+  dragging in main.js.
+
+If we'd done modern rules pre-§3.7, every change above would have
+required a main.js edit. After §3.7 they live in `gameplay/`.
+
+### 12.2 What "modern rules" means here
+
+The Tetris guideline doesn't have a single canonical spec — different
+games make small tweaks. We're picking the TETR.IO defaults as the
+reference point because they're widely played, well-documented, and
+match what most "modern Tetris" players expect. Per-feature choices:
+
+- **SRS kicks**: standard guideline tables, JLSTZ + I share base shape
+  but I has its own variant. O has no kicks.
+- **T-spin detection**: 3-corner rule. Distinguish "T-spin" (3 of 4
+  corners filled) from "T-spin Mini" (only 2 of the 4 "front" corners
+  filled OR no kick used). Triple-corner-with-kick is a regular T-spin.
+- **T-spin scoring**: T-Spin Mini = 100 × level (no clear) / 200 × level
+  (Mini Single). T-Spin = 400 × level (no clear), 800/1200/1600 × level
+  for Single/Double/Triple.
+- **B2B chain**: Tetris OR T-spin-with-clear is "difficult". Two
+  consecutive difficults = B2B chain. Each chained clear scores 1.5×
+  AND sends +1 garbage. Plain 1/2/3-line clears reset the chain.
+- **Perfect Clear**: After a clear, if `board.flat().every(cell =>
+  cell === null)` → +10 garbage, +800/1200/1800/2000 × level score
+  bonus by clear type.
+- **Combo table** (replaces flat +1 cap 4):
+  ```
+  combo:   0  1  2  3  4  5  6  7  8  9  10  11+
+  garbage: 0  0  1  1  2  2  3  3  4  4  4   5
+  ```
+  Combo is "consecutive locks-with-clear, regardless of clear count".
+  A single-line clear extends combo (the table above gives 0 garbage
+  for combo-1, but at combo-2 onward singles do contribute).
+- **Garbage cancellation**: Outgoing garbage debits from the front of
+  the incoming queue first. If you send 4 and have 3 inbound, you
+  cancel all 3 and send 1 to the opponent. If you send 2 and have 5
+  inbound, you cancel 2; 3 still apply on your next lock.
+- **Spawn-delay window**: Garbage doesn't apply the moment it arrives.
+  Modern games show a warning bar for ~600–800ms before the rows rise.
+  During that window, your outgoing clears can cancel the queued
+  garbage. Simple model: every queued entry has a `readyAt` timestamp;
+  Game's drain check skips entries where `readyAt > now`.
+
+### 12.3 New Game state
+
+| Field | Purpose | Serialize? |
+|---|---|---|
+| `_lastAction` | `'rotation'` / `'move'` / `'drop'` / null. Set in tryMove/tryRotate/hardDrop; consumed by T-spin detection at lock time. | yes |
+| `_lastKickIndex` | 0..4 — which SRS kick fit (-1 if no rotation since spawn). T-spin Mini detection consults this. | yes |
+| `_combo` | Currently lives in `gameplay/rules/versus.js` closure. Move into Game so it's mode-independent (Marathon/Sprint can read it for combo score). | yes |
+| `_b2b` | 0 = no chain; ≥1 = number of B2B-eligible clears in a row. | yes |
+| `_garbageReadyAt` | Per-queue-entry timestamp; replaces flat queue with `[{ rows, holeColumn, readyAt }, ...]`. | yes (clamped to relative `delayLeftMs`) |
+
+### 12.4 New events
+
+| Event | Payload | Fired by |
+|---|---|---|
+| `T_SPIN` | `{ kind: 'tspin'\|'mini', cleared: 0..3, score, side }` | Game.lockPiece (after detection) |
+| `PERFECT_CLEAR` | `{ cleared: 1..4, score, garbage, side }` | Game.lockPiece (after clear, if board empty) |
+| `B2B_CHAIN` | `{ count: 1..N, side }` | Game.clearLines (when B2B increments) |
+| `B2B_BREAK` | `{ side }` | Game.clearLines (when a non-difficult clear resets) |
+| `GARBAGE_CANCELLED` | `{ rows, side }` | Game.clearLines (when outgoing eats from queue) |
+
+All carry `side` for dual-board routing per the §3.7 convention.
+
+### 12.5 Phase plan
+
+Each phase ships independently; tests cover the surface as it lands.
+
+**M1 — SRS wall kicks** — *~1 day*
+
+- Rewrite `gameplay/rotation.js` with per-piece kick tables.
+  - `SRS_KICKS_JLSTZ[fromRot][toRot]` → array of 5 `{dCol, dRow}` tests
+  - `SRS_KICKS_I[fromRot][toRot]` → 5 tests
+  - O piece: empty array (rotations are visually identical, no kick needed)
+- Public function `getKickOffsets(pieceKey, fromRot, toRot)` returns the
+  5-test array for the rotation pair.
+- `Game.tryRotate` loops 2D offsets `{dCol, dRow}` instead of 1D `k`.
+- `PIECE_ROTATE` payload extends with `kickIndex: 0..4` (legacy `kicked`
+  bool kept for backwards-compat: `kickIndex !== 0`).
+- Game records `_lastKickIndex` for downstream T-spin Mini detection (M2).
+- Tests: each piece × each `(fromRot, toRot)` × known stack scenario.
+  ~30 cases.
+
+**M2 — T-spin detection + scoring** — *~1.5 days*
+
+- New `gameplay/t-spin.js` — pure detection. Inputs: piece, board,
+  lastAction, kickIndex. Outputs: `'none' | 'tspin' | 'mini'`.
+- 3-corner rule:
+  - Last action must be a rotation (lastAction === 'rotation').
+  - Active piece is T.
+  - Of the 4 corners surrounding the T's pivot, ≥3 are "filled"
+    (occupied OR off-board).
+  - "Mini" variant: a kick of index ≥3 was used, OR only the 2 "back"
+    corners (relative to the T's facing direction) are filled.
+- Game.lockPiece detects → emits `T_SPIN` event before clearLines.
+- Score table per TETR.IO defaults; rules pack `lineScore()` extends
+  to take an optional `clearType` parameter.
+- Per-mode wiring: classic / marathon / sprint / ultra all opt in
+  (T-spins always count). Versus opts in for B2B + garbage.
+
+**M3 — B2B chain + Perfect Clear** — *~1 day*
+
+- Game tracks `_b2b` counter. Increments on Tetris clear OR
+  T-spin-with-clear. Resets on plain 1/2/3 clear.
+- Score multiplier: clear's score × 1.5 when `_b2b > 0`.
+- Garbage: rules.versus's `onLinesCleared` adds `_b2b > 0 ? +1 : +0`.
+- Perfect Clear detection in Game.clearLines AFTER row splice: if
+  `_board.flat().every(c => c === null)` → emit PERFECT_CLEAR with
+  +10 garbage and the per-clear-type score bonus.
+- Stats schema: add `bestB2bChain`, `perfectClears` to `modeBests`.
+- Events: `B2B_CHAIN`, `B2B_BREAK`, `PERFECT_CLEAR` for HUD callouts.
+
+**M4 — Modern combo table** — *~½ day*
+
+- Move `combo` from versus rules pack closure into Game state
+  (so non-versus modes can score combos).
+- Replace `gameplay/garbage.js`'s `garbageForLineCount(rows, combo)`
+  combo math with the staged table:
+  ```
+  comboGarbageStep[combo]: [0,0,1,1,2,2,3,3,4,4,4]; combo>=11 → 5.
+  ```
+  (NOTE: garbage from combo is ADDED to the base from the table —
+  `0+combo` for 1-line clear means combo singles eventually send.)
+- Score combo: `+50 × combo × level` per clear when `combo > 0`.
+- Tests update for the new step values.
+
+**M5 — Garbage cancellation + spawn-delay window** — *~1.5 days*
+
+- Game's `_garbageQueue` entries grow a `readyAt` timestamp
+  (`Date.now() + GARBAGE_DELAY_MS`). Default delay: 800ms.
+- Game's `_drainInboundGarbage()` skips entries where `readyAt > now`.
+  At lock time, only "ready" entries apply.
+- Versus rules' `onLinesCleared`: BEFORE emitting `GARBAGE_SENT`,
+  attempt to cancel from `_garbageQueue` (front-first). The amount
+  cancelled fires `GARBAGE_CANCELLED`; the remainder fires
+  `GARBAGE_SENT` per existing path.
+- BoardView: visual warning bar on the side of the well showing each
+  queued entry as a colored block, fading from red→pink as `readyAt`
+  approaches. Existing versus-badge already shows the count; this
+  upgrades the per-entry timing.
+- Game.tick advances `now` so `readyAt` consumption is monotonic.
+  Pause-aware (entries don't expire while paused — `readyAt` is
+  shifted by the pause duration).
+
+### 12.6 Cross-mode applicability
+
+Modern rules apply to ALL six modes, not just Versus:
+- **Classic / Marathon / Ultra**: T-spins + B2B + PC give bonus score.
+- **Sprint**: T-spins still detected for the HUD callout, but score is
+  zero-locked already, so the multiplier is moot. PC is celebrated.
+- **Zen**: same as Marathon — bonus score, B2B chain HUD readout.
+- **Versus**: full set including cancellation + warning window.
+
+The rules engine already supports per-mode opt-in via the rules pack:
+each pack chooses whether to consult `_b2b` for the multiplier
+(Sprint's `lineScore: () => 0` bypasses; the others wire it through).
+
+### 12.7 Risks
+
+| Risk | Likelihood | Impact | Mitigation |
+|---|---|---|---|
+| SRS kicks break existing piece behaviors players are used to | Medium | Low | Most players know SRS already — current "loose 5-offset" path is what's surprising. Keep 1-frame visual feedback unchanged. |
+| T-spin detection false positives (e.g. forced rotation off a Z piece looks like T-spin) | Medium | Medium | Detector is gated on `pieceKey === 'T'` first thing; non-T pieces never qualify. Pure module + tests for each shape. |
+| B2B / combo move into Game, conflicting with versus pack's closure-captured combo | High | Low | M4 explicitly migrates combo from rules pack to Game; versus pack's `_comboInternal()` becomes a thin reader. Tests catch any drift. |
+| Garbage cancellation regression: under-cancellation lets the player be unfairly snowballed | Medium | Medium | Cancellation amount is `min(outgoing, inbound)`, with explicit unit test for boundary cases (cancel = inbound, cancel = outgoing, cancel = 0). |
+| Spawn-delay timing makes single-sim main.js feel laggy (delay applies to the bot's sends in v1 versus too) | Low | Low | Tunable via opt: `garbageDelayMs` defaulted to 800; can drop to 0 for solo modes (which never receive garbage anyway, so moot in practice). |
+| `_lastAction` / `_b2b` / `_combo` serialization breaks save-restore | Low | High | All new state fields included in `Game.serialize` blob; restore tests for each scenario. |
+
+### 12.8 Status dashboard
+
+| Phase | Status | Shipped |
+|---|---|---|
+| M1 — SRS wall kicks | ✅ | `gameplay/rotation.js` rewritten with per-piece tables: `getKickOffsets(pieceKey, fromRot, toRot)` returns the 5-test SRS sequence (1 for O). Game.tryRotate walks 2D `{dCol, dRow}` offsets and emits `PIECE_ROTATE` with `kickIndex: 0..4`. Legacy `KICK_OFFSETS` 1D export retained as a deprecated alias. 15 new rotation tests (canonical-value spot checks against guideline + table integrity); existing Game.tryRotate tests updated for the new return shape. |
+| M2 — T-spin detection + scoring | ❌ | — |
+| M3 — B2B chain + Perfect Clear | ❌ | — |
+| M4 — Modern combo table | ❌ | — |
+| M5 — Garbage cancellation + spawn-delay window | ❌ | — |
+
+Total: ~5.5 days estimated. Recommended landing order matches the
+dependency chain: M1 → M2 → M3 (M2 dependency) and M4 → M5 (M4
+dependency); M3 and M4 are independent of each other and can land in
+either order or in parallel.
+
+---
+
+## 13. Final Word
 
 The single most useful property of this plan is that **every mode is small once the rules engine exists**. Marathon is 30 lines of rules + 50 lines of HUD + 30 lines of test. **That property held**: Phases 1–6 each shipped in roughly the budgeted shape, the rules engine is now real, and Classic plays identically before/after the refactor (367 tests prove it).
 
