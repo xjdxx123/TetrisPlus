@@ -1,5 +1,12 @@
 import { describe, it, expect } from 'vitest';
-import { garbageForLineCount, pickHoleColumn, applyGarbageToBoard, _GARBAGE_TABLE, _COMBO_BONUS_MAX } from './garbage.js';
+import {
+  garbageForLineCount,
+  pickHoleColumn,
+  applyGarbageToBoard,
+  _GARBAGE_TABLE,
+  _COMBO_STEP_GARBAGE,
+  _COMBO_STEP_PLATEAU,
+} from './garbage.js';
 
 describe('garbageForLineCount', () => {
   it('matches the standard Tetris table for a non-combo clear', () => {
@@ -20,22 +27,32 @@ describe('garbageForLineCount', () => {
     expect(garbageForLineCount(99)).toBe(4);
   });
 
-  it('combo bonus adds +1 per step up to the cap', () => {
-    expect(garbageForLineCount(2, 0)).toBe(1);     // base only
-    expect(garbageForLineCount(2, 1)).toBe(2);     // +1
-    expect(garbageForLineCount(2, 4)).toBe(1 + _COMBO_BONUS_MAX);
-    expect(garbageForLineCount(2, 100)).toBe(1 + _COMBO_BONUS_MAX);
+  it('combo bonus follows the staged COMBO_STEP_GARBAGE table (plan §12 M4)', () => {
+    // Base = 1 for a 2-line clear; combo steps add 0/0/1/1/2/2/3/3/4/4/4.
+    expect(garbageForLineCount(2, 0)).toBe(1 + 0); // first clear of streak — no bonus
+    expect(garbageForLineCount(2, 1)).toBe(1 + 0); // second consecutive — still 0
+    expect(garbageForLineCount(2, 2)).toBe(1 + 1); // third — first bonus
+    expect(garbageForLineCount(2, 4)).toBe(1 + 2);
+    expect(garbageForLineCount(2, 8)).toBe(1 + 4); // approaching plateau
+    expect(garbageForLineCount(2, 10)).toBe(1 + 4);
+    expect(garbageForLineCount(2, 11)).toBe(1 + 5); // plateau begins
+    expect(garbageForLineCount(2, 100)).toBe(1 + 5);
   });
 
-  it('combo never amplifies a 0-base clear (single-line clears never send)', () => {
+  it('combo singles eventually contribute (modern rules: combo decoupled from base)', () => {
+    // The pre-§12 rule was "0-base clears never send"; modern rule is
+    // "combo step adds regardless of base", so once the streak passes
+    // step 2 even single-line clears begin to send.
     expect(garbageForLineCount(1, 0)).toBe(0);
-    expect(garbageForLineCount(1, 5)).toBe(0);
-    expect(garbageForLineCount(1, 99)).toBe(0);
+    expect(garbageForLineCount(1, 1)).toBe(0);
+    expect(garbageForLineCount(1, 2)).toBe(1);
+    expect(garbageForLineCount(1, 11)).toBe(5);
   });
 
-  it('exposes the table + combo cap for tests that pin specific values', () => {
+  it('exposes the staged table + plateau for tests that pin specific values', () => {
     expect(_GARBAGE_TABLE).toEqual([0, 0, 1, 2, 4]);
-    expect(_COMBO_BONUS_MAX).toBe(4);
+    expect(_COMBO_STEP_GARBAGE).toEqual([0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 4]);
+    expect(_COMBO_STEP_PLATEAU).toBe(5);
   });
 });
 

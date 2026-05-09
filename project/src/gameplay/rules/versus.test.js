@@ -7,8 +7,11 @@ function makeFakeBus() {
   const calls = [];
   return { calls, emit(topic, payload) { calls.push({ topic, payload }); } };
 }
-function snapshot({ score = 0, lines = 0, level = 1, linesCleared = lines, timeMs = 0 } = {}) {
-  return { score, lines, level, linesCleared, timeMs };
+function snapshot({
+  score = 0, lines = 0, level = 1, linesCleared = lines, timeMs = 0,
+  b2b = 0, combo = 0,
+} = {}) {
+  return { score, lines, level, linesCleared, timeMs, b2b, combo };
 }
 
 describe('versus rules — boot', () => {
@@ -88,45 +91,68 @@ describe('versus rules — onLinesCleared garbage emission', () => {
   });
 });
 
-describe('versus rules — combo bonus', () => {
-  it('two consecutive multi-line clears stack a combo bonus on the second', () => {
+describe('versus rules — combo bonus (M4: combo lives in Game)', () => {
+  // Post-§12 M4: Game owns `_combo` and includes it in the state
+  // snapshot. Versus's onLinesCleared reads `state.combo` and uses
+  // `combo - 1` as the comboStep for the staged garbage table:
+  //   step:    0 1 2 3 4 5 6 7 8 9 10 11+
+  //   garbage: 0 0 1 1 2 2 3 3 4 4 4  5
+
+  it('two consecutive 2-line clears: step=0 then step=1 — both send 1 (no bonus until step 2)', () => {
     const bus = makeFakeBus();
     const r = buildVersusRules({ bus });
-    r.onLinesCleared(snapshot({ linesCleared: 2 }), 2);   // 1 garbage, no bonus
-    r.onLinesCleared(snapshot({ linesCleared: 2 }), 2);   // 1 base + 1 combo
+    // First clear: state.combo=1, step=0 → 1 base + 0 = 1
+    r.onLinesCleared(snapshot({ linesCleared: 2, combo: 1 }), 2);
+    // Second clear: state.combo=2, step=1 → 1 base + 0 = 1
+    r.onLinesCleared(snapshot({ linesCleared: 2, combo: 2 }), 2);
     const sent = bus.calls.filter(c => c.topic === EVENTS.GARBAGE_SENT);
-    expect(sent.map(c => c.payload.rows)).toEqual([1, 2]);
+    expect(sent.map(c => c.payload.rows)).toEqual([1, 1]);
   });
 
-  it('a 1-line clear breaks the combo', () => {
+  it('third 2-line clear (step=2) starts adding a combo bonus', () => {
     const bus = makeFakeBus();
     const r = buildVersusRules({ bus });
-    r.onLinesCleared(snapshot({ linesCleared: 2 }), 2);   // 1
-    r.onLinesCleared(snapshot({ linesCleared: 2 }), 2);   // 2 (combo step 1)
-    r.onLinesCleared(snapshot({ linesCleared: 1 }), 1);   // breaks combo, sends 0
-    r.onLinesCleared(snapshot({ linesCleared: 2 }), 2);   // 1 (back to base)
+    r.onLinesCleared(snapshot({ linesCleared: 2, combo: 1 }), 2); // 1+0 = 1
+    r.onLinesCleared(snapshot({ linesCleared: 2, combo: 2 }), 2); // 1+0 = 1
+    r.onLinesCleared(snapshot({ linesCleared: 2, combo: 3 }), 2); // 1+1 = 2
     const sent = bus.calls.filter(c => c.topic === EVENTS.GARBAGE_SENT);
-    expect(sent.map(c => c.payload.rows)).toEqual([1, 2, 1]);
+    expect(sent.map(c => c.payload.rows)).toEqual([1, 1, 2]);
   });
 
-  it('combo bonus caps at 4 (no infinite snowball)', () => {
+  it('long combo plateaus at +5 (step ≥ 11)', () => {
     const bus = makeFakeBus();
     const r = buildVersusRules({ bus });
-    // Six consecutive 2-line clears.
-    for (let i = 0; i < 6; i++) r.onLinesCleared(snapshot({ linesCleared: 2 }), 2);
+    for (let combo = 1; combo <= 13; combo++) {
+      r.onLinesCleared(snapshot({ linesCleared: 2, combo }), 2);
+    }
     const sent = bus.calls.filter(c => c.topic === EVENTS.GARBAGE_SENT).map(c => c.payload.rows);
-    // 1 (base, no combo), 2, 3, 4, 5, 5 — the last cleanly capped at 1+4.
-    expect(sent).toEqual([1, 2, 3, 4, 5, 5]);
+    // base (2-line) = 1; bonus follows COMBO_STEP_GARBAGE [0,0,1,1,2,2,3,3,4,4,4]
+    // and 5 plateau for step ≥ 11.
+    expect(sent).toEqual([1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 5, 6, 6]);
   });
 
-  it('combo state resets across rule-pack instances (one per Mode.start)', () => {
+  it('M4 modern table: combo SINGLES eventually contribute', () => {
     const bus = makeFakeBus();
-    const a = buildVersusRules({ bus });
-    a.onLinesCleared(snapshot({ linesCleared: 2 }), 2);
-    a.onLinesCleared(snapshot({ linesCleared: 2 }), 2);
-    expect(a._comboInternal()).toBe(2);
-    const b = buildVersusRules({ bus });
-    expect(b._comboInternal()).toBe(0);
+    const r = buildVersusRules({ bus });
+    // Single line clears extend combo too (the old rule that 1-line
+    // clears reset is removed in M4).
+    r.onLinesCleared(snapshot({ linesCleared: 1, combo: 1  }), 1); // step 0  → 0+0 = 0 (no emit)
+    r.onLinesCleared(snapshot({ linesCleared: 1, combo: 2  }), 1); // step 1  → 0+0 = 0 (no emit)
+    r.onLinesCleared(snapshot({ linesCleared: 1, combo: 3  }), 1); // step 2  → 0+1 = 1
+    r.onLinesCleared(snapshot({ linesCleared: 1, combo: 11 }), 1); // step 10 → 0+4 = 4
+    r.onLinesCleared(snapshot({ linesCleared: 1, combo: 12 }), 1); // step 11 → 0+5 = 5 (plateau)
+    const sent = bus.calls.filter(c => c.topic === EVENTS.GARBAGE_SENT).map(c => c.payload.rows);
+    expect(sent).toEqual([1, 4, 5]); // only non-zero sends emit
+  });
+
+  it('_comboInternal mirrors the most recently observed Game.combo (legacy accessor)', () => {
+    const bus = makeFakeBus();
+    const r = buildVersusRules({ bus });
+    r.onLinesCleared(snapshot({ linesCleared: 2, combo: 5 }), 2);
+    expect(r._comboInternal()).toBe(5);
+    // A fresh rule pack hasn't observed any clears.
+    const r2 = buildVersusRules({ bus });
+    expect(r2._comboInternal()).toBe(0);
   });
 });
 

@@ -689,7 +689,7 @@ describe('Game — snapshots', () => {
     const s = game.getStateSnapshot();
     expect(s).toEqual({
       score: 0, lines: 0, level: 1, linesCleared: 0, timeMs: 0,
-      b2b: 0,
+      b2b: 0, combo: 0,
     });
   });
 
@@ -1274,6 +1274,144 @@ describe('Game — Perfect Clear (plan §12.5 M3)', () => {
     game._b2b = 5;
     game.reset();
     expect(game._b2b).toBe(0);
+  });
+});
+
+// ─── M4: Combo lifted into Game (plan §12.5) ─────────────────────────
+
+describe('Game — combo state (plan §12.5 M4)', () => {
+  it('first clear increments _combo to 1 and emits COMBO_START', () => {
+    const { game, bus } = makeGame();
+    game.spawnPiece('T');
+    fillRow(game, 0);
+    game.board[5][5] = 0x111111; // suppress PC
+    const cap = captureEvents(bus, [EVENTS.COMBO_START, EVENTS.COMBO_END]);
+    game.clearLines([0]);
+    cap.dispose();
+    expect(game._combo).toBe(1);
+    expect(cap.events.find(e => e.topic === EVENTS.COMBO_START)).toBeTruthy();
+    expect(cap.events.find(e => e.topic === EVENTS.COMBO_START).payload.count).toBe(1);
+  });
+
+  it('consecutive clears increment combo (any size — including singles)', () => {
+    const { game } = makeGame();
+    game.spawnPiece('T');
+    // Single
+    fillRow(game, 0); game.board[5][5] = 0x111111;
+    game.clearLines([0]);
+    expect(game._combo).toBe(1);
+    // Single again — combo extends
+    fillRow(game, 0);
+    game.clearLines([0]);
+    expect(game._combo).toBe(2);
+    // Triple — combo extends
+    fillRow(game, 0); fillRow(game, 1); fillRow(game, 2);
+    game.clearLines([0, 1, 2]);
+    expect(game._combo).toBe(3);
+  });
+
+  it('COMBO_START fires only on the FIRST clear of a streak', () => {
+    const { game, bus } = makeGame();
+    game.spawnPiece('T');
+    const cap = captureEvents(bus, [EVENTS.COMBO_START]);
+    fillRow(game, 0); game.board[5][5] = 0x111111;
+    game.clearLines([0]);   // streak begins → COMBO_START
+    fillRow(game, 0);
+    game.clearLines([0]);   // continuation → no new COMBO_START
+    fillRow(game, 0);
+    game.clearLines([0]);
+    cap.dispose();
+    expect(cap.events.length).toBe(1);
+  });
+
+  it('combo score bonus: +50 × (combo - 1) × level', () => {
+    const { game } = makeGame();
+    game.spawnPiece('T');
+    // First clear at combo=1 → no bonus.
+    fillRow(game, 0); game.board[5][5] = 0x111111;
+    game.clearLines([0]); // single = 100, no combo bonus
+    const after1 = game.score;
+    expect(after1).toBe(100);
+    // Second clear at combo=2 → +50 × 1 × level 1.
+    fillRow(game, 0);
+    game.clearLines([0]); // single = 100, combo +50
+    expect(game.score - after1).toBe(150);
+    // Third clear at combo=3 → +100 × level 1.
+    fillRow(game, 0);
+    const after2 = game.score;
+    game.clearLines([0]);
+    expect(game.score - after2).toBe(200); // 100 base + 100 combo
+  });
+
+  it('non-clear lock breaks combo and emits COMBO_END (with prior count)', () => {
+    const { game, bus } = makeGame();
+    game.spawnPiece('T');
+    // Build combo of 2.
+    fillRow(game, 0); game.board[5][5] = 0x111111;
+    game.clearLines([0]);
+    fillRow(game, 0);
+    game.clearLines([0]);
+    expect(game._combo).toBe(2);
+    // Now lockPiece without any rows filled → combo breaks.
+    game.spawnPiece('T');
+    const cap = captureEvents(bus, [EVENTS.COMBO_END]);
+    game.hardDrop();
+    game.lockPiece();
+    cap.dispose();
+    expect(game._combo).toBe(0);
+    expect(cap.events.length).toBe(1);
+    expect(cap.events[0].payload.count).toBe(2); // pre-reset count
+  });
+
+  it('COMBO_END does NOT fire when no combo was active (no spam)', () => {
+    const { game, bus } = makeGame();
+    game.spawnPiece('T');
+    const cap = captureEvents(bus, [EVENTS.COMBO_END]);
+    game.hardDrop();
+    game.lockPiece(); // no clear, _combo was 0 — no event
+    cap.dispose();
+    expect(cap.events.length).toBe(0);
+  });
+
+  it('serialize/restore preserves _combo', () => {
+    const { game } = makeGame();
+    game._combo = 7;
+    const blob = game.serialize();
+    expect(blob.combo).toBe(7);
+
+    const bus2 = new EventBus({ replayBufferSize: 0, recorderSize: 0 });
+    const g2 = new Game({ rules: buildRules('classic'), bus: bus2, rng: seededRng(1) });
+    g2.restore(blob);
+    expect(g2._combo).toBe(7);
+  });
+
+  it('reset() clears _combo back to 0', () => {
+    const { game } = makeGame();
+    game._combo = 4;
+    game.reset();
+    expect(game._combo).toBe(0);
+  });
+
+  it('Versus: combo bonus garbage uses Game.combo, scaling per the staged table', () => {
+    const bus = new EventBus({ replayBufferSize: 0, recorderSize: 0 });
+    const game = new Game({ rules: buildRules('versus', { bus }), bus, rng: seededRng(1) });
+    game.spawnPiece('I');
+    // Three consecutive 2-line clears. Combo step progression: 0, 1, 2.
+    // Stray cell at row 15 (high enough that subsequent fillRow(0/1)
+    // won't overwrite it) keeps each clear from triggering Perfect
+    // Clear, isolating the combo-table value.
+    game.board[15][5] = 0x111111;
+
+    const cap = captureEvents(bus, [EVENTS.GARBAGE_SENT]);
+    fillRow(game, 0); fillRow(game, 1);
+    game.clearLines([0, 1]); // combo=1, step=0 → 1 base + 0 combo = 1
+    fillRow(game, 0); fillRow(game, 1);
+    game.clearLines([0, 1]); // combo=2, step=1 → 1 base + 0 combo = 1
+    fillRow(game, 0); fillRow(game, 1);
+    game.clearLines([0, 1]); // combo=3, step=2 → 1 base + 1 combo = 2
+    cap.dispose();
+    const rows = cap.events.map(e => e.payload.rows);
+    expect(rows).toEqual([1, 1, 2]);
   });
 });
 

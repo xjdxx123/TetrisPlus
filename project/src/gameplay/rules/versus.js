@@ -34,12 +34,11 @@ export function buildVersusRules(opts = {}) {
   const gravityScalar = opts.gravityScalar || (() => 1.0);
   const bus           = opts.bus           || null;
 
-  // Combo tracking — closure-captured per-pack instance. The host builds
-  // a fresh pack on every Mode.start, so a new round resets the combo.
-  // We bump `combo` on multi-line clears (≥2) and reset on a single-line
-  // clear or a non-clearing lock (the host doesn't notify on the latter,
-  // but the simple "≥2-line clears extend combo" model is plan-aligned).
-  let combo = 0;
+  // Combo tracking moved into Game (plan §12 M4) — the rules pack reads
+  // `state.combo` from the snapshot. Kept for backwards-compat with
+  // `_comboInternal()` accessors that some tests use; mirrors Game's
+  // value when consulted.
+  let lastObservedCombo = 0;
 
   return Object.freeze({
     key:               'versus',
@@ -57,31 +56,27 @@ export function buildVersusRules(opts = {}) {
     endCondition:      () => null,
 
     // Compute outgoing garbage from the player's clear and emit the bus
-    // event the opponent listens for. Combo bonus accrues on consecutive
-    // multi-line clears; a 1-line clear or non-clear resets combo.
+    // event the opponent listens for.
     //
-    // Modern-rules (plan §12 M3): the optional `info` arg carries
-    // `{clearType, isB2B, isPerfectClear}`. B2B continuation adds +1
-    // garbage row; Perfect Clear adds +10 — both stack on top of the
-    // standard table value.
+    // Modern-rules (plan §12 M3 + M4):
+    //   - Base from the per-row table; combo bonus from `state.combo`
+    //     (Game-managed; plan §12 M4 lifts combo out of this closure).
+    //   - +1 garbage row when this clear extends an active B2B chain.
+    //   - +10 garbage rows on Perfect Clear.
+    //   All stack on top of the standard table value.
     onLinesCleared: (state, rowsCleared, info) => {
       const r = rowsCleared | 0;
-      // Combo sequencing.
-      if (r >= 2) combo += 1;
-      else        combo = 0;
+      // Game has already incremented `_combo` for this clear by the
+      // time onLinesCleared fires; the "combo step" is one less.
+      const comboStep = Math.max(0, ((state && state.combo) | 0) - 1);
+      lastObservedCombo = (state && state.combo) | 0;
 
-      let sent = garbageForLineCount(r, Math.max(0, combo - 1));
+      let sent = garbageForLineCount(r, comboStep);
       if (info && info.isB2B)          sent += 1;
       if (info && info.isPerfectClear) sent += 10;
       if (sent > 0 && bus) {
         bus.emit(EVENTS.GARBAGE_SENT, { rows: sent, target: 'opponent' });
       }
-      // Reset combo right after a 1-line clear — the conditional above
-      // already did the math; this is purely a safety re-state in case a
-      // future caller threads the combo through differently.
-      if (r === 1) combo = 0;
-
-      void state;
     },
 
     onTick: null,
@@ -100,9 +95,10 @@ export function buildVersusRules(opts = {}) {
       garbageInbound: 0,
     }),
 
-    // Test / introspection accessor. The current combo isn't part of
-    // state.snapshot so a closure read is the only way for tests to
-    // verify the in-progress combo count.
-    _comboInternal: () => combo,
+    // Test / introspection accessor — kept for back-compat with tests
+    // that predate the M4 combo-into-Game migration. Mirrors the most
+    // recent Game.combo observed via onLinesCleared. New code should
+    // read `game.getStateSnapshot().combo` directly.
+    _comboInternal: () => lastObservedCombo,
   });
 }

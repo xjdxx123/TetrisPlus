@@ -30,27 +30,40 @@ const TABLE = Object.freeze([
   /* 4 */ 4,
 ]);
 
-// Combo bonus — capped per the standard table. comboCount=0 is the first
-// clear in a sequence, comboCount=1 is the second consecutive, etc.
-const COMBO_BONUS_MAX = 4;
+// Modern-rules combo step table (plan §12.5 M4). Indexed by `comboStep`
+// — the count of CONSECUTIVE prior clears (0 = first clear of a streak).
+// Modern guideline (TETR.IO / Tetris 99): combo singles DO contribute
+// once the streak gets long enough. The pre-§12 table coupled combo
+// bonus to "base > 0" (so 1-line clears never sent combo garbage); this
+// table decouples them.
+//
+// Source: TETR.IO defaults — gentle ramp at low combos, plateau at 4–5.
+const COMBO_STEP_GARBAGE = Object.freeze([0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 4]);
+// All comboStep ≥ 11 send 5 (the plateau).
+const COMBO_STEP_PLATEAU = 5;
 
 /**
  * Compute the number of garbage rows to send when the player clears
- * `rowsCleared` rows simultaneously.
+ * `rowsCleared` rows simultaneously, with `comboStep` consecutive prior
+ * clears (0 = first clear of the streak — no combo bonus yet).
  *
- * @param {number} rowsCleared    1..4 (anything ≥4 caps at 4).
- * @param {number} [comboCount]   How many consecutive prior clears (0 = solo).
+ * Modern-rules behaviour (plan §12 M4):
+ *   - Base garbage from the per-row table (0/0/1/2/4 for 0/1/2/3/4 rows).
+ *   - + per-step combo bonus from `COMBO_STEP_GARBAGE`. The combo
+ *     bonus applies regardless of base — so combo singles eventually
+ *     accumulate into the outgoing queue once the streak passes step 2.
+ *
+ * @param {number} rowsCleared   1..4 (anything ≥4 caps at 4).
+ * @param {number} [comboStep]   Consecutive prior clears (0 = solo).
  * @returns {number}
  */
-export function garbageForLineCount(rowsCleared, comboCount = 0) {
+export function garbageForLineCount(rowsCleared, comboStep = 0) {
   const r = Math.max(0, Math.min(4, rowsCleared | 0));
   const base = TABLE[r];
-  const combo = Math.max(0, comboCount | 0);
-  // Combo bonus: +1 per step, capped at COMBO_BONUS_MAX. Combo doesn't
-  // amplify a single-line clear (which sends 0 base) — combo of 0+0 is
-  // still 0; the player must keep multi-line clearing to maintain combo.
-  // The cap keeps long combos from snowballing into instant-win territory.
-  const bonus = base > 0 ? Math.min(COMBO_BONUS_MAX, combo) : 0;
+  const c = Math.max(0, comboStep | 0);
+  const bonus = c >= COMBO_STEP_GARBAGE.length
+    ? COMBO_STEP_PLATEAU
+    : COMBO_STEP_GARBAGE[c];
   return base + bonus;
 }
 
@@ -108,5 +121,6 @@ export function applyGarbageToBoard(board, rows, holeColumn, garbageColor) {
   return { overflowed };
 }
 
-export const _GARBAGE_TABLE = TABLE;
-export const _COMBO_BONUS_MAX = COMBO_BONUS_MAX;
+export const _GARBAGE_TABLE      = TABLE;
+export const _COMBO_STEP_GARBAGE = COMBO_STEP_GARBAGE;
+export const _COMBO_STEP_PLATEAU = COMBO_STEP_PLATEAU;

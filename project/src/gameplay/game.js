@@ -154,6 +154,15 @@ export class Game {
     // the multiplier, only continuations do.
     this._b2b = 0;
 
+    // Modern combo counter (plan §12 M4). Lifted from the versus rules
+    // pack into Game so non-versus modes can also score combos. Counts
+    // consecutive locks-with-clear (any size — single/double/triple/
+    // tetris all extend). Increments at the START of clearLines (since
+    // clearLines is only called when rows.length > 0), and resets to 0
+    // on a non-clear lock in lockPiece. The garbage table is indexed by
+    // `_combo - 1` (the "combo step" — 0 for first clear of a streak).
+    this._combo = 0;
+
     // Subscribe to inbound garbage. v1 single-bus: bot's emission lands
     // here. v2 dual-sim: per-game bus + host bridge calls applyGarbage()
     // directly, but this subscription remains harmless (no other emitters).
@@ -209,6 +218,7 @@ export class Game {
       linesCleared: this._lines,
       timeMs:       this._modeTimeMs,
       b2b:          this._b2b,
+      combo:        this._combo,
     };
   }
 
@@ -563,7 +573,17 @@ export class Game {
       }
     }
 
-    if (fullRows.length > 0) this.clearLines(fullRows, tspinKind);
+    if (fullRows.length > 0) {
+      this.clearLines(fullRows, tspinKind);
+    } else {
+      // No-clear lock breaks the combo streak (plan §12 M4). Emit
+      // COMBO_END so HUDs can flash the broken streak; gates on
+      // `_combo > 0` so a series of no-clear locks doesn't spam.
+      if (this._combo > 0) {
+        this._bus.emit(EVENTS.COMBO_END, { count: this._combo, side: this._side });
+        this._combo = 0;
+      }
+    }
 
     // Garbage application — between piece locks, after any clears resolve.
     this._drainInboundGarbage();
@@ -593,6 +613,17 @@ export class Game {
   clearLines(rowsArg, clearType = 'normal') {
     const rows = rowsArg.slice().sort((a, b) => b - a);
 
+    // Combo step (plan §12 M4). `_combo` tracks consecutive
+    // locks-with-clear; increment at the START so the count reflects
+    // "this is the Nth consecutive clear" by the time we score and
+    // emit. The "combo step" used for the garbage table is `_combo - 1`
+    // (zero-indexed: the first clear of a streak has combo=1, step=0).
+    const wasFirstOfStreak = this._combo === 0;
+    this._combo += 1;
+    if (wasFirstOfStreak) {
+      this._bus.emit(EVENTS.COMBO_START, { count: this._combo, side: this._side });
+    }
+
     // Difficult-clear classification (M3). Tetris (4-line) OR any
     // T-spin-with-clear is "difficult"; plain 1/2/3 clears are not.
     const isDifficult = (rows.length === 4)
@@ -615,11 +646,17 @@ export class Game {
       if (!isPerfectClear) break;
     }
 
-    // Score: base + B2B 1.5× + Perfect Clear bonus.
+    // Score: base + B2B 1.5× + Perfect Clear bonus + combo bonus.
     let scoreDelta = this._rules.lineScore(rows.length, this._level, clearType);
     if (isB2B) scoreDelta = Math.floor(scoreDelta * 1.5);
     const pcBonus = isPerfectClear ? perfectClearBonus(rows.length, this._level) : 0;
     scoreDelta += pcBonus;
+    // Combo score bonus (plan §12 M4): +50 × (combo step) × level.
+    // The first clear of a streak has step 0 → no combo bonus; second
+    // gets +50 × level; third +100 × level; etc.
+    if (this._combo > 1) {
+      scoreDelta += 50 * (this._combo - 1) * this._level;
+    }
 
     this._score += scoreDelta;
     this._lines += rows.length;
@@ -868,6 +905,7 @@ export class Game {
     this._lastAction    = null;
     this._lastKickIndex = -1;
     this._b2b           = 0;
+    this._combo         = 0;
 
     this.spawnPiece();
   }
@@ -918,6 +956,7 @@ export class Game {
       lastAction:     this._lastAction,
       lastKickIndex:  this._lastKickIndex,
       b2b:            this._b2b,
+      combo:          this._combo,
       rngState: (this._rng && typeof this._rng.state === 'number') ? this._rng.state : null,
     };
   }
@@ -969,6 +1008,7 @@ export class Game {
       : null;
     this._lastKickIndex  = (typeof blob.lastKickIndex === 'number') ? (blob.lastKickIndex | 0) : -1;
     this._b2b            = (typeof blob.b2b === 'number') ? Math.max(0, blob.b2b | 0) : 0;
+    this._combo          = (typeof blob.combo === 'number') ? Math.max(0, blob.combo | 0) : 0;
     if (typeof blob.rngState === 'number'
         && this._rng
         && typeof this._rng.setState === 'function') {
