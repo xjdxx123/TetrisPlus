@@ -49,6 +49,15 @@ const GARBAGE_COLOR = 0x808080;
  * @property {(name:string, arg?:any) => void} [playSfx]
  *   Optional — `move` / `rotate` / `clear` cues. No-op if omitted (so
  *   tests / future headless replay viewers can construct without audio).
+ * @property {boolean} [noLockMeshes]
+ *   Optional — when true, BoardView skips creating static cubes on
+ *   PIECE_LOCK and skips processing LINE_CLEAR / GARBAGE_APPLIED /
+ *   ZEN_RESCUE events that would mutate the cellMeshes registry.
+ *   Used by Pure Physics mode (plan v2 §2.3 F+) where `PhysicsBoardView`
+ *   owns the locked-cube rendering — bodies move under gravity, so the
+ *   grid-locked rendering would be incorrect. Active piece + ghost
+ *   rendering still happens; only the post-lock cube management is
+ *   suppressed. Default false.
  */
 
 export class BoardView {
@@ -76,6 +85,7 @@ export class BoardView {
     this._animateCubeTo = opts.animateCubeTo;
     this._startLockAnim = opts.startLockAnim;
     this._playSfx       = opts.playSfx || (() => {});
+    this._noLockMeshes  = !!opts.noLockMeshes;
 
     // THREE groups — public so the host can read pieceGroup.position to
     // apply visual inertia without going through this module. They're
@@ -100,10 +110,17 @@ export class BoardView {
     this._unsubs.push(this._bus.on(EVENTS.PIECE_MOVE,      (e) => this._onPieceMove(e)));
     this._unsubs.push(this._bus.on(EVENTS.PIECE_ROTATE,    () => this._onPieceRotate()));
     this._unsubs.push(this._bus.on(EVENTS.PIECE_SPAWN,     () => this._onPieceSpawn()));
-    this._unsubs.push(this._bus.on(EVENTS.PIECE_LOCK,      (e) => this._onPieceLock(e)));
-    this._unsubs.push(this._bus.on(EVENTS.LINE_CLEAR,      (e) => this._onLineClear(e)));
-    this._unsubs.push(this._bus.on(EVENTS.GARBAGE_APPLIED, (e) => this._onGarbageApplied(e)));
-    this._unsubs.push(this._bus.on(EVENTS.ZEN_RESCUE,      (e) => this._onZenRescue(e)));
+    // Lock + line-clear + garbage + rescue handlers are gated by
+    // `noLockMeshes` — physics mode (plan v2 §2.3 F+) replaces them
+    // with `PhysicsBoardView`, which renders cubes from physics body
+    // positions instead of the grid. Active piece + ghost rendering
+    // remains via the unconditional handlers above.
+    if (!this._noLockMeshes) {
+      this._unsubs.push(this._bus.on(EVENTS.PIECE_LOCK,      (e) => this._onPieceLock(e)));
+      this._unsubs.push(this._bus.on(EVENTS.LINE_CLEAR,      (e) => this._onLineClear(e)));
+      this._unsubs.push(this._bus.on(EVENTS.GARBAGE_APPLIED, (e) => this._onGarbageApplied(e)));
+      this._unsubs.push(this._bus.on(EVENTS.ZEN_RESCUE,      (e) => this._onZenRescue(e)));
+    }
   }
 
   // ─── Public API ──────────────────────────────────────────────────────

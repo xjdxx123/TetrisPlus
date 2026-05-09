@@ -83,6 +83,13 @@ export class PhysicsSession {
     // Cumulative counter for HUDs. Resets on stop().
     this._layersClearedTotal = 0;
     this._cubesClearedTotal  = 0;
+
+    // Per-body color tracking (plan v2 §2.3 F+). The PhysicsWorld is
+    // render-agnostic — it tracks bodies but not colors. PhysicsView
+    // queries this map to decide what color to paint each cube. Cleared
+    // bodies are removed from the map in `tick()` to avoid leaks.
+    /** @type {Map<number, number>} */
+    this._bodyColors = new Map();
   }
 
   // ─── Public read-only accessors ──────────────────────────────────────
@@ -94,6 +101,19 @@ export class PhysicsSession {
   get awakeCount()         { return this._world ? this._world.awakeCount : 0; }
   get highestY()           { return this._world ? this._world.highestY : -Infinity; }
   get isStarted()          { return this._world != null; }
+
+  /**
+   * Per-body color lookup (plan v2 §2.3 F+). Returns the color the body
+   * was added with, or null if the body has been removed (or never
+   * existed). PhysicsView queries this once per new body it spots in
+   * `world.getPositions()`.
+   *
+   * @param {number} bodyId
+   * @returns {number | null}  0xRRGGBB hex, or null when unknown
+   */
+  getBodyColor(bodyId) {
+    return this._bodyColors.has(bodyId) ? this._bodyColors.get(bodyId) : null;
+  }
 
   // ─── Lifecycle ───────────────────────────────────────────────────────
 
@@ -130,6 +150,7 @@ export class PhysicsSession {
     }
     this._layersClearedTotal = 0;
     this._cubesClearedTotal  = 0;
+    this._bodyColors.clear();
   }
 
   // ─── Per-frame tick ──────────────────────────────────────────────────
@@ -173,6 +194,9 @@ export class PhysicsSession {
       for (const idx of layer.cubeIndices) removedIds.add(positions[idx].bodyId);
     }
     this._world.removeBodies(removedIds);
+    // Drop color metadata for removed bodies so the map doesn't leak
+    // unbounded over the run.
+    for (const id of removedIds) this._bodyColors.delete(id);
     // Shift down: wake settled bodies so they fall into the gaps
     // instead of floating where the cleared layer used to be.
     this._world.wakeAll();
@@ -230,9 +254,11 @@ export class PhysicsSession {
     //       suppress BoardView's static cube creation in physics mode).
     //   (b) Game.clearLines never fires (fullRows always 0 in physics
     //       since the cells are erased before the grid path runs).
+    const lockColor = (typeof e.color === 'number') ? (e.color | 0) : 0xffffff;
     for (const { col, row } of e.cells) {
       const w = this._cellToWorld(col, row);
-      this._world.addBody(w.x, w.y, w.z);
+      const bodyId = this._world.addBody(w.x, w.y, w.z);
+      this._bodyColors.set(bodyId, lockColor);
       // Erase from Game's board. This is safe — Game already counted
       // fullRows BEFORE emitting PIECE_LOCK, so altering the board
       // here doesn't affect that count, and clearLines's row-removal

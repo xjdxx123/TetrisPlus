@@ -1,6 +1,6 @@
 # Tetris+ Gameplay Plan v2 — Post-§12 Forward Roadmap
 
-**Date:** 2026-05-09 · **Test surface:** 804 tests across 47 files (all green) ·
+**Date:** 2026-05-09 · **Test surface:** 900 tests across 52 files (all green) ·
 **Predecessor:** `document/archived/plan_gameplay_1.md` (preserved for the
 full design rationale, mode-by-mode specs, and shipped-implementation
 notes). v2 picks up where v1 left off.
@@ -41,6 +41,7 @@ specified them; v2 won't redesign these, only build on top.
 | **§2.3 Pure Physics — Phases C+D** | v2 §2.3 | `app/physics-session.js` integration glue: PhysicsSession class wraps Game + PhysicsWorld + detectLayers. Subscribes to PIECE_LOCK (cell→body, board-erase). Per-tick: world.step() → detectLayers → removeBodies → emit `PHYSICS_LAYER_CLEARED` (new event). Cumulative counters for HUD (layersClearedTotal, cubesClearedTotal). 18 new tests against real Rapier. |
 | **§2.3 Pure Physics — Phase E** | v2 §2.3 | `physics` registered in `Mode.AVAILABLE` / LABELS / DESCRIPTIONS / CONFIG (with `isExperimental: true` flag). New `physics` slot in `STATS_DEFAULTS.modeBests` (`bestLayersCleared` / `totalLayersCleared`). Custom `updateBest` hook on the rules pack. New `ui/physics-badge.js` HUD module: live Cubes / Awake / Layers metrics with violet pulse on each PHYSICS_LAYER_CLEARED. Stats-tab formatter extended: physics primary = score; secondary = "best run N · M total layers". |
 | **§2.3 Pure Physics — Phase F** | v2 §2.3 | `vfx/director.js` extended with a PHYSICS_LAYER_CLEARED subscriber: per-layer violet shockwave at the layer's centerY, sfx('physics-layer'), camera shake scaling with simultaneous count (0.3 / 0.5 / 0.7). Skips silently when host lacks lineClearLayers / sfx / shake wiring. 4 new tests. |
+| **§2.3 Pure Physics — Phase F+** | v2 §2.3 | Render integration: `BoardView` gains `noLockMeshes` opt that gates PIECE_LOCK / LINE_CLEAR / GARBAGE_APPLIED / ZEN_RESCUE handlers. New `world/physics-board-view.js` parallel renderer that snapshots `world.getPositions()` per frame, creates a cube mesh per new body (color from `session.getBodyColor(id)`), updates positions to match physics, and disposes meshes for removed bodies (with optional shatter). PhysicsSession extended with `_bodyColors` map + `getBodyColor(id)` accessor. main.js Mode.start gains a `physics` branch that lazy-loads Rapier via `session.start()`, constructs BoardView with `noLockMeshes:true`, mounts PhysicsBoardView alongside, and wires `session.tick()` + `physicsView.tick()` into the animate loop. 16 new tests (5 PhysicsSession color tracking + 11 PhysicsBoardView). |
 
 ### 0.2 Architectural property to preserve
 
@@ -279,7 +280,8 @@ bonus possible).
 | **C+D — Host bridge + layer detection** | `app/physics-session.js`: PIECE_LOCK → addBody, per-tick step + detectLayers + emit PHYSICS_LAYER_CLEARED, cumulative HUD counters | ✅ shipped | 1.5 days |
 | **E — Mode integration + HUD** | physics in Mode.AVAILABLE, storage slot, ui/physics-badge.js, mode-stats formatter | ✅ shipped | ½ day |
 | **F — VFX integration (recipe)** | director.js subscriber: per-layer violet shockwave + sfx + camera shake on PHYSICS_LAYER_CLEARED | ✅ shipped | ½ day |
-| F+ — VFX polish (deferred) | per-collision dust on Rapier contact events; body-position-aware shatter on layer clear; render cubes from physics positions (vs. grid positions) — needs main.js host integration that disables BoardView's static cubes for physics mode | open | 1 day |
+| **F+ — Render integration** | BoardView `noLockMeshes` opt; `world/physics-board-view.js` parallel renderer; PhysicsSession color tracking; main.js host wiring (Mode.start branch + animate-loop tick) | ✅ shipped | 1 day |
+| F++ — Per-collision dust (deferred) | Rapier contact events → vfx/emitters/dust spawn at impact points. Cosmetic polish; not gating any other work. | open | ½ day |
 
 **Phase A — what shipped (`<TBD-sha>`):**
 - `gameplay/experimental/physics/rules.js` — `buildPhysicsRules()` with
@@ -337,32 +339,61 @@ bonus possible).
   mocks); tests use `toBeCloseTo` for position assertions to
   accommodate Rapier's semi-implicit Euler integration.
 
-**What's left (F+ deferred):**
+**Phase F+ — what shipped:**
 
-The simulation is fully wired and the player-facing surface (mode
-selector, HUD, stats persistence, layer-clear callouts) is in
-place. What remains is **render integration**: in physics mode,
-locked pieces should render at their *body* positions (which drift
-under gravity), not their *grid* positions. Currently the existing
-BoardView's PIECE_LOCK handler creates cubes at grid coordinates,
-which never move — so the physics simulation runs invisibly under
-the static grid cubes.
+The render integration that makes physics mode visually match the
+simulation. Selecting physics from the Mode tab now produces a
+playable experience where locked cubes drift under gravity, settle
+in wedges, and shatter when their layer detects.
 
-The deferred F+ work is a `noLockMeshes` opt on BoardView (skip
-static cube creation in physics mode) plus a parallel
-"physics-cube-renderer" that takes `world.getPositions()` snapshots
-and updates a cube-mesh's transform per frame. Per-collision dust
-emission (Rapier contact events → vfx/emitters/dust spawn) is a
-further polish item on top.
+- **`world/board-view.js`** gains a `noLockMeshes: true` opt that
+  gates the PIECE_LOCK / LINE_CLEAR / GARBAGE_APPLIED / ZEN_RESCUE
+  handlers. Active piece + ghost rendering still happens (the
+  falling tetromino is grid-driven before lock); only the
+  post-lock cube management is suppressed. Other modes pass the
+  default `false` and behave exactly as before.
 
-**Host wiring still needed:** `Mode.start({key:'physics'})` should
-do `await createPhysicsWorld()` and `await session.start()`; the
-animate loop should call `session.tick()`; `Mode.stop` should
-`session.stop()`. The session module is testable in isolation
-(see `physics-session.test.js`); host integration is a focused
-~50-line patch in `app/main.js` once F+ is also planned (otherwise
-the player picks physics, plays "regular Tetris that happens to
-have a hidden physics simulation", which is confusing).
+- **`world/physics-board-view.js`** (new) — parallel renderer that
+  reactively follows the PhysicsWorld:
+  - Per-tick snapshot of `world.getPositions()`.
+  - For each body without a mesh: create one via `makeCube(color)`
+    where color comes from `session.getBodyColor(id)`. Adds it to
+    the view's `stackGroup`.
+  - For each body with a mesh: copy `(x, y, z)` through the
+    host's `cellToWorld` bake (linear; works on continuous coords)
+    into `mesh.position`.
+  - For each mesh whose bodyId is no longer in the snapshot:
+    remove from stackGroup, optionally call `shatter(mesh)` for
+    visual feedback.
+
+- **`app/physics-session.js`** extended with a `Map<bodyId, color>`
+  + `getBodyColor(id)` accessor. PIECE_LOCK handler stashes the
+  payload color per body it adds; `tick()` deletes entries on
+  removeBodies; `stop()` clears the map. Defensive default of
+  `0xffffff` when payload omits color.
+
+- **`app/main.js`** Mode.start handler gains a `physics` branch
+  between the `versus` and solo paths:
+  - Constructs Game + BoardView (with `noLockMeshes: true`).
+  - Constructs PhysicsSession + PhysicsBoardView, parented to the
+    same `caseGroup` as BoardView.
+  - Awaits `session.start()` (lazy-loads Rapier wasm — first run
+    pays ~50ms, subsequent runs hit the loader cache).
+  - On any subsequent Mode.start: tears down via `physicsView.dispose()`
+    + `physicsSession.stop()` before constructing the next session.
+  - Animate loop: when physics is active, calls `session.tick()`
+    then `physicsView.tick()` BEFORE `game.tick()`, so the rules
+    pack's `endCondition` reads `physicsHighestY` from the freshest
+    snapshot.
+
+16 new tests across the two new modules (5 PhysicsSession color
+tracking + 11 PhysicsBoardView reconciliation). All against real
+Rapier; pure-Node THREE meshes via stub factory.
+
+**What remains (F++):** per-collision dust emission. Rapier exposes
+contact events; the host can subscribe and spawn dust particles at
+the impact world position. Cosmetic polish; doesn't gate any other
+chapter. ~½ day; documented as F++ in the phase table above.
 
 ---
 

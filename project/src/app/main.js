@@ -63,6 +63,8 @@ import { recordEndOfRun } from '../gameplay/end-of-run.js';
 import { pickHoleColumn } from '../gameplay/garbage.js';
 import { Game } from '../gameplay/game.js';
 import { BoardView } from '../world/board-view.js';
+import { PhysicsBoardView } from '../world/physics-board-view.js';
+import { PhysicsSession } from './physics-session.js';
 import { VersusSession } from './versus.js';
 
 // =============================================================
@@ -1718,6 +1720,12 @@ let board = Array.from({ length: ROWS }, () => Array(COLS).fill(null));
 let game           = null;
 let boardView      = null;
 let versusSession  = null;
+// Pure Physics session (plan v2 §2.3 F+). Lazily constructed when the
+// player picks physics mode — non-physics modes don't pay the Rapier
+// wasm bundle cost. Set during Mode.start({key:'physics'}); torn down
+// on the next Mode.start (regardless of key) and on Mode.stop.
+let physicsSession = null;
+let physicsView    = null;
 
 // Additional bus subscriptions on the opponent's *private* bus
 // (`versusSession.gameP2.bus`) for visual feedback that the global-bus
@@ -2747,9 +2755,13 @@ Mode._wireLifecycle({
     // idempotent so the double-call is safe.
     _disposeOpponentViz();
     if (versusSession) versusSession.dispose();
+    if (physicsView)   physicsView.dispose();
+    if (physicsSession) physicsSession.stop();
     if (boardView)     boardView.dispose();
     if (game)          game.dispose();
     versusSession = null;
+    physicsView    = null;
+    physicsSession = null;
     _endRunInvoked = false; // reset host-side end-run guard
 
     if (key === 'versus') {
@@ -2814,6 +2826,62 @@ Mode._wireLifecycle({
       versusSession.start();
       if (restart) resetRunState();
       else         syncFromGame();
+    } else if (key === 'physics') {
+      // Pure Physics (plan v2 §2.3 F+). The grid path is bypassed for
+      // locked cubes — PhysicsSession + PhysicsBoardView own that
+      // rendering. BoardView is constructed with `noLockMeshes: true`
+      // so it still handles the active piece + ghost (which are still
+      // grid-driven before lock) but skips PIECE_LOCK / LINE_CLEAR /
+      // GARBAGE_APPLIED / ZEN_RESCUE handlers.
+      game = new Game({
+        rules,
+        bus,
+        side: 'player',
+        onEndRun: ({ reason, winner }) => endRun({ reason, winner }),
+      });
+      boardView = new BoardView({
+        game, bus,
+        parent: caseGroup,
+        side: 'player',
+        cols: COLS, rows: ROWS, depth: DEPTH,
+        cellToWorld, makeCube, shatter, animateCubeTo, startLockAnim,
+        playSfx,
+        noLockMeshes: true,
+      });
+      physicsSession = new PhysicsSession({
+        bus, game, side: 'player',
+        cols: COLS, rows: ROWS,
+        // cellToWorld for physics keeps grid coords (col, row, 0). The
+        // `cellToWorld` for the renderer below converts to scene world.
+      });
+      physicsView = new PhysicsBoardView({
+        session: physicsSession,
+        parent: caseGroup,
+        makeCube,
+        cellToWorld,
+        side: 'player',
+        shatter,
+      });
+      if (typeof versusBot !== 'undefined') versusBot.reset();
+      _detachOpponentChrome();
+      playerLabelObj.visible   = false;
+      opponentLabelObj.visible = false;
+      exitVersusCamera();
+      // Lazy-load Rapier + start the session. The first physics-mode
+      // run pays the wasm decode cost (~50ms); subsequent runs in the
+      // same session resolve from cache. We kick spawnPiece off after
+      // the await so the active piece doesn't try to lock against an
+      // un-initialized world.
+      physicsSession.start().then(() => {
+        if (restart) {
+          resetRunState();
+        } else {
+          game.spawnPiece();
+          syncFromGame();
+        }
+      }).catch(err => {
+        console.warn('[physics] start failed:', err);
+      });
     } else {
       // Solo modes — single Game + single BoardView, mounted directly
       // under caseGroup at origin (the legacy layout).
@@ -3707,6 +3775,17 @@ function animate(dt, envTime) {
     const dtMs = dtGame * 1000;
     versusBot.tick(dtMs);
     if (versusSession) versusSession.tickOpponent(dtMs);
+    // Pure Physics (plan v2 §2.3 F+) — step the world, run layer
+    // detection, then sync the parallel cube-mesh renderer. Order
+    // matters: session.tick() may remove bodies (layer cleared);
+    // physicsView.tick() then prunes the meshes that lost their
+    // bodies. Done BEFORE game.tick() so the rules pack's
+    // endCondition (which reads physicsHighestY via the rules-state
+    // augment) sees the latest body positions.
+    if (physicsSession && physicsSession.isStarted) {
+      physicsSession.tick();
+      if (physicsView) physicsView.tick();
+    }
     const tickResult = game ? game.tick(dtMs, { softDrop: !!keyState.down }) : null;
     syncFromGame();
     if (tickResult && tickResult.reason) {

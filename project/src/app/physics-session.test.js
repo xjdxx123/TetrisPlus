@@ -90,6 +90,54 @@ describe('PhysicsSession — PIECE_LOCK bridge', () => {
     session.stop();
   });
 
+  it('records the lock color per body for the renderer (plan v2 F+)', async () => {
+    const { bus, session } = makeFixture();
+    await session.start();
+    bus.emit(EVENTS.PIECE_LOCK, {
+      cells: [{ col: 0, row: 0 }, { col: 1, row: 0 }],
+      color: 0x6cf0ff, side: 'player',
+    });
+    // Body IDs are monotonic from PhysicsWorld; first two are 1 and 2.
+    const positions = session.world.getPositions();
+    expect(positions).toHaveLength(2);
+    for (const { bodyId } of positions) {
+      expect(session.getBodyColor(bodyId)).toBe(0x6cf0ff);
+    }
+    session.stop();
+  });
+
+  it('getBodyColor returns null for removed / unknown ids', async () => {
+    const { bus, session } = makeFixture();
+    await session.start();
+    bus.emit(EVENTS.PIECE_LOCK, { cells: [{ col: 0, row: 0 }], color: 0xff0000, side: 'player' });
+    const id = session.world.getPositions()[0].bodyId;
+    expect(session.getBodyColor(id)).toBe(0xff0000);
+    expect(session.getBodyColor(999)).toBeNull();
+    session.stop();
+  });
+
+  it('lock color defaults to white when payload omits color (defensive)', async () => {
+    const { bus, session } = makeFixture();
+    await session.start();
+    bus.emit(EVENTS.PIECE_LOCK, { cells: [{ col: 0, row: 0 }], side: 'player' });
+    const id = session.world.getPositions()[0].bodyId;
+    expect(session.getBodyColor(id)).toBe(0xffffff);
+    session.stop();
+  });
+
+  it('clears body colors on layer-clear so the map doesn\'t leak', async () => {
+    const { bus, session } = makeFixture();
+    await session.start();
+    const cells = [];
+    for (let col = 0; col < 10; col++) cells.push({ col, row: 0 });
+    bus.emit(EVENTS.PIECE_LOCK, { cells, color: 0x123456, side: 'player' });
+    const ids = session.world.getPositions().map(p => p.bodyId);
+    expect(ids.every(id => session.getBodyColor(id) === 0x123456)).toBe(true);
+    session.tick();
+    expect(ids.every(id => session.getBodyColor(id) === null)).toBe(true);
+    session.stop();
+  });
+
   it('erases each locked cell from the game board (so clearLines stays a no-op)', async () => {
     const { bus, game, session } = makeFixture();
     // Pre-fill row 5 to confirm the erase wipes it.
