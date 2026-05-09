@@ -57,7 +57,7 @@ export function buildUltraRules(opts = {}) {
 
   return Object.freeze({
     key:               'ultra',
-    lineScore:         (rowCount, level) => lineClearScore(rowCount, level),
+    lineScore:         (rowCount, level, clearType) => lineClearScore(rowCount, level, clearType),
     softDropPerCell:   SOFT_DROP_POINTS_PER_CELL,
     hardDropPerCell:   HARD_DROP_POINTS_PER_CELL,
     fallIntervalSec:   (level) => DEFAULT_FALL_INTERVAL(level, gravityScalar()),

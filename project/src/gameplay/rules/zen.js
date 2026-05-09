@@ -44,7 +44,7 @@ export function buildZenRules(opts = {}) {
 
   return Object.freeze({
     key:               'zen',
-    lineScore:         (rowCount, level) => lineClearScore(rowCount, level),
+    lineScore:         (rowCount, level, clearType) => lineClearScore(rowCount, level, clearType),
     softDropPerCell:   SOFT_DROP_POINTS_PER_CELL,
     hardDropPerCell:   HARD_DROP_POINTS_PER_CELL,
     fallIntervalSec:   (level) => ZEN_FALL_INTERVAL(level, gravityScalar()),

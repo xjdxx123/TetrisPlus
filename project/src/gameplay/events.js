@@ -24,11 +24,19 @@ export const EVENTS = Object.freeze({
   SOFT_DROP:     'SOFT_DROP',     // (no payload)
 
   // Line clears & scoring
-  LINE_CLEAR:    'LINE_CLEAR',    // { rows: number[], simultaneous: 1..4, colors: hex[], scoreDelta }
+  LINE_CLEAR:    'LINE_CLEAR',    // { rows: number[], simultaneous: 1..4, colors: hex[], scoreDelta, clearType: 'normal'|'tspin'|'mini' }
   COMBO_START:   'COMBO_START',   // { count }   (reserved for future)
   COMBO_END:     'COMBO_END',     // { count }   (reserved for future)
   SCORE_DELTA:   'SCORE_DELTA',   // { delta, total, source: 'soft-drop'|'hard-drop'|'line-clear' }
   LEVEL_UP:      'LEVEL_UP',      // { level }
+
+  // Modern-rules — T-spin classification (plan §12 M2). Fired by
+  // Game.lockPiece when a T piece's last successful action was a
+  // rotation and ≥3 of the 4 pivot-corner cells are filled. `kind`
+  // is 'tspin' (regular) or 'mini'; `cleared` is 0..3 (a 0-line T-spin
+  // still emits — the bonus score applies). Carries `side` per the
+  // §3.7 dual-board routing convention.
+  T_SPIN:        'T_SPIN',        // { kind: 'tspin'|'mini', cleared: 0..3, score, side }
 
   // Terminal — fires on topout. The director still listens to GAME_OVER
   // for the cascade visuals; MODE_END is the universal terminal that

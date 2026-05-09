@@ -1537,7 +1537,7 @@ each pack chooses whether to consult `_b2b` for the multiplier
 | Phase | Status | Shipped |
 |---|---|---|
 | M1 — SRS wall kicks | ✅ | `gameplay/rotation.js` rewritten with per-piece tables: `getKickOffsets(pieceKey, fromRot, toRot)` returns the 5-test SRS sequence (1 for O). Game.tryRotate walks 2D `{dCol, dRow}` offsets and emits `PIECE_ROTATE` with `kickIndex: 0..4` + `dCol`/`dRow`. Legacy `KICK_OFFSETS` 1D export retained as a deprecated alias. New Game state `_lastAction` (`'rotation' / 'move' / 'drop' / null`) + `_lastKickIndex` (-1 / 0..4) wired through tryMove/tryRotate/softDrop/hardDrop and serialize/restore for downstream T-spin detection (M2). 14 new rotation tests + 12 new game tests covering kickIndex propagation, lastAction tagging, serialize round-trip. |
-| M2 — T-spin detection + scoring | ❌ | — |
+| M2 — T-spin detection + scoring | ✅ | New `gameplay/t-spin.js` pure detector (`detectTSpin(piece, board, lastAction, kickIndex, cols, rows) → 'none' \| 'tspin' \| 'mini'`) implementing the 3-corner rule with TST-kick (index-4) upgrade. `scoring.js#lineClearScore` extended with optional `clearType` param ('tspin' / 'mini' / 'normal'); each rules pack forwards `clearType` to the score table. Game.lockPiece detects → emits `T_SPIN` ({kind, cleared, score, side}) before clearLines, and pays the no-clear bonus directly when `cleared === 0`. Game.clearLines threads `clearType` through to LINE_CLEAR payload + lineScore. PIECE_LOCK gains `tspinKind` for HUD/audio routing. 17 detector tests + 7 scoring-table tests + 6 game-flow tests covering Single/Mini/no-clear/Sprint-zero. |
 | M3 — B2B chain + Perfect Clear | ❌ | — |
 | M4 — Modern combo table | ❌ | — |
 | M5 — Garbage cancellation + spawn-delay window | ❌ | — |

@@ -33,3 +33,50 @@ describe('scoring', () => {
     expect(HARD_DROP_POINTS_PER_CELL).toBe(2);
   });
 });
+
+// ─── M2: T-spin scoring tables (plan §12.5 M2) ────────────────────────
+
+describe('scoring — T-spin clearType', () => {
+  it('T-spin no-clear (0 rows) awards 400 × level', () => {
+    expect(lineClearScore(0, 1, 'tspin')).toBe(400);
+    expect(lineClearScore(0, 5, 'tspin')).toBe(2000);
+  });
+
+  it('T-spin Single = 800 × level', () => {
+    expect(lineClearScore(1, 1, 'tspin')).toBe(800);
+    expect(lineClearScore(1, 7, 'tspin')).toBe(5600);
+  });
+
+  it('T-spin Double = 1200 × level', () => {
+    expect(lineClearScore(2, 1, 'tspin')).toBe(1200);
+    expect(lineClearScore(2, 3, 'tspin')).toBe(3600);
+  });
+
+  it('T-spin Triple = 1600 × level', () => {
+    expect(lineClearScore(3, 1, 'tspin')).toBe(1600);
+    expect(lineClearScore(3, 4, 'tspin')).toBe(6400);
+  });
+
+  it('T-spin Mini no-clear = 100 × level', () => {
+    expect(lineClearScore(0, 1, 'mini')).toBe(100);
+    expect(lineClearScore(0, 9, 'mini')).toBe(900);
+  });
+
+  it('T-spin Mini Single = 200 × level', () => {
+    expect(lineClearScore(1, 1, 'mini')).toBe(200);
+    expect(lineClearScore(1, 6, 'mini')).toBe(1200);
+  });
+
+  it('Mini >Single falls back to regular T-spin table (defensive)', () => {
+    // Mini Double / Triple don't exist in the guideline; the function
+    // upgrades to the regular T-spin table rather than silently returning
+    // zero or out-of-bounds.
+    expect(lineClearScore(2, 1, 'mini')).toBe(1200); // = T-spin Double
+    expect(lineClearScore(3, 1, 'mini')).toBe(1600); // = T-spin Triple
+  });
+
+  it('clearType "normal" / undefined uses the standard table', () => {
+    expect(lineClearScore(4, 1, 'normal')).toBe(800);
+    expect(lineClearScore(4, 1)).toBe(800);
+  });
+});

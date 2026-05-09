@@ -54,9 +54,10 @@ import { buildVersusRules }   from './rules/versus.js';
  * @typedef {Object} Rules
  * @property {string}   key
  *
- * @property {(rowCount: number, level: number) => number} lineScore
+ * @property {(rowCount: number, level: number, clearType?: 'normal'|'tspin'|'mini') => number} lineScore
  *   Score awarded on a line clear of `rowCount` rows at the given level.
- *   Default: standard `lineClearScore`.
+ *   Optional `clearType` selects between standard and T-spin tables
+ *   (plan §12 M2). Default: standard `lineClearScore`.
  *
  * @property {number}   softDropPerCell    Default 1 (one point per soft-drop tick).
  * @property {number}   hardDropPerCell    Default 2 (two points per hard-drop cell).
@@ -112,7 +113,7 @@ function buildClassicRules(opts = {}) {
   const gravityScalar = opts.gravityScalar || (() => 1.0);
   return Object.freeze({
     key:               'classic',
-    lineScore:         (rowCount, level) => lineClearScore(rowCount, level),
+    lineScore:         (rowCount, level, clearType) => lineClearScore(rowCount, level, clearType),
     softDropPerCell:   SOFT_DROP_POINTS_PER_CELL,
     hardDropPerCell:   HARD_DROP_POINTS_PER_CELL,
     fallIntervalSec:   (level) => DEFAULT_FALL_INTERVAL(level, gravityScalar()),

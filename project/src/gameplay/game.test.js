@@ -971,6 +971,132 @@ describe('Game — _lastAction / _lastKickIndex tracking (plan §12.3)', () => {
   });
 });
 
+// ─── M2: T-spin detection in lockPiece (plan §12.5) ─────────────────
+
+describe('Game — T-spin lockPiece flow (plan §12.5 M2)', () => {
+  // Helpers — block a board cell with an arbitrary garbage color.
+  function blk(game, c, r) { game.board[r][c] = 0xff0000; }
+
+  it('T-spin Single emits T_SPIN with kind=tspin and applies 800×level', () => {
+    const { game, bus } = makeGame();
+    // Build a T-spin Single setup. The T's body in rot 2 lands at
+    // (anchor.row + 2), so fill row 2 around it. Anchor at (3, 0):
+    //   pivot (rot 2) = (col=4, row=2)
+    //   body cells = (3,2), (4,2), (5,2); stem = (4,1)
+    //   corners: TL=(3,3), TR=(5,3), BL=(3,1), BR=(5,1)
+    //
+    //  row 3: # . # . . . . . . .       TL filled → 3rd corner
+    //  row 2: # # # . . . # # # #       row 2 filled except cols 3-5
+    //  row 1: . . . # . # . . . .       BL+BR filled (fronts for rot 2)
+    //  row 0: . . . . . . . . . .       (T floats; we lock from rot)
+    //
+    // Pre-rotation pose (rot 1) cells: (4,3), (4,2), (5,2), (4,1) — all
+    // free. After CW rotation (kick 0): (3,2), (4,2), (5,2), (4,1) — also
+    // free. row 2 fills on lock → T-spin Single.
+
+    for (let c = 0; c < game.cols; c++) {
+      if (c < 3 || c > 5) blk(game, c, 2);
+    }
+    blk(game, 3, 1); // BL — front
+    blk(game, 5, 1); // BR — front
+    blk(game, 3, 3); // TL — 3rd corner
+
+    game._activePiece = { key: 'T', col: 3, row: 0, rot: 1, color: PIECE_COLORS.T };
+    const rotResult = game.tryRotate(1);
+    expect(rotResult.rotated).toBe(true);
+    expect(game._lastAction).toBe('rotation');
+
+    const cap = captureEvents(bus, [EVENTS.T_SPIN, EVENTS.LINE_CLEAR, EVENTS.SCORE_DELTA]);
+    game.lockPiece();
+    cap.dispose();
+
+    const tspin = cap.events.find(e => e.topic === EVENTS.T_SPIN);
+    expect(tspin).toBeTruthy();
+    expect(tspin.payload.kind).toBe('tspin');
+    expect(tspin.payload.cleared).toBe(1);
+    expect(tspin.payload.score).toBe(800); // 800 × level 1
+    const lineClear = cap.events.find(e => e.topic === EVENTS.LINE_CLEAR);
+    expect(lineClear).toBeTruthy();
+    expect(lineClear.payload.clearType).toBe('tspin');
+    expect(lineClear.payload.scoreDelta).toBe(800);
+  });
+
+  it('T-spin no-clear emits T_SPIN and pays the no-clear bonus (400 × level)', () => {
+    const { game, bus } = makeGame();
+    // Set up a 3-corner T-spin with no full row. T at (3, 5) rot 0:
+    // pivot = (4, 7). Corners: TL=(3,8), TR=(5,8), BL=(3,6), BR=(5,6).
+    blk(game, 3, 8); blk(game, 5, 8); blk(game, 3, 6);
+    game._activePiece = { key: 'T', col: 3, row: 5, rot: 3, color: PIECE_COLORS.T };
+    game.tryRotate(1); // rot 3 → rot 0
+    expect(game._lastAction).toBe('rotation');
+
+    const startScore = game.score;
+    const cap = captureEvents(bus, [EVENTS.T_SPIN, EVENTS.LINE_CLEAR, EVENTS.SCORE_DELTA]);
+    game.lockPiece();
+    cap.dispose();
+
+    const tspin = cap.events.find(e => e.topic === EVENTS.T_SPIN);
+    expect(tspin).toBeTruthy();
+    expect(tspin.payload.kind).toBe('tspin');
+    expect(tspin.payload.cleared).toBe(0);
+    expect(tspin.payload.score).toBe(400);
+
+    expect(cap.events.find(e => e.topic === EVENTS.LINE_CLEAR)).toBeFalsy();
+    expect(game.score).toBe(startScore + 400);
+    const sd = cap.events.find(e => e.topic === EVENTS.SCORE_DELTA && e.payload.source === 'line-clear');
+    expect(sd).toBeTruthy();
+    expect(sd.payload.delta).toBe(400);
+  });
+
+  it('non-T piece never emits T_SPIN', () => {
+    const { game, bus } = makeGame();
+    game.spawnPiece('L');
+    game.tryRotate(1);
+    const cap = captureEvents(bus, [EVENTS.T_SPIN]);
+    game.hardDrop();
+    game.lockPiece();
+    cap.dispose();
+    expect(cap.events.length).toBe(0);
+  });
+
+  it('T placed by drop (no rotation) never emits T_SPIN', () => {
+    const { game, bus } = makeGame();
+    game.spawnPiece('T');
+    game.hardDrop();
+    expect(game._lastAction).toBe('drop');
+    const cap = captureEvents(bus, [EVENTS.T_SPIN]);
+    game.lockPiece();
+    cap.dispose();
+    expect(cap.events.length).toBe(0);
+  });
+
+  it('PIECE_LOCK payload includes tspinKind for HUD/audio routing', () => {
+    const { game, bus } = makeGame();
+    game.spawnPiece('T');
+    game.hardDrop();
+    const cap = captureEvents(bus, [EVENTS.PIECE_LOCK]);
+    game.lockPiece();
+    cap.dispose();
+    expect(cap.events[0].payload.tspinKind).toBe('none');
+  });
+
+  it('Sprint mode: T-spin score is 0 (lineScore: () => 0 still wins)', () => {
+    const bus = new EventBus({ replayBufferSize: 0, recorderSize: 0 });
+    const game = new Game({ rules: buildRules('sprint'), bus, rng: seededRng(1) });
+    function blk2(c, r) { game.board[r][c] = 0xff0000; }
+    blk2(3, 8); blk2(5, 8); blk2(3, 6);
+    game._activePiece = { key: 'T', col: 3, row: 5, rot: 3, color: PIECE_COLORS.T };
+    game.tryRotate(1);
+    const cap = captureEvents(bus, [EVENTS.T_SPIN]);
+    game.lockPiece();
+    cap.dispose();
+    const tspin = cap.events.find(e => e.topic === EVENTS.T_SPIN);
+    expect(tspin).toBeTruthy();
+    expect(tspin.payload.score).toBe(0); // sprint always-zero scoring
+    expect(game.score).toBe(0);
+  });
+});
+
 // ─── Side tag plumbing ────────────────────────────────────────────────
 
 describe('Game — side tag in event payloads', () => {

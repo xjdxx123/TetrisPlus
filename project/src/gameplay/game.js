@@ -24,6 +24,7 @@
 import { EVENTS } from './events.js';
 import { PIECES, PIECE_COLORS, PIECE_KEYS } from './pieces.js';
 import { getKickOffsets, nextRotation } from './rotation.js';
+import { detectTSpin } from './t-spin.js';
 import { createSeededRng } from '../shared/random/seeded.js';
 
 const DEFAULT_COLS = 10;
@@ -489,12 +490,27 @@ export class Game {
     if (!this._activePiece) return;
     const cells = this.getPieceCells(this._activePiece);
     const lockColor = this._activePiece.color;
-    for (const { col, row } of cells) {
+
+    // Topout pre-check — separated from the write loop so a topout
+    // doesn't leave a half-written piece in the board (the prior
+    // implementation wrote some cells then bailed mid-iteration).
+    for (const { row } of cells) {
       if (row >= this._rows) {
-        // Locked above the playfield — terminal condition.
         this._signalEndRun({ reason: 'topout' });
         return;
       }
+    }
+
+    // T-spin classification — performed BEFORE the piece's cells are
+    // written so the corner check sees the board state at lock time.
+    // Returns 'none' / 'tspin' / 'mini'. (See gameplay/t-spin.js.)
+    const tspinKind = detectTSpin(
+      this._activePiece, this._board,
+      this._lastAction, this._lastKickIndex,
+      this._cols, this._rows,
+    );
+
+    for (const { col, row } of cells) {
       this._board[row][col] = lockColor;
     }
 
@@ -508,12 +524,32 @@ export class Game {
 
     this._bus.emit(EVENTS.PIECE_LOCK, {
       cells: cells.map(({ col, row }) => ({ col, row })),
-      color:    lockColor,
-      side:     this._side,
-      cleared:  fullRows.length,
+      color:     lockColor,
+      side:      this._side,
+      cleared:   fullRows.length,
+      tspinKind, // 'none' / 'tspin' / 'mini' — host HUD reads this
     });
 
-    if (fullRows.length > 0) this.clearLines(fullRows);
+    // T-spin event + bonus score for the no-clear case. When lines are
+    // cleared, the score is paid via clearLines (which threads `tspinKind`
+    // through to rules.lineScore so the T-spin table is used).
+    if (tspinKind !== 'none') {
+      const tspinScore = this._rules.lineScore(fullRows.length, this._level, tspinKind);
+      this._bus.emit(EVENTS.T_SPIN, {
+        kind:    tspinKind,
+        cleared: fullRows.length,
+        score:   tspinScore,
+        side:    this._side,
+      });
+      if (fullRows.length === 0 && tspinScore > 0) {
+        this._score += tspinScore;
+        this._bus.emit(EVENTS.SCORE_DELTA, {
+          delta: tspinScore, total: this._score, source: 'line-clear', side: this._side,
+        });
+      }
+    }
+
+    if (fullRows.length > 0) this.clearLines(fullRows, tspinKind);
 
     // Garbage application — between piece locks, after any clears resolve.
     this._drainInboundGarbage();
@@ -525,10 +561,15 @@ export class Game {
    * Clear `rows` (board-space row indices), shift remaining stack down,
    * update score/lines/level, emit LINE_CLEAR/LEVEL_UP/SCORE_DELTA.
    * `rows` may arrive in any order — sorted top-down internally.
+   *
+   * `clearType` (default 'normal') threads through to `rules.lineScore`
+   * so T-spin clears use the modern table (plan §12 M2). Carried in
+   * the LINE_CLEAR payload for HUD subscribers that want to render
+   * T-spin-flavored celebrations.
    */
-  clearLines(rowsArg) {
+  clearLines(rowsArg, clearType = 'normal') {
     const rows = rowsArg.slice().sort((a, b) => b - a);
-    const scoreDelta = this._rules.lineScore(rows.length, this._level);
+    const scoreDelta = this._rules.lineScore(rows.length, this._level, clearType);
     this._score += scoreDelta;
     this._lines += rows.length;
     this._linesThisSession += rows.length;
@@ -556,6 +597,7 @@ export class Game {
       colors: rowColors.slice(),
       overallColor,
       scoreDelta,
+      clearType,
       side: this._side,
     });
 
