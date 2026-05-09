@@ -1,59 +1,99 @@
-// Pure Physics session — host bridge between Game / PhysicsWorld /
-// layer detection (plan v2 §2.3 Phases C+D, archived plan_gameplay_1.md
-// §8.9 #2 + #3).
+// Pure Physics session — Force-Physics design (plan v2 §2.3.1 H).
 //
-// PhysicsSession is the integration glue. It owns:
-//   - A reference to the (already-constructed) Game.
-//   - A PhysicsWorld it lazily creates on `start()`.
-//   - A bus subscription on PIECE_LOCK that converts the locked piece's
-//     cells into rigid bodies and erases them from Game's grid (so the
-//     grid path stays empty and never accumulates state).
-//   - A per-frame `tick()` that steps the world, snapshots positions,
-//     runs `detectLayers`, and removes bodies belonging to any cleared
-//     layer. Emits `PHYSICS_LAYER_CLEARED` for HUD / VFX subscribers.
-//   - Read-only accessors (bodyCount, layersClearedTotal, awakeCount,
-//     highestY) for HUDs and the rules pack's endCondition.
+// PhysicsSession is the integration glue between Game's piece queue,
+// Rapier's PhysicsWorld, the layer-detection algorithm, and the host's
+// input layer. The Force-Physics pivot rebuilds the player↔simulation
+// seam: each tetromino is a single compound rigid body, and player
+// input applies forces / impulses / torques rather than grid-snapped
+// position deltas.
 //
-// The session is the ONLY place in the codebase that knows about both
-// `gameplay/experimental/physics/` and `physics/world.js`. The rest of
-// the app — Game, BoardView, the vfx director — sees physics through
-// the same bus events as any other mode.
+// Lifecycle:
 //
-// Constructor is sync; `start()` is async because the first physics
-// run pays the Rapier wasm init cost. Subsequent runs in the same
-// process resolve instantly (the Rapier module is module-level cached
-// per `physics/world.js#loadRapier`).
+//   constructor(opts)  — sync; validates opts
+//   start()            — async; lazy-loads Rapier, subscribes to PIECE_SPAWN
+//   stop()             — sync; unsub, dispose world, reset counters
+//   tick()             — per frame: world.step → sleep-detect on active body
+//                          → spawn next on commit → layer detect →
+//                          remove cleared colliders → topout check
+//
+// Player input (called from the host's intent layer):
+//   applyMove(dir)     — left / right (dir = ±1)
+//   applyRotate(dir)   — CW / CCW (dir = ±1)
+//   applySoftDrop()    — mild downward velocity boost
+//   applyHardDrop()    — strong downward velocity + immediate commit
+//
+// Active body lifecycle:
+//   - On PIECE_SPAWN, the session reads `game.activePiece` and its
+//     cells, builds a compound body, stashes its bodyId as the active
+//     body, and pauses the Game (so its grid gravity doesn't try to
+//     drop the now-physics-driven piece).
+//   - Player forces target the active body only.
+//   - Lock detection: when the active body sleeps (Rapier's auto-sleep
+//     after ~0.5s of low velocity), or when the player hard-drops and
+//     the body's linear velocity drops below `HARD_DROP_COMMIT_VEL`,
+//     the body is "committed": it stays in the world as a settled
+//     stack body, and the session calls `game.spawnPiece()` to
+//     advance the bag → PIECE_SPAWN fires → next active body spawns.
+//
+// Layer clear:
+//   - `detectLayers` operates on `world.getColliderPositions()` so
+//     compound-body cubes are first-class participants.
+//   - For each cleared collider, the session calls
+//     `world.removeCollider(colliderId)`. Surviving colliders stay
+//     attached to their parent body (the half of an L-piece that
+//     wasn't part of the layer continues to fall).
+//   - `world.removeCollider` auto-removes the parent body when its
+//     last collider goes — no explicit body cleanup needed here.
+//
+// Topout:
+//   - If `world.highestY` exceeds `PHYSICS_TOPOUT_Y` (matches the
+//     rules pack's `endCondition` threshold), the session fires its
+//     `onEndRun({ reason:'topout' })` callback (single-shot per run).
 
 import { EVENTS } from '../gameplay/events.js';
 import { createPhysicsWorld } from '../physics/world.js';
 import { detectLayers } from '../gameplay/experimental/physics/layer-detection.js';
 
+const PHYSICS_TOPOUT_Y = 22;
+
+// Force constants — calibrated in Phase L. Centralized here so the
+// tuning surface is single-file.
+const FORCE = Object.freeze({
+  LATERAL_IMPULSE:        2.5,   // N·s on left/right tap (compound body mass ≈ 4 → ~0.6 m/s velocity change)
+  ROTATE_TORQUE_IMPULSE:  1.2,   // N·m·s around Z
+  SOFT_DROP_IMPULSE:      3.0,   // N·s downward (compounds with gravity)
+  HARD_DROP_LINVEL:      -15.0,  // m/s — direct setLinvel, replaces existing velocity
+  HARD_DROP_COMMIT_VEL:    1.5,  // m/s — once body's |v| drops below this after a hard-drop, commit
+  LATERAL_MAX_VEL:         8.0,  // m/s lateral cap; impulse stops adding when |v.x| ≥ this
+});
+
 /**
  * @typedef {Object} PhysicsSessionOpts
  * @property {{on:(t:string,fn:Function,o?:any)=>Function, emit:Function}} bus
- *   Engine event bus. The session subscribes to PIECE_LOCK and emits
- *   PHYSICS_LAYER_CLEARED.
  * @property {import('../gameplay/game.js').Game} game
- *   The active Game instance. The session ERASES locked cells from
- *   `game.board` after handing them to physics, so the grid stays
- *   empty and Game.clearLines never fires (which is correct — physics
- *   doesn't use the grid clear path; it has detectLayers).
- * @property {string} [side='player']   Routes events for dual-board layouts.
+ *   The active Game instance. The session reads `game.activePiece` +
+ *   `game.getPieceCells()` on PIECE_SPAWN and calls `game.spawnPiece()`
+ *   on commit to advance the bag. Game is paused on session start so
+ *   its grid-gravity tick doesn't try to drop the now-physics-driven
+ *   piece.
+ * @property {string} [side='player']
  * @property {number} [cols=10]
  * @property {number} [rows=20]
- * @property {Object} [worldOpts]       Forwarded to createPhysicsWorld.
- * @property {{x:number,y:number,z:number}} [cellToWorld]
- *   Optional mapping from grid cell to world coordinates. Default
- *   identity (cell.col → x, cell.row → y, 0 → z) since the grid is
- *   already in world units in the existing renderer. Hosts that want
- *   to translate / scale the physics arena pass a custom mapping.
+ * @property {Object} [worldOpts]
+ *   Forwarded to createPhysicsWorld (gravity, friction, etc.).
+ * @property {(c:number, r:number) => {x:number, y:number, z:number}} [cellToWorld]
+ *   Optional grid → physics-world mapping. Default identity.
+ * @property {(info: { reason:'topout' }) => void} [onEndRun]
+ *   Single-shot callback fired when the world's highestY crosses
+ *   PHYSICS_TOPOUT_Y. The host wires its own endRun() here to
+ *   trigger MODE_END + stats persistence.
  */
 
 /**
  * @typedef {Object} PhysicsLayerEvent
  * @property {Array<{centerY:number, minY:number, maxY:number, size:number}>} layers
- * @property {number} cubeCount      Total cubes cleared (across all layers).
- * @property {number} simultaneous   layers.length — mirrors LINE_CLEAR.simultaneous.
+ * @property {number} cubeCount
+ * @property {number} simultaneous
  * @property {string} side
  */
 
@@ -72,24 +112,35 @@ export class PhysicsSession {
     this._rows      = opts.rows || 20;
     this._worldOpts = opts.worldOpts || {};
     this._cellToWorld = opts.cellToWorld || DEFAULT_CELL_TO_WORLD;
+    this._onEndRun  = (typeof opts.onEndRun === 'function') ? opts.onEndRun : null;
 
     /** @type {import('../physics/world.js').PhysicsWorld | null} */
     this._world     = null;
-    /** @type {Function | null} */
-    this._unsubLock = null;
     /** @type {Function[]} */
     this._unsubs    = [];
+
+    // Active body — the piece the player is currently controlling.
+    // Set on PIECE_SPAWN; cleared on commit (sleep heuristic or
+    // hard-drop trigger).
+    this._activeBodyId = null;
+    this._activePieceColor = 0xffffff;
+    // Hard-drop "fast commit" flag — set by applyHardDrop, consulted
+    // each tick. Lets a hard-dropped body commit before Rapier's
+    // auto-sleep timer (~0.5s) elapses.
+    this._hardDropArmed = false;
 
     // Cumulative counter for HUDs. Resets on stop().
     this._layersClearedTotal = 0;
     this._cubesClearedTotal  = 0;
 
-    // Per-body color tracking (plan v2 §2.3 F+). The PhysicsWorld is
-    // render-agnostic — it tracks bodies but not colors. PhysicsView
-    // queries this map to decide what color to paint each cube. Cleared
-    // bodies are removed from the map in `tick()` to avoid leaks.
-    /** @type {Map<number, number>} */
-    this._bodyColors = new Map();
+    // Topout single-shot guard — Phase H wires the host callback.
+    this._endRunFired = false;
+
+    // Last-known highestY snapshot for `getRulesStateAugment()`. Read
+    // by the host before calling rules.endCondition (legacy v1 path —
+    // the v2 design routes topout through `onEndRun` directly, but the
+    // augment is kept for callers that still inspect Game's snapshot).
+    this._lastHighestY = -Infinity;
   }
 
   // ─── Public read-only accessors ──────────────────────────────────────
@@ -101,27 +152,33 @@ export class PhysicsSession {
   get awakeCount()         { return this._world ? this._world.awakeCount : 0; }
   get highestY()           { return this._world ? this._world.highestY : -Infinity; }
   get isStarted()          { return this._world != null; }
+  get activeBodyId()       { return this._activeBodyId; }
 
   /**
-   * Per-body color lookup (plan v2 §2.3 F+). Returns the color the body
-   * was added with, or null if the body has been removed (or never
-   * existed). PhysicsView queries this once per new body it spots in
-   * `world.getPositions()`.
+   * Returns the color the body was added with, or null if the body has
+   * been removed (or never existed).
+   *
+   * In Force Physics, color is stashed per collider via PhysicsWorld
+   * during addCompoundBody (Phase G). This getter walks the world's
+   * collider registry to find one belonging to the requested body.
    *
    * @param {number} bodyId
-   * @returns {number | null}  0xRRGGBB hex, or null when unknown
+   * @returns {number | null}
    */
   getBodyColor(bodyId) {
-    return this._bodyColors.has(bodyId) ? this._bodyColors.get(bodyId) : null;
+    if (!this._world) return null;
+    for (const c of this._world.getColliderPositions()) {
+      if (c.bodyId === bodyId) return c.color;
+    }
+    return null;
   }
 
   // ─── Lifecycle ───────────────────────────────────────────────────────
 
   /**
-   * Lazy-init Rapier + create the world + subscribe to PIECE_LOCK.
-   * Idempotent — repeated calls are no-ops once the session is live.
-   *
-   * @returns {Promise<void>}
+   * Lazy-init Rapier + create the world + subscribe to PIECE_SPAWN.
+   * Pauses the Game so its grid-gravity doesn't fight the physics body.
+   * Idempotent.
    */
   async start() {
     if (this._world) return;
@@ -130,78 +187,177 @@ export class PhysicsSession {
       rows: this._rows,
       ...this._worldOpts,
     });
-    this._unsubLock = this._bus.on(EVENTS.PIECE_LOCK, (e) => this._onPieceLock(e));
-    this._unsubs.push(this._unsubLock);
+    // Pause the Game — its grid path is dormant in physics mode.
+    // Game still tracks the active piece (for the bag + score), but
+    // tick / lockPiece / clearLines never fire. PhysicsSession owns
+    // gravity (via Rapier) + lock detection (via sleep heuristic).
+    this._game.setPaused(true);
+
+    this._unsubs.push(this._bus.on(EVENTS.PIECE_SPAWN, (e) => this._onPieceSpawn(e)));
+    this._endRunFired = false;
   }
 
   /**
-   * Tear down: unsubscribe the bus listener, dispose the world,
-   * reset cumulative counters. Idempotent.
+   * Tear down. Resets counters; unpauses the Game so a subsequent
+   * non-physics mode runs normally.
    */
   stop() {
     for (const off of this._unsubs) {
       try { off(); } catch { /* ignore */ }
     }
     this._unsubs.length = 0;
-    this._unsubLock = null;
     if (this._world) {
       this._world.dispose();
       this._world = null;
     }
+    this._game.setPaused(false);
+    this._activeBodyId = null;
+    this._activePieceColor = 0xffffff;
+    this._hardDropArmed = false;
     this._layersClearedTotal = 0;
     this._cubesClearedTotal  = 0;
-    this._bodyColors.clear();
+    this._endRunFired = false;
+    this._lastHighestY = -Infinity;
+  }
+
+  // ─── Player input ────────────────────────────────────────────────────
+
+  /**
+   * Lateral nudge — apply linear impulse to the active body. Capped
+   * by `LATERAL_MAX_VEL` so mashing doesn't compound velocity into
+   * runaway speed.
+   *
+   * @param {number} dir   +1 = right, -1 = left, 0 = no-op
+   */
+  applyMove(dir) {
+    if (!this._activeBodyId || !this._world) return;
+    const sign = (dir | 0);
+    if (sign === 0) return;
+    const v = this._world._bodies.get(this._activeBodyId)?.linvel?.();
+    if (v && Math.abs(v.x) > FORCE.LATERAL_MAX_VEL && Math.sign(v.x) === Math.sign(sign)) {
+      return; // already at cap in this direction
+    }
+    this._world.applyImpulse(this._activeBodyId, {
+      x: sign * FORCE.LATERAL_IMPULSE, y: 0, z: 0,
+    });
+  }
+
+  /**
+   * Spin the piece — torque impulse around the screen-perpendicular
+   * Z axis.
+   *
+   * @param {number} dir   +1 = CW, -1 = CCW
+   */
+  applyRotate(dir) {
+    if (!this._activeBodyId || !this._world) return;
+    const sign = (dir | 0);
+    if (sign === 0) return;
+    this._world.applyTorqueImpulse(this._activeBodyId, {
+      x: 0, y: 0, z: sign * FORCE.ROTATE_TORQUE_IMPULSE,
+    });
+  }
+
+  /** Mild downward force — held repeatedly while soft-drop key is down. */
+  applySoftDrop() {
+    if (!this._activeBodyId || !this._world) return;
+    this._world.applyImpulse(this._activeBodyId, {
+      x: 0, y: -FORCE.SOFT_DROP_IMPULSE, z: 0,
+    });
+  }
+
+  /**
+   * Hard drop — directly set the body's linear velocity to a strong
+   * downward magnitude (overwrites whatever it was) and arm the
+   * fast-commit path so the body locks the moment it slows down.
+   * The piece keeps falling under physics; the player just released
+   * control.
+   */
+  applyHardDrop() {
+    if (!this._activeBodyId || !this._world) return;
+    this._world.setLinvel(this._activeBodyId, {
+      x: 0, y: FORCE.HARD_DROP_LINVEL, z: 0,
+    });
+    this._hardDropArmed = true;
   }
 
   // ─── Per-frame tick ──────────────────────────────────────────────────
 
   /**
-   * Advance the physics world one step, run layer detection, and remove
-   * any cubes that belong to a cleared layer. Emits
-   * `PHYSICS_LAYER_CLEARED` when at least one layer drops.
+   * Advance the simulation one step + run lock-detect / layer-detect /
+   * topout-check. Returns the layer-clear event payload (if one fired)
+   * or null.
    *
-   * Also pushes `physicsHighestY` into the Game's state-snapshot path
-   * (via a host-readable field) so the rules pack's `endCondition`
-   * observes the real body positions on each tick.
-   *
-   * @returns {PhysicsLayerEvent | null}  the event that was emitted, or null
+   * @returns {PhysicsLayerEvent | null}
    */
   tick() {
     if (!this._world) return null;
 
     this._world.step();
-
-    // Push the current highestY into a read-back location the rules
-    // pack consults via `state.physicsHighestY`. Game's getStateSnapshot
-    // doesn't know about physics; the host owns the merge. We expose
-    // the value here so the host can inject it cheaply on each tick.
-    // (See `getRulesStateAugment()` below — host calls it inside its
-    // tick before the rules pack's endCondition runs.)
-    // Stored as a simple field; consumers read via getRulesStateAugment.
     this._lastHighestY = this._world.highestY;
 
-    // Detect layers from the current snapshot. Empty world → empty
-    // snapshot → no layers. Cheap.
-    const positions = this._world.getPositions();
-    const layers = detectLayers(positions);
+    // Lock detection — promote the active body to "settled stack" when:
+    //   (a) Rapier's auto-sleep marks it as resting (~0.5s of low |v|)
+    //   (b) a hard-drop is armed and the body has slowed below HARD_DROP_COMMIT_VEL
+    if (this._activeBodyId != null) {
+      const sleeping = this._world.isBodySleeping(this._activeBodyId);
+      let commit = false;
+      if (sleeping) {
+        commit = true;
+      } else if (this._hardDropArmed) {
+        const v = this._world._bodies.get(this._activeBodyId)?.linvel?.();
+        if (v) {
+          const speed = Math.sqrt(v.x*v.x + v.y*v.y + v.z*v.z);
+          if (speed < FORCE.HARD_DROP_COMMIT_VEL) commit = true;
+        }
+      }
+      if (commit) {
+        this._activeBodyId = null;
+        this._hardDropArmed = false;
+        // Advance the bag → fires PIECE_SPAWN → handler creates the
+        // next compound body and stashes it as activeBodyId.
+        try { this._game.spawnPiece(); }
+        catch (err) { console.warn('[physics] spawnPiece threw:', err); }
+      }
+    }
+
+    // Layer detection on COLLIDER positions (compound bodies might
+    // contribute multiple cubes to one layer; the algorithm doesn't
+    // care which body each cube belongs to).
+    const layerEvent = this._processLayers();
+
+    // Topout — single-shot host callback.
+    if (!this._endRunFired
+        && this._world.highestY > PHYSICS_TOPOUT_Y
+        && this._onEndRun) {
+      this._endRunFired = true;
+      try { this._onEndRun({ reason: 'topout' }); }
+      catch (err) { console.warn('[physics] onEndRun threw:', err); }
+    }
+
+    return layerEvent;
+  }
+
+  _processLayers() {
+    const colliders = this._world.getColliderPositions();
+    const layers = detectLayers(colliders);
     if (layers.length === 0) return null;
 
-    // Map cubeIndices (positions array indices) back to bodyIds and
-    // remove. Build the event payload before removal so VFX can fire
-    // bursts at the correct world-space positions.
-    const removedIds = new Set();
+    // Map cubeIndices (positions array indices) to colliderIds and
+    // remove. PhysicsWorld auto-removes parent bodies when their
+    // last collider goes.
+    const removedColliderIds = new Set();
     for (const layer of layers) {
-      for (const idx of layer.cubeIndices) removedIds.add(positions[idx].bodyId);
+      for (const idx of layer.cubeIndices) {
+        removedColliderIds.add(colliders[idx].colliderId);
+      }
     }
-    this._world.removeBodies(removedIds);
-    // Drop color metadata for removed bodies so the map doesn't leak
-    // unbounded over the run.
-    for (const id of removedIds) this._bodyColors.delete(id);
-    // Shift down: wake settled bodies so they fall into the gaps
-    // instead of floating where the cleared layer used to be.
+    for (const cid of removedColliderIds) {
+      this._world.removeCollider(cid);
+    }
+    // Wake settled bodies so they fall into the gap.
     this._world.wakeAll();
 
-    const cubeCount = removedIds.size;
+    const cubeCount = removedColliderIds.size;
     this._layersClearedTotal += layers.length;
     this._cubesClearedTotal  += cubeCount;
 
@@ -216,16 +372,19 @@ export class PhysicsSession {
       cubeCount,
       simultaneous: layers.length,
       side: this._side,
+      // Force-Physics extension: surface the actual collider IDs so
+      // the renderer can run a dissolve animation on the matching
+      // meshes (Phase J/K).
+      removedColliderIds: [...removedColliderIds],
     };
     this._bus.emit(EVENTS.PHYSICS_LAYER_CLEARED, payload);
     return payload;
   }
 
   /**
-   * Returns the augment object the host should mix into Game's state
-   * snapshot before calling `rules.endCondition(state)`. Currently
-   * just `physicsHighestY`; future fields (e.g. settledCount) plug
-   * in here.
+   * State-augment for the rules pack's endCondition. Kept for
+   * back-compat with the v1 path that read physicsHighestY through
+   * Game's snapshot. v2's preferred path is `onEndRun` callback.
    *
    * @returns {{ physicsHighestY: number }}
    */
@@ -235,38 +394,36 @@ export class PhysicsSession {
     };
   }
 
-  // ─── Internal — PIECE_LOCK bridge ────────────────────────────────────
+  // ─── Internal — PIECE_SPAWN bridge ───────────────────────────────────
 
-  _onPieceLock(e) {
-    if (!this._world || !e || !Array.isArray(e.cells)) return;
-    if (e.side != null && e.side !== this._side) return;
+  _onPieceSpawn(e) {
+    if (!this._world) return;
+    if (e && e.side != null && e.side !== this._side) return;
 
-    // For each locked cell, spawn a body at the corresponding world
-    // position. The cellToWorld mapping defaults to identity since the
-    // existing renderer already places grid cells at world (col, row).
-    // Then erase the cell from the Game's board so:
-    //   (a) BoardView's PIECE_LOCK handler — which fires AFTER us in
-    //       subscription order if main.js subscribes us first — sees
-    //       an empty footprint and skips creating the static cube
-    //       (TODO: BoardView currently uses the event payload `cells`
-    //       directly, not the board state; main.js host integration
-    //       in Phase F will need a `noLockMeshes` opt or similar to
-    //       suppress BoardView's static cube creation in physics mode).
-    //   (b) Game.clearLines never fires (fullRows always 0 in physics
-    //       since the cells are erased before the grid path runs).
-    const lockColor = (typeof e.color === 'number') ? (e.color | 0) : 0xffffff;
-    for (const { col, row } of e.cells) {
+    // Read the freshly-spawned active piece's cells from Game. Game's
+    // grid representation is still the source of truth for "what
+    // shape did the bag give us"; the cells array maps directly to
+    // compound-body collider positions.
+    const piece = this._game.activePiece;
+    if (!piece) return;
+    const cells = this._game.getPieceCells(piece);
+    if (!cells || cells.length === 0) return;
+
+    // Build the compound body. cellToWorld maps grid (col, row) to
+    // physics-world coords; default identity since the existing
+    // renderer already uses `cellToWorld(col, row, depth)` to bake
+    // scene positions linearly.
+    const points = cells.map(({ col, row }) => {
       const w = this._cellToWorld(col, row);
-      const bodyId = this._world.addBody(w.x, w.y, w.z);
-      this._bodyColors.set(bodyId, lockColor);
-      // Erase from Game's board. This is safe — Game already counted
-      // fullRows BEFORE emitting PIECE_LOCK, so altering the board
-      // here doesn't affect that count, and clearLines's row-removal
-      // is a no-op on already-empty rows.
-      const board = this._game.board;
-      if (board && board[row] && col >= 0 && col < board[row].length) {
-        board[row][col] = null;
-      }
-    }
+      return { x: w.x, y: w.y, z: w.z || 0 };
+    });
+    const color = (typeof e?.color === 'number') ? (e.color | 0) : 0xffffff;
+    this._activeBodyId = this._world.addCompoundBody(points, { color });
+    this._activePieceColor = color;
+    this._hardDropArmed = false;
   }
 }
+
+// Test / introspection accessors.
+export const _FORCE = FORCE;
+export const _PHYSICS_TOPOUT_Y = PHYSICS_TOPOUT_Y;
