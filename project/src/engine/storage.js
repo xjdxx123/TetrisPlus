@@ -106,6 +106,12 @@ const STATS_DEFAULTS = Object.freeze({
     // is the highest single-round cancellation tally — a versus-only metric.
     versus:   { score: 0, lines: 0, level: 1, attempts: 0, wins: 0, losses: 0, draws: 0, eloMmr: 1200,
                 bestGarbageCancelled: 0,                                                                   ...MODERN_RULES_DEFAULTS },
+    // Pure Physics (plan v2 §2.3) — score is layers × 100, no level
+    // multiplier. `bestLayersCleared` is the run-record metric;
+    // `totalLayersCleared` is a Zen-style cumulative counter that
+    // Physics shares. Modern-rules slots are intentionally absent
+    // — physics doesn't recognize T-spin / B2B / PC.
+    physics:  { score: 0, lines: 0, level: 1, attempts: 0, bestLayersCleared: 0, totalLayersCleared: 0 },
   },
   totals: {
     linesCleared:  0,

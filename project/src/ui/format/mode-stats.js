@@ -97,6 +97,11 @@ export function formatModeBestPrimary(modeKey, best) {
       if (wins === 0 && losses === 0) return DEFAULT_DASH;
       return `${wins}W–${losses}L`;
     }
+    case 'physics': {
+      // Physics' headline is the single-run high score (layers × 100).
+      // Falls back to dash when nothing has been scored yet.
+      return formatCount(best.score);
+    }
     case 'classic':
     default:
       return formatCount(best.score);
@@ -150,6 +155,17 @@ export function formatModeBestSecondary(modeKey, best) {
       if (played === 0) return null;
       const elo = Number.isFinite(best.eloMmr) ? best.eloMmr : 1200;
       return `ELO ${elo}`;
+    }
+    case 'physics': {
+      // Physics shows total layers cleared across all attempts (Zen-
+      // style cumulative metric) plus the best-single-run.
+      const total = best.totalLayersCleared || 0;
+      const bestRun = best.bestLayersCleared || 0;
+      if (total === 0 && bestRun === 0) return null;
+      const parts = [];
+      if (bestRun > 0) parts.push(`best run ${formatCount(bestRun, { zeroIsReal: true })} layers`);
+      if (total > 0)   parts.push(`${formatCount(total, { zeroIsReal: true })} layers total`);
+      return parts.join(' · ');
     }
     case 'classic':
     default: {

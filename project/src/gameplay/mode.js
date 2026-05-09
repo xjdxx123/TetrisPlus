@@ -21,6 +21,11 @@ const AVAILABLE = Object.freeze([
   'ultra',
   'zen',
   'versus',
+  // plan v2 §2.3 — Pure Physics, behind the experimental wall. Listed
+  // here so the settings panel can render it; the `isExperimental`
+  // flag in CONFIG below is what hosts gate visibility on if they
+  // want a "stable modes only" view.
+  'physics',
 ]);
 
 const LABELS = Object.freeze({
@@ -30,6 +35,7 @@ const LABELS = Object.freeze({
   ultra:    'Ultra',
   zen:      'Zen',
   versus:   'Versus',
+  physics:  'Physics',
 });
 
 // Future-behavior contract — informational; useful when modes ship to
@@ -41,6 +47,7 @@ const DESCRIPTIONS = Object.freeze({
   ultra:    '2-minute timer, max score.',
   zen:      'No game-over (top-out shifts the stack down).',
   versus:   'Reserved — needs network or AI. Disabled until then.',
+  physics:  'Experimental. Locked pieces become rigid bodies; layer-detection replaces row-clear.',
 });
 
 // Modes the v1 plan ships with disabled-looking. The UI greys these out
@@ -58,6 +65,7 @@ const CONFIG = Object.freeze({
   ultra:    Object.freeze({ goalLabel: '2 minutes (max score)',   hudKind: 'ultra',    estimatedDurationMin: 2,    isOnline: false, isExperimental: false }),
   zen:      Object.freeze({ goalLabel: 'No topout',               hudKind: 'zen',      estimatedDurationMin: null, isOnline: false, isExperimental: false }),
   versus:   Object.freeze({ goalLabel: 'Versus (1v1)',            hudKind: 'versus',   estimatedDurationMin: 5,    isOnline: false, isExperimental: false }),
+  physics:  Object.freeze({ goalLabel: 'Pure Physics — chaos lab', hudKind: 'physics', estimatedDurationMin: null, isOnline: false, isExperimental: true  }),
 });
 
 let _current = 'classic';

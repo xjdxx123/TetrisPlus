@@ -118,6 +118,27 @@ export function buildPhysicsRules(opts = {}) {
       bodyOverflow:   false, // true when topout threshold was crossed
     }),
 
+    // Custom best-slot updater (plan v2 §2.3 Phase E). Physics tracks
+    // `bestLayersCleared` (highest single-run total) and
+    // `totalLayersCleared` (Zen-style cumulative across all attempts).
+    // The default score-based updater would write the score field too,
+    // but we override here so the slot stays focused on the
+    // physics-specific metric. The host populates
+    // `summary.physicsLayersCleared` from session.layersClearedTotal
+    // before calling recordEndOfRun.
+    updateBest: (best, summary) => {
+      const layers = (summary && Number.isFinite(summary.physicsLayersCleared))
+        ? summary.physicsLayersCleared | 0
+        : 0;
+      best.bestLayersCleared = Math.max(best.bestLayersCleared || 0, layers);
+      best.totalLayersCleared = (best.totalLayersCleared || 0) + layers;
+      // Score also recorded — physics IS scored, just not via the
+      // standard score-best path. Higher single-run score wins.
+      if (summary && Number.isFinite(summary.score) && summary.score > (best.score || 0)) {
+        best.score = summary.score;
+      }
+    },
+
     // Pure-physics constants surfaced for tests / HUDs.
     physicsTopoutY:        PHYSICS_TOPOUT_Y,
     physicsLayerScore:     PHYSICS_LAYER_SCORE,

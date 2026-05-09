@@ -115,10 +115,18 @@ describe('storage — stats', () => {
     });
     // Every mode key gets a default slot — backfilled on existing saves
     // via the deep-merge load path, so older blobs don't break.
-    for (const key of ['classic', 'marathon', 'sprint', 'ultra', 'zen', 'versus']) {
+    for (const key of ['classic', 'marathon', 'sprint', 'ultra', 'zen', 'versus', 'physics']) {
       expect(s.modeBests[key]).toBeDefined();
       expect(s.modeBests[key].attempts).toBe(0);
     }
+  });
+
+  it('physics slot has its own bestLayersCleared / totalLayersCleared shape', () => {
+    const s = loadStats();
+    expect(s.modeBests.physics).toEqual({
+      score: 0, lines: 0, level: 1, attempts: 0,
+      bestLayersCleared: 0, totalLayersCleared: 0,
+    });
   });
 
   it('saveStats with flush:true writes synchronously', () => {

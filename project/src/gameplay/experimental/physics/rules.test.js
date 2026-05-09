@@ -116,3 +116,34 @@ describe('buildPhysicsRules — hooks', () => {
     expect(r.onTick).toBeNull();
   });
 });
+
+describe('buildPhysicsRules — updateBest', () => {
+  it('records bestLayersCleared as max-of-prior, totalLayersCleared as cumulative', () => {
+    const r = buildPhysicsRules();
+    const best = { bestLayersCleared: 0, totalLayersCleared: 0, score: 0 };
+    r.updateBest(best, { physicsLayersCleared: 5, score: 500 });
+    expect(best.bestLayersCleared).toBe(5);
+    expect(best.totalLayersCleared).toBe(5);
+    expect(best.score).toBe(500);
+
+    r.updateBest(best, { physicsLayersCleared: 3, score: 300 });
+    // bestLayers stays at 5 (lower run); total accumulates; score doesn't fall back.
+    expect(best.bestLayersCleared).toBe(5);
+    expect(best.totalLayersCleared).toBe(8);
+    expect(best.score).toBe(500);
+
+    r.updateBest(best, { physicsLayersCleared: 7, score: 700 });
+    expect(best.bestLayersCleared).toBe(7);
+    expect(best.totalLayersCleared).toBe(15);
+    expect(best.score).toBe(700);
+  });
+
+  it('handles missing physicsLayersCleared gracefully (legacy callers / fresh slot)', () => {
+    const r = buildPhysicsRules();
+    const best = { bestLayersCleared: 0, totalLayersCleared: 0, score: 0 };
+    r.updateBest(best, { score: 100 });
+    expect(best.bestLayersCleared).toBe(0);
+    expect(best.totalLayersCleared).toBe(0);
+    expect(best.score).toBe(100);
+  });
+});

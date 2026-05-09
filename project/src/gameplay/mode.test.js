@@ -8,7 +8,9 @@ describe('Mode', () => {
     expect(Mode.current).toBe('classic');
     expect(Mode.available).toContain('classic');
     expect(Mode.available).toContain('versus');
-    expect(Mode.available).toHaveLength(6);
+    // 7 modes: 6 standard + 1 experimental (physics, plan v2 §2.3).
+    expect(Mode.available).toHaveLength(7);
+    expect(Mode.available).toContain('physics');
   });
 
   it('select switches the current mode and notifies listeners', () => {

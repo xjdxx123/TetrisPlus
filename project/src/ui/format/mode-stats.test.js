@@ -104,6 +104,11 @@ describe('formatModeBestPrimary', () => {
     expect(formatModeBestPrimary('garbage-mode', { score: 99 })).toBe('99');
   });
 
+  it('physics → score (layers × 100; falls back to dash on fresh)', () => {
+    expect(formatModeBestPrimary('physics', { score: 1500 })).toBe((1500).toLocaleString());
+    expect(formatModeBestPrimary('physics', {})).toBe(_DEFAULT_DASH);
+  });
+
   it('safe against undefined best', () => {
     expect(formatModeBestPrimary('classic')).toBe(_DEFAULT_DASH);
     expect(formatModeBestPrimary('zen', undefined)).toBe(_DEFAULT_DASH);
@@ -152,6 +157,22 @@ describe('formatModeBestSecondary', () => {
   it('classic shows lines + level when there is a record', () => {
     expect(formatModeBestSecondary('classic', { lines: 42, level: 5 })).toBe('42 lines, level 5');
     expect(formatModeBestSecondary('classic', {})).toBeNull();
+  });
+
+  it('physics shows best-run + total layers when both have records', () => {
+    const s = formatModeBestSecondary('physics', { bestLayersCleared: 12, totalLayersCleared: 47 });
+    expect(s).toBe('best run 12 layers · 47 layers total');
+  });
+
+  it('physics with only one metric shows just that one', () => {
+    expect(formatModeBestSecondary('physics', { bestLayersCleared: 5 }))
+      .toBe('best run 5 layers');
+    expect(formatModeBestSecondary('physics', { totalLayersCleared: 100 }))
+      .toBe('100 layers total');
+  });
+
+  it('physics returns null on a fresh slot', () => {
+    expect(formatModeBestSecondary('physics', {})).toBeNull();
   });
 });
 
