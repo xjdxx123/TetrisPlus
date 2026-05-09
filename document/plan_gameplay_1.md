@@ -9,14 +9,19 @@
 
 ## 0. Implementation Status
 
-Last refreshed **2026-05-08** after the §3.7 Game-container extraction
-landed (sub-phases 7a–7f). Six standard modes are playable via the
-rules engine; the per-instance Game + BoardView + intents + bot +
-versus-composition + seeded-RNG modules all ship with full unit
-tests. The remaining work is the dual-sim **runtime swap** (the
-§3.7 modules exist but main.js's versus mode still uses the
-Phase-6 single-sim path) and the speculative chapters (§6/§7/§8 —
-3D, online, physics).
+Last refreshed **2026-05-09** after the dual-board host integration
+shipped (`feat/dual-board-host` merged) and the §12 Modern Tetris
+Mechanics chapter shipped (M1–M5 on `feat/rules-modern-s12`). Six
+standard modes are playable; the per-instance Game + BoardView +
+intents + bot + versus-composition + seeded-RNG modules ship with
+full unit tests; **versus mode now runs as a real dual-sim** with a
+visible AI opponent, opponent shockwaves, victory/defeat overlay, KO
+camera focus, and a Casual / Random / Mirror bot strength selector.
+SRS wall kicks, T-spin detection + scoring, B2B chain, Perfect Clear,
+modern combo table, and garbage cancellation with spawn-delay window
+all ship behind the existing rules-engine seams. The remaining work
+is the speculative chapters (§6/§7/§8 — 3D, online, physics) and
+post-§12 polish (HUD/VFX/stats persistence for the new events).
 
 ### 0.1 Phase completion dashboard
 
@@ -27,16 +32,17 @@ Phase-6 single-sim path) and the speculative chapters (§6/§7/§8 —
 | 3 — Sprint | ✅ | `gameplay/rules/sprint.js` (gravity-locked, `lineScore = 0`), `ui/sprint-badge.js` (`m:ss.mmm` timer), `modeBests.sprint = { completed, bestTimeMs }` |
 | 4 — Ultra | ✅ | `gameplay/rules/ultra.js` (120s, milestones at 30/60/90/110/115/118/119s), `ui/ultra-badge.js` (countdown + warning pulse at ≤10s) |
 | 5 — Zen | ✅ | `gameplay/rules/zen.js` (gentler gravity, `onTopOut` interceptor), new `ZEN_RESCUE` event, `shiftStackDown` helper in main.js, `ui/zen-badge.js` (Lines/Pieces/Shifts + Stop session button), end-of-run `updateBest` hook for `longestSessionMs` + `totalLines` |
-| 6 — Versus (local) | ⚠ v1 with caveats | `gameplay/rules/versus.js` (combo-aware garbage table), `gameplay/garbage.js` (pure helpers), new `GARBAGE_SENT` / `GARBAGE_RECEIVED` events, `ui/versus-badge.js` (dual-color queue + WIN/LOSS finale), AI bot opponent inside main.js (8–12s send cadence, KO at 12 absorbed rows), `modeBests.versus = { wins, losses, draws, eloMmr }`. **v2 modules ready in §3.7 (`app/versus.js`); host swap pending.** |
+| 6 — Versus (local) | ✅ **Shipped (v2 dual-sim)** | `gameplay/rules/versus.js` (combo-aware garbage table), `gameplay/garbage.js` (pure helpers), `GARBAGE_SENT` / `GARBAGE_RECEIVED` / `GARBAGE_OUTGOING` / `GARBAGE_CANCELLED` events, `ui/versus-badge.js` (dual-color queue + WIN/LOSS finale), `modeBests.versus = { wins, losses, draws, eloMmr }`. **v2 host integration live**: main.js constructs a `VersusSession` with two real `Game` instances on a dual-board layout; visible AI opponent with hole-aware / height-aware heuristic; cross-bus garbage bridge; opponent shockwaves on triple+ clears; VICTORY/DEFEAT overlay text; cinematic KO camera focus; settings-panel Bot Strength selector (Casual / Random / Mirror) persisted via `storage`. |
 | 7 — Mode tab UX upgrade | ✅ | `ui/format/mode-stats.js` per-mode formatters (`formatModeBestPrimary` / `Secondary` / `Summary` / `formatModeGoalAndDuration`), settings-panel Mode tab shows title/goal/duration/best with start button label tracking active mode, Stats tab uses per-mode primary + secondary line |
 | 8 — Stats schema renderer | ✅ | shipped alongside Phase 7 — same `ui/format/mode-stats.js` module |
-| **§3.7 — Game container** | ✅ **Shipped** | `gameplay/game.js` (Game class, 708 lines), `world/board-view.js` (mesh mirror, 332 lines), `input/intents.js` (InputRouter + keymap presets), `gameplay/bot-controller.js` (BotController with casual / mirror strengths), `world/dual-board.js` (side-by-side anchor groups), `app/versus.js` (VersusSession composition root with cross-bus garbage bridge), `shared/random/seeded.js` (mulberry32 + fromString), `Game.serialize`/`restore`, ESLint `no-Math.random` rule on `gameplay/**` + `app/versus.js`. Single-sim main.js wired through Game + BoardView; dual-sim runtime swap deferred to a host-integration follow-up. |
+| **§3.7 — Game container** | ✅ **Shipped (host integration live)** | `gameplay/game.js` (Game class), `world/board-view.js` (mesh mirror), `input/intents.js` (InputRouter + keymap presets), `gameplay/bot-controller.js` (BotController with Casual / Random / Mirror strengths, hole-aware + height-aware heuristic), `world/dual-board.js` (side-by-side anchor groups), `app/versus.js` (VersusSession composition root with cross-bus garbage bridge, host-mode dispatch), `shared/random/seeded.js` (mulberry32 + fromString), `Game.serialize`/`restore`, ESLint `no-Math.random` rule on `gameplay/**` + `app/versus.js`. **Host integration live**: main.js constructs `VersusSession` for versus mode with real dual-sim, opponent case-mesh duplication, cross-bus opponent score-popup routing, opponent shockwave at `OPPONENT_OFFSET_X`, KO camera focus tween, victory/defeat overlay rewrite. |
+| §12 — Modern Tetris Mechanics | ✅ **Shipped (M1–M5)** | `gameplay/rotation.js` SRS wall kicks (per-piece tables, kickIndex 0..4), `gameplay/t-spin.js` (3-corner rule + TST-kick upgrade), `scoring.js` clearType-aware tables (T-spin / Mini / Perfect Clear bonus), Game state `_lastAction` / `_lastKickIndex` / `_b2b` / `_combo` (all serialized), new events `T_SPIN` / `B2B_CHAIN` / `B2B_BREAK` / `PERFECT_CLEAR` / `COMBO_START` / `COMBO_END` / `GARBAGE_OUTGOING` / `GARBAGE_CANCELLED`, modern combo table `[0,0,1,1,2,2,3,3,4,4,4]` + plateau 5, garbage cancellation broker (front-first), pause-aware spawn-delay window (default 800ms). Versus pack auto-composes B2B (+1) + PC (+10) garbage on top of base. **No HUD/VFX consumers yet** — events fire but the UI doesn't celebrate them; that's the next polish pass. |
 | 9 — 3D Tetris | ❌ | — |
 | 10 — Pure physics | ❌ | — |
 | 11 — Online Versus | ❌ | — depends on §3.7 (now unblocked) |
 
-**Test surface:** 536 tests across 41 files (all green) after §3.7
-sub-phases 7a–7f landed.
+**Test surface:** 654 tests across 42 files (all green) after the
+dual-board host integration + §12 modern-rules merges.
 
 ### 0.2 What "Mode tab" honestly is today
 
@@ -453,7 +459,7 @@ Existed for color: still counts internally, never written to high score. Stat pa
 
 ---
 
-### 3.6 Versus — Local for now, Online in §7 · ⚠ **Shipped Phase 6 (v1 with caveats)**
+### 3.6 Versus — Local for now, Online in §7 · ✅ **Shipped Phase 6 v2 (dual-sim host integration live)**
 
 #### 1. Goal
 Beat your opponent: be the last player standing. Cleared lines (≥2) send "garbage" to the opponent's stack.
@@ -731,25 +737,36 @@ through every PR.
   by `app/versus.js`. When the dual-board host integration lands the
   abstract bot deletes.
 
-**Sub-phase 7e — Local Versus dual board (1.5 days)** ⚠ **Modules shipped, host integration deferred**
+**Sub-phase 7e — Local Versus dual board (1.5 days)** ✅ **Shipped (host integration live)**
 - ✅ `src/world/dual-board.js` (75 lines) — `DualBoard` class with
   left/right anchor groups at ±separation/2 X offsets. Settable
   separation. 11 tests in `dual-board.test.js`.
-- ✅ `src/app/versus.js` (199 lines) — `VersusSession` class composes
-  two Games + two BoardViews + DualBoard + InputRouter +
-  BotController + the cross-bus garbage bridge. 9 tests in
-  `versus.test.js` covering construction, garbage routing in both
-  directions, end-of-match arbitration, and tick dispatch.
-- ❌ **Host integration NOT done.** The `Mode._wireLifecycle.onStart`
-  in main.js still constructs one Game + one BoardView for versus
-  mode (single-sim). Swapping in `VersusSession` requires:
-  - Branching onStart on `key === 'versus'` to construct a session
-    instead of a Game.
-  - Per-side HUD routing (versus-badge currently reads main.js's
-    single game; needs to choose between session.gameP1 / .gameP2).
-  - Duplicate case-mesh visuals so each side has its own arena chrome.
-  This is the full dual-sim runtime; ~1 day of focused integration on
-  top of the modules that already exist.
+- ✅ `src/app/versus.js` (~260 lines after polish) — `VersusSession`
+  class composes two Games + two BoardViews + DualBoard + InputRouter +
+  BotController + the cross-bus garbage bridge. Accepts `busP1` (host
+  global bus, so player events reach audio/HUD/cinematic FX) and
+  `playerInputMode: 'host'` (skips routerP1 so main.js drives gameP1
+  keyboard handling). Exposes `tickOpponent(dtMs)` — host advances
+  the player side itself and lets the session tick only the bot.
+  20+ tests covering construction, garbage routing both directions,
+  end-of-match arbitration, host-mode dispatch.
+- ✅ **Host integration live** (`feat/dual-board-host`):
+  - `main.js` constructs `VersusSession` on `Mode.start({key:'versus'})`,
+    routing player input through main.js's existing handlers and
+    advancing only the bot via `session.tickOpponent`.
+  - Opponent case-mesh duplicated so the AI's well has its own
+    frame/walls/floor at `OPPONENT_OFFSET_X`.
+  - Bot's line clears spawn score popups + shockwaves at the
+    opponent's well X (`triggerLineClearShockwave(rows, color, n, worldX)`).
+  - VICTORY/DEFEAT overlay text rewrites the gameOver panel for
+    versus mode based on `winner` propagated through `MODE_END`.
+  - Cinematic camera tween (`_focusKOCamera(side)`) on KO — 0.45s
+    in, 850ms hold, settle back.
+  - Settings panel adds Bot Strength selector (Casual / Random / Mirror)
+    with live + persisted preference; existing rounds keep their
+    original BotController so a strength flip mid-match doesn't surprise.
+  - Bot heuristic (`gameplay/bot-controller.js`): hole-aware,
+    height-aware (no longer the old random-pick stack-toppler).
 
 **Sub-phase 7f — Determinism + replay (½ day)** ✅ **Shipped**
 - ✅ `src/shared/random/seeded.js` (53 lines) — `createSeededRng()`
@@ -1326,10 +1343,12 @@ Concrete files that change for each phase, mapped to the architecture in `plan_a
 | Sprint gravity-lock decision (§3.3) is community-wrong | Low | Medium | Surface as an option (Sprint variant: gravity locked / classic / hardmode). Not in v1. |
 | Marathon multiplier (1.5×) makes Classic feel underweight | Low | Low | Per-mode bests separate already; not a balance crisis. Tune in `config/mode-balance.js`. |
 | Zen rescue animation looks worse than topout | Medium | Medium | Shipped as placeholder (clear bottom 4 + cube settle animation). Refine in a polish pass. |
-| ⚠ Versus v1 caveats persist (single-sim, abstract bot) | (acknowledged) | Medium | Caveats documented in §3.6 #11. §3.7 is the resolution. |
-| **§3.7 Game container refactor regresses gameplay** | High | High | **Snapshot tests locked in pre-extraction (§3.7.7 sub-phase 7a) — event trace must match frame-for-frame.** Sub-phases ship one at a time; game stays playable through every PR. |
-| **§3.7 sub-phase 7e (dual-board) layout breaks HUD positioning** | Medium | Medium | The `Side: 'left'/'right'` prop refactor is a known cost; budgeted into §3.7.7 sub-phase 7e (1.5 days). |
-| **§3.7 determinism gap (a `setTimeout` leaks into rules)** | Medium | Medium | ESLint `no-restricted-globals` blocks `Math.random`/`setTimeout`/`performance.now` from `gameplay/**` — landed alongside seeded RNG in sub-phase 7f. |
+| ✅ Versus v1 single-sim / abstract-bot caveats | (resolved) | — | Phase-6 v2 shipped: `VersusSession` host integration live, real dual-sim with visible AI well, hole-/height-aware bot, opponent shockwaves + KO camera + VICTORY/DEFEAT overlay. |
+| ✅ §3.7 Game container refactor regresses gameplay | (resolved) | — | Snapshot tests held through 7a–7f; main.js wired through Game + BoardView; no observable regression at merge time (654 tests green). |
+| ✅ §3.7 sub-phase 7e (dual-board) layout breaks HUD positioning | (resolved) | — | Dual-board layout shipped; per-side HUD routing in place; opponent's well has its own case mesh chrome. |
+| ✅ §3.7 determinism gap (`setTimeout` leaks into rules) | (resolved) | — | ESLint `no-restricted-globals` blocks `Math.random`/`setTimeout`/`performance.now` from `gameplay/**` — landed alongside seeded RNG in sub-phase 7f. |
+| §12 modern-rules events fire with no consumer | (acknowledged) | Low | T_SPIN / B2B_CHAIN / PERFECT_CLEAR / COMBO_* / GARBAGE_CANCELLED have no HUD/VFX subscribers yet — modern bonuses score correctly but don't visually celebrate. Polish pass scope: §13 next-moves item 1. |
+| §12 modern-rules stats not persisted | (acknowledged) | Low | `_b2b`/`_combo` round-trip in serialize, but per-mode bests don't track `bestB2bChain` / `perfectClears` / `tspinClears` / `bestCombo`. End-of-run extension scope: §13 next-moves item 2. |
 | 3D rotation control is incomprehensible to most players | High | Medium | Beginner toggle (flat tetrominoes, single rotation axis); X-ray + slice-view defaults on. |
 | Online ELO inflation via smurfs | Low (at scale) | Low | Out of scope for v1; phone-verification at 1000+ DAU. |
 | Physics mode breaks determinism for Versus | n/a | n/a | Physics is single-player only; Versus disallows physics rules pack. Documented in `gameplay/rules/versus.js` header. |
@@ -1551,17 +1570,23 @@ either order or in parallel.
 
 ## 13. Final Word
 
-The single most useful property of this plan is that **every mode is small once the rules engine exists**. Marathon is 30 lines of rules + 50 lines of HUD + 30 lines of test. **That property held**: Phases 1–6 each shipped in roughly the budgeted shape, the rules engine is now real, and Classic plays identically before/after the refactor (367 tests prove it).
+The single most useful property of this plan is that **every mode is small once the rules engine exists**. Marathon is 30 lines of rules + 50 lines of HUD + 30 lines of test. **That property held** through Phases 1–8, the §3.7 Game-container extraction, the dual-board host integration, and §12 Modern Tetris Mechanics. Classic still plays identically to its pre-refactor self; 654 tests prove it.
 
-What Phase 6 also revealed: the plan's original "two `Game`s side-by-side" Versus design assumed an extracted simulation that Phase 1 deliberately deferred. The **§3.7 Game container** task added in this revision is the work that closes that gap — the largest single refactor remaining in the project, and the prerequisite for both online Versus (§7) and any future "second simulation" use (replay viewer, Player 2, 3D Tetris as its own `Game`).
+§3.7 closed the "two `Game`s side-by-side" gap that Phase 6 revealed; the dual-sim host integration on `feat/dual-board-host` made it visible — versus mode now runs against a real AI on its own well, with opponent shockwaves, KO camera, and VICTORY/DEFEAT framing. §12 then leveraged the per-instance Game state (`_lastAction`, `_b2b`, `_combo`) to bring the simulation in line with the modern competitive guideline (TETR.IO baseline) — SRS kicks, T-spins, B2B chains, Perfect Clears, modern combo table, garbage cancellation with spawn-delay.
 
-The speculative modes (3D, online, physics) still live behind the experimental wall. They prove out under the same 30-day promote-or-delete policy that's already in the project's culture (`plan_particle_2.md` §10). If the 3D mode delights, it gets promoted and gains its own polish budget. If it doesn't, it's deleted without ceremony.
+The speculative modes (3D, online, physics) still live behind the experimental wall under the 30-day promote-or-delete policy from `plan_particle_2.md` §10.
 
-**Recommended next moves** (post-Phase 6, in priority order):
-1. Phase 7 (Mode tab UX) — half a day, makes the modes you've already built feel like a real feature.
-2. Phase 8 (Stats renderer) — half a day, same.
-3. **§3.7 Game container** — 5–7 days, the architectural unblocker.
-4. Phase 11 / 12 / 13 (3D / physics / online) — each based on how the first eight feel.
+**Recommended next moves** (post-§12, in priority order):
+
+1. **§12 polish — HUD callouts + VFX celebration** *(1–2 days)*. The modern-rules events (`T_SPIN` / `B2B_CHAIN` / `PERFECT_CLEAR` / `COMBO_*` / `GARBAGE_CANCELLED`) currently fire with no consumer — bonuses score correctly but the UI doesn't celebrate them. Next: a small `ui/modern-callouts.js` module subscribing to those events to render text overlays ("T-SPIN!", "BACK-TO-BACK x3", "PERFECT CLEAR!", "ALL CANCELLED") + `vfx/director.js` celebration presets (camera shake on Tetris, color burst on T-spin, all-clear shockwave). Pure UI / VFX layer; no gameplay changes.
+
+2. **§12 polish — stats persistence** *(~1 day)*. Per-mode bests don't track `bestB2bChain` / `perfectClears` / `tspinClears` / `bestCombo` yet. Extend `Game._runStats` accumulators (tally during the run), thread through `gameplay/end-of-run.js`'s `EndOfRunSummary`, extend `engine/storage.js`'s `STATS_DEFAULTS.modeBests` with the new slots, and add per-mode `updateBest` overrides where they make sense (Marathon/Ultra: bestB2bChain, perfectClears; Sprint: bestCombo only — score is 0 anyway; Versus: bestGarbageCancelled per round). Pure gameplay logic + storage; no UI.
+
+3. **Phase 11 — 3D Tetris (experimental)** *(~8 days, see §6.12)*. Now strictly cleaner with §3.7 done — 3D ships as its own `Game` variant rather than a fork of main.js.
+
+4. **Phase 13 — Online Versus** *(~16 days, see §7.12)*. §3.7's seeded RNG + Game.serialize / restore are exactly what online needs for replay validation + rollback. Item 1+2 (§12 polish) should land first so the over-the-wire payloads carry the modern-rules events from day one.
+
+5. **Phase 12 — Pure physics (experimental)** *(~5 days, see §8.12)*. Independent of everything else; lands when there's bandwidth.
 
 ---
 
