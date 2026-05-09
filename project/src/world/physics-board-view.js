@@ -1,58 +1,50 @@
-// PhysicsBoardView — render side of one PhysicsSession (plan v2 §2.3
-// Phase F+).
+// PhysicsBoardView — Force-Physics renderer (plan v2 §2.3.1 J).
 //
-// In physics mode, locked cubes are rigid bodies that drift / settle /
-// wedge under gravity. The grid-based BoardView (`world/board-view.js`)
-// can't render these correctly — it parents cubes to a static
-// stackGroup and sets their world position from `cellToWorld(col, row)`,
-// which never updates. This module is the parallel renderer that keeps
-// each cube in sync with its physics body.
+// Reactively follows a `PhysicsSession`'s collider state. One mesh per
+// COLLIDER (not per body) so a compound tetromino renders as 4 cubes
+// that move + rotate as a unit, and a partial layer clear removes only
+// the affected cube meshes while the parent body's other cubes stay.
+//
+// Per-tick reconciliation:
+//   - For each collider in `session.world.getColliderPositions()`:
+//       new colliderId      → makeCube(color), parent to stackGroup
+//       existing colliderId → mesh.position = collider world position;
+//                              mesh.quaternion = parent body's rotation
+//   - For each tracked colliderId no longer in the snapshot: start a
+//     dissolve animation (250ms opacity 1 → 0, scale 1 → 1.1) instead
+//     of the v1 shatter. After the animation, remove from scene.
 //
 // Mounted alongside (not inside) a `BoardView` configured with
-// `noLockMeshes: true`. The BoardView still owns the active piece + ghost
-// rendering (those are still grid-driven before lock); PhysicsBoardView
-// owns the locked-stack rendering.
+// `noLockMeshes: true`. BoardView still owns the active piece's pre-
+// lock visuals (the falling tetromino mesh + ghost) — wait, in Force
+// Physics there is no "pre-lock" anymore: the piece IS a physics body
+// from spawn. So `noLockMeshes` should ALSO suppress the active piece
+// mesh. The host wires a separate "physics ghost" if/when wanted.
+// (Phase I host wiring resolves which BoardView features stay vs.
+// disable for physics mode.)
 //
-// Wiring:
-//   const session = new PhysicsSession({ bus, game });
-//   await session.start();
-//   const view = new PhysicsBoardView({ session, parent: caseGroup,
-//                                        makeCube, cellToWorld });
-//   // every animation frame:
-//   session.tick();
-//   view.tick();
-//
-// Pure render module. Consumes session.world.getPositions() snapshots;
-// never mutates physics state itself. Tests run pure-Node by stubbing
-// `makeCube` (no real THREE meshes needed for behavior tests).
+// Pure render module. Tests run pure-Node by stubbing makeCube.
 
 import * as THREE from 'three';
+
+const DEFAULT_CELL_TO_WORLD = (c, r, d) => new THREE.Vector3(c, r, d);
+
+// Dissolve animation tunables (plan v2 §2.3.1 K).
+const DISSOLVE = Object.freeze({
+  DURATION_MS: 250,
+  // Scale slightly up while fading so the cube reads as "dissolving"
+  // instead of just shrinking out.
+  END_SCALE: 1.10,
+});
 
 /**
  * @typedef {Object} PhysicsBoardViewOpts
  * @property {import('../app/physics-session.js').PhysicsSession} session
- *   The active session. Must have been started already; the view reads
- *   `session.world.getPositions()` and `session.getBodyColor(id)`.
- * @property {THREE.Object3D} parent     Where to attach the stack group.
+ * @property {THREE.Object3D} parent
  * @property {(color:number, opts?:any) => THREE.Mesh} makeCube
- *   Cube factory (host-owned). Same signature as BoardView's makeCube.
  * @property {(c:number, r:number, d:number) => THREE.Vector3} [cellToWorld]
- *   Optional — when provided, physics-world (col, row, z) coordinates
- *   are translated through this fn to scene world position. Default
- *   identity (`new Vector3(c, r, d)`) so callers without scene-bake
- *   can use the view in pure tests. The host wires this to the same
- *   `cellToWorld` used by BoardView so both renderers agree on
- *   geometry.
  * @property {string} [side='player']
- *   Tag carried for dual-board layouts. Currently informational; the
- *   session already filters PIECE_LOCK by side.
- * @property {(cube: THREE.Mesh) => void} [shatter]
- *   Optional shatter callback for cubes that disappear (layer cleared
- *   or otherwise removed from the world). Falls back to a plain
- *   stackGroup.remove() when omitted.
  */
-
-const DEFAULT_CELL_TO_WORLD = (c, r, d) => new THREE.Vector3(c, r, d);
 
 export class PhysicsBoardView {
   /** @param {PhysicsBoardViewOpts} opts */
@@ -67,97 +59,144 @@ export class PhysicsBoardView {
     this._makeCube    = opts.makeCube;
     this._cellToWorld = opts.cellToWorld || DEFAULT_CELL_TO_WORLD;
     this._side        = opts.side || 'player';
-    this._shatter     = typeof opts.shatter === 'function' ? opts.shatter : null;
 
-    // Public group so the host's cinematic FX layer (which already
-    // reads BoardView.stackGroup.position for shake-relative anchoring)
-    // can use the same surface.
     this.stackGroup = new THREE.Group();
     this._parent.add(this.stackGroup);
 
-    /** @type {Map<number, THREE.Mesh>} bodyId → mesh */
+    /** @type {Map<number, THREE.Mesh>} colliderId → mesh */
     this._meshes = new Map();
+    /**
+     * Active dissolve animations, keyed by mesh (not colliderId — the
+     * collider is gone by the time the dissolve starts). Each entry
+     * has the start time and the original scale so we can interpolate.
+     * @type {Map<THREE.Mesh, { startMs: number, baseScale: number }>}
+     */
+    this._dissolving = new Map();
+
+    // Now-fn — overridable for deterministic tests.
+    this._now = (typeof opts.now === 'function')
+      ? opts.now
+      : (() => (typeof performance !== 'undefined' ? performance.now() : Date.now()));
   }
 
-  // ─── Public read-only accessors ──────────────────────────────────────
+  // ─── Read-only accessors ────────────────────────────────────────────
 
-  get cubeCount() { return this._meshes.size; }
+  get cubeCount()        { return this._meshes.size; }
+  get dissolvingCount()  { return this._dissolving.size; }
 
-  // ─── Per-frame sync ──────────────────────────────────────────────────
+  // ─── Per-frame sync ─────────────────────────────────────────────────
 
   /**
-   * Reconcile mesh state with the physics world. Called after
-   * `session.tick()` each frame — the order matters because the session
-   * may have removed bodies during its tick (layer clear).
-   *
-   * - Bodies in `getPositions()` that don't have a mesh: create one.
-   *   Color comes from `session.getBodyColor(bodyId)`; missing/null
-   *   defaults to white.
-   * - Bodies in `getPositions()` that have a mesh: copy position into
-   *   the mesh transform.
-   * - Meshes whose bodyId is no longer in `getPositions()`: dispose
-   *   (calling shatter() if wired).
+   * Reconcile mesh state with the world's COLLIDER positions. Called
+   * after `session.tick()` each frame.
    */
   tick() {
     const world = this._session.world;
     if (!world) {
-      // Session not running — nothing to do. We don't tear meshes
-      // down here in case the host is restarting; the explicit
-      // dispose() path is the cleanup contract.
+      // Session not started — still drive any in-flight dissolves so
+      // a stop() between ticks doesn't strand them on screen.
+      this._tickDissolves();
       return;
     }
 
-    const positions = world.getPositions();
+    const positions = world.getColliderPositions();
     const seenIds = new Set();
-    for (const { bodyId, x, y, z } of positions) {
-      seenIds.add(bodyId);
-      let mesh = this._meshes.get(bodyId);
+    // Body rotation cache per-tick — avoids re-querying for each
+    // collider belonging to the same body.
+    const rotationCache = new Map();
+
+    for (const { colliderId, bodyId, x, y, z, color } of positions) {
+      seenIds.add(colliderId);
+      let mesh = this._meshes.get(colliderId);
       if (!mesh) {
-        // First sighting — spawn a cube at the body's position.
-        const color = this._session.getBodyColor(bodyId);
         const safeColor = (typeof color === 'number') ? color : 0xffffff;
         mesh = this._makeCube(safeColor, { settling: true });
-        this._meshes.set(bodyId, mesh);
+        this._meshes.set(colliderId, mesh);
         this.stackGroup.add(mesh);
       }
-      // Convert physics-world coords (continuous col/row/z) to scene
-      // world position via the cellToWorld bake. The function is
-      // linear by convention so passing fractional col/row works.
-      const world3 = this._cellToWorld(x, y, z);
-      mesh.position.copy(world3);
-      // TODO(F++): copy rotation too — Rapier bodies can rotate, and
-      // the visual currently locks rotation to identity. Cubes are
-      // visually symmetric on faces, so this is cosmetic. Wire when
-      // the dust/contact polish lands.
+      // World position from the physics snapshot, baked through
+      // cellToWorld so scene units match.
+      const wp = this._cellToWorld(x, y, z);
+      if (mesh.position && typeof mesh.position.copy === 'function') {
+        mesh.position.copy(wp);
+      } else if (mesh.position) {
+        mesh.position.x = wp.x; mesh.position.y = wp.y; mesh.position.z = wp.z;
+      }
+      // Body rotation — Rapier's collider position is already
+      // world-space, but the cube mesh should also INHERIT the parent
+      // body's rotation so it visually tumbles instead of staying
+      // axis-aligned.
+      let q = rotationCache.get(bodyId);
+      if (q === undefined) {
+        q = world.getBodyRotation(bodyId);
+        rotationCache.set(bodyId, q);
+      }
+      if (q && mesh.quaternion && typeof mesh.quaternion.set === 'function') {
+        mesh.quaternion.set(q.x, q.y, q.z, q.w);
+      }
     }
 
-    // Remove meshes for bodies the world no longer tracks. Iterate
-    // over a snapshot of the keys so deletion during iteration is safe.
-    for (const bodyId of [...this._meshes.keys()]) {
-      if (seenIds.has(bodyId)) continue;
-      const mesh = this._meshes.get(bodyId);
-      this._meshes.delete(bodyId);
-      this.stackGroup.remove(mesh);
-      if (this._shatter) {
-        try { this._shatter(mesh); } catch { /* ignore — best-effort visual */ }
+    // Start dissolves for colliders that vanished this tick.
+    for (const colliderId of [...this._meshes.keys()]) {
+      if (seenIds.has(colliderId)) continue;
+      const mesh = this._meshes.get(colliderId);
+      this._meshes.delete(colliderId);
+      this._beginDissolve(mesh);
+    }
+
+    this._tickDissolves();
+  }
+
+  // ─── Dissolve animation (plan v2 §2.3.1 K — replaces v1 shatter) ────
+
+  _beginDissolve(mesh) {
+    if (!mesh) return;
+    const baseScale = (mesh.scale && typeof mesh.scale.x === 'number') ? mesh.scale.x : 1;
+    this._dissolving.set(mesh, {
+      startMs: this._now(),
+      baseScale,
+    });
+  }
+
+  _tickDissolves() {
+    if (this._dissolving.size === 0) return;
+    const now = this._now();
+    const toRemove = [];
+    for (const [mesh, info] of this._dissolving) {
+      const t = Math.min(1, (now - info.startMs) / DISSOLVE.DURATION_MS);
+      // Opacity fade — guarded on material existing + supporting opacity.
+      if (mesh.material) {
+        const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+        for (const m of mats) {
+          if (m && 'transparent' in m) m.transparent = true;
+          if (m && 'opacity' in m)     m.opacity     = 1 - t;
+        }
       }
+      // Scale up slightly so the cube reads as dissolving outward.
+      if (mesh.scale && typeof mesh.scale.set === 'function') {
+        const s = info.baseScale * (1 + (DISSOLVE.END_SCALE - 1) * t);
+        mesh.scale.set(s, s, s);
+      }
+      if (t >= 1) toRemove.push(mesh);
+    }
+    for (const mesh of toRemove) {
+      this._dissolving.delete(mesh);
+      this.stackGroup.remove(mesh);
     }
   }
 
-  // ─── Lifecycle ───────────────────────────────────────────────────────
+  // ─── Lifecycle ──────────────────────────────────────────────────────
 
-  /**
-   * Tear down — remove all meshes from the scene + drop the registry.
-   * Idempotent. Does NOT touch the session; caller is responsible for
-   * `session.stop()` separately.
-   */
   dispose() {
-    for (const mesh of this._meshes.values()) {
-      this.stackGroup.remove(mesh);
-    }
+    for (const mesh of this._meshes.values()) this.stackGroup.remove(mesh);
     this._meshes.clear();
+    for (const mesh of this._dissolving.keys()) this.stackGroup.remove(mesh);
+    this._dissolving.clear();
     if (this._parent && this.stackGroup.parent === this._parent) {
       this._parent.remove(this.stackGroup);
     }
   }
 }
+
+// Test / introspection accessors.
+export const _DISSOLVE = DISSOLVE;

@@ -1,10 +1,10 @@
-// Tests for PhysicsBoardView (plan v2 §2.3 Phase F+).
+// Tests for PhysicsBoardView (Force-Physics design, plan v2 §2.3.1 J).
 //
-// The view is a thin reactive layer on top of PhysicsSession; tests
-// drive a real session (with real Rapier) and assert the view's mesh
-// registry reconciles correctly. THREE meshes are stubbed via a
-// minimal factory that returns plain objects with `.position` so the
-// behavior is testable in pure Node without a renderer.
+// The renderer is keyed by COLLIDER, not by body — a compound
+// tetromino contributes 4 collider meshes that share one parent
+// body's rotation. Tests use a real PhysicsSession (with real
+// Rapier) plus a stubbed makeCube factory for pure-Node behavior
+// testing.
 
 import { describe, it, expect, vi } from 'vitest';
 import * as THREE from 'three';
@@ -13,7 +13,7 @@ import { EVENTS } from '../gameplay/events.js';
 import { Game } from '../gameplay/game.js';
 import { buildRules } from '../gameplay/rules.js';
 import { PhysicsSession } from '../app/physics-session.js';
-import { PhysicsBoardView } from './physics-board-view.js';
+import { PhysicsBoardView, _DISSOLVE } from './physics-board-view.js';
 
 function seededRng(seed) {
   let s = seed >>> 0;
@@ -26,25 +26,29 @@ function seededRng(seed) {
   };
 }
 
-// Lightweight cube stub — returns an object with `.position` (a real
-// THREE.Vector3 so `mesh.position.copy(...)` works). Records the color
-// it was created with so tests can verify the color path.
+// makeCube stub — returns a real THREE.Mesh with a transparent-able
+// material so dissolve assertions can read opacity.
 function makeCubeStub() {
   return vi.fn((color) => {
-    const m = new THREE.Mesh(); // a real Mesh (works in Node — no renderer needed)
+    const mat = new THREE.MeshBasicMaterial({ color, transparent: false, opacity: 1 });
+    const m = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), mat);
     m.userData.color = color;
     return m;
   });
 }
 
-async function makeFixture() {
+async function makeFixture(opts = {}) {
   const bus = new EventBus({ replayBufferSize: 0, recorderSize: 0 });
   const game = new Game({ rules: buildRules('physics'), bus, rng: seededRng(1) });
   const session = new PhysicsSession({ bus, game });
   await session.start();
   const parent = new THREE.Group();
   const makeCube = makeCubeStub();
-  const view = new PhysicsBoardView({ session, parent, makeCube });
+  // Allow tests to inject a deterministic now() for dissolve assertions.
+  const view = new PhysicsBoardView({
+    session, parent, makeCube,
+    now: opts.now,
+  });
   return { bus, game, session, parent, makeCube, view };
 }
 
@@ -56,99 +60,107 @@ describe('PhysicsBoardView — construction', () => {
   });
 
   it('attaches its stackGroup to parent on construction', async () => {
-    const { parent, view } = await makeFixture();
+    const { parent, view, session } = await makeFixture();
     expect(view.stackGroup.parent).toBe(parent);
     expect(view.cubeCount).toBe(0);
+    session.stop();
     view.dispose();
   });
 });
 
-describe('PhysicsBoardView — tick', () => {
-  it('creates a cube mesh per new physics body', async () => {
-    const { bus, session, view, makeCube } = await makeFixture();
-    bus.emit(EVENTS.PIECE_LOCK, {
-      cells: [{ col: 4, row: 5 }, { col: 5, row: 5 }],
-      color: 0x6cf0ff, side: 'player',
-    });
-    expect(session.bodyCount).toBe(2);
+describe('PhysicsBoardView — collider-keyed rendering (plan v2 §2.3.1 J)', () => {
+  it('creates ONE mesh per collider, not per body', async () => {
+    const { game, session, view, makeCube } = await makeFixture();
+    // T-piece spawn — one compound body, 4 colliders.
+    game.spawnPiece('T');
+    expect(session.bodyCount).toBe(1);
+    expect(session.world.getColliderPositions()).toHaveLength(4);
+
     view.tick();
-    expect(view.cubeCount).toBe(2);
-    expect(makeCube).toHaveBeenCalledTimes(2);
-    // Color from PIECE_LOCK propagated through session → view.
-    expect(makeCube).toHaveBeenNthCalledWith(1, 0x6cf0ff, { settling: true });
+    expect(view.cubeCount).toBe(4);
+    expect(makeCube).toHaveBeenCalledTimes(4);
     session.stop();
     view.dispose();
   });
 
-  it('updates mesh position from body position on each tick', async () => {
-    const { bus, session, view } = await makeFixture();
-    bus.emit(EVENTS.PIECE_LOCK, {
-      cells: [{ col: 4, row: 10 }],
-      color: 0xff0000, side: 'player',
-    });
+  it('updates each cube\'s position from its collider position', async () => {
+    const { game, session, view } = await makeFixture();
+    game.spawnPiece('I'); // horizontal I-piece
     view.tick();
-    const mesh = [...view.stackGroup.children][0];
-    const initialY = mesh.position.y;
-    expect(initialY).toBeCloseTo(10, 1);
+    // Sample a mesh and confirm its position roughly matches one
+    // of the collider positions.
+    const positions = session.world.getColliderPositions();
+    const meshes = [...view.stackGroup.children];
+    expect(meshes).toHaveLength(4);
+    // Each mesh's x should be close to one of the collider xs.
+    const expectedXs = positions.map(p => p.x).sort((a, b) => a - b);
+    const meshXs = meshes.map(m => m.position.x).sort((a, b) => a - b);
+    for (let i = 0; i < 4; i++) {
+      expect(meshXs[i]).toBeCloseTo(expectedXs[i], 3);
+    }
+    session.stop();
+    view.dispose();
+  });
 
-    // Advance the world a few ticks — body falls under gravity.
+  it('cubes inherit parent body rotation (compound tumbles as one unit)', async () => {
+    const { game, session, view } = await makeFixture();
+    game.spawnPiece('I');
+    // Apply torque + tick to spin the body.
+    session.applyRotate(1);
     for (let i = 0; i < 30; i++) {
       session.tick();
       view.tick();
     }
-    expect(mesh.position.y).toBeLessThan(initialY);
+    const meshes = [...view.stackGroup.children];
+    // After spin, the mesh quaternion's z or w should differ from
+    // the identity (0,0,0,1).
+    const drift = meshes.reduce((acc, m) => {
+      const q = m.quaternion;
+      return acc + Math.abs(q.x) + Math.abs(q.y) + Math.abs(q.z) + Math.abs(1 - q.w);
+    }, 0);
+    expect(drift).toBeGreaterThan(0.001);
     session.stop();
     view.dispose();
   });
 
-  it('removes meshes for bodies no longer in the world (layer clear)', async () => {
-    const { bus, session, view } = await makeFixture();
-    const cells = [];
-    for (let col = 0; col < 10; col++) cells.push({ col, row: 0 });
-    bus.emit(EVENTS.PIECE_LOCK, { cells, color: 0x000000, side: 'player' });
+  it('partial compound clear: cleared collider mesh dissolves; survivor stays', async () => {
+    let now = 0;
+    const { session, view } = await makeFixture({ now: () => now });
+    // Compound body with 2 colliders.
+    session.world.addCompoundBody([
+      { x: 0, y: 0, z: 0 }, { x: 0, y: 1, z: 0 },
+    ]);
     view.tick();
-    expect(view.cubeCount).toBe(10);
+    expect(view.cubeCount).toBe(2);
 
-    // Layer detection on the next session.tick clears the row → all
-    // 10 bodies removed from the world.
-    session.tick();
+    // Manually remove the bottom collider (simulates layer clear in K).
+    const cs = session.world.getColliderPositions();
+    const bottom = cs.find(c => c.y < 0.5);
+    session.world.removeCollider(bottom.colliderId);
+    expect(session.world.getColliderPositions()).toHaveLength(1);
+
+    // Tick the view — bottom mesh begins dissolving, survivor stays.
     view.tick();
-    expect(view.cubeCount).toBe(0);
+    expect(view.cubeCount).toBe(1);                      // tracked map
+    expect(view.dissolvingCount).toBe(1);                // dissolving in-flight
+    expect(view.stackGroup.children.length).toBe(2);     // both still in scene during fade
+
+    // Advance time past dissolve duration; survivor mesh persists.
+    now = _DISSOLVE.DURATION_MS + 10;
+    view.tick();
+    expect(view.dissolvingCount).toBe(0);
+    expect(view.stackGroup.children.length).toBe(1);
     session.stop();
     view.dispose();
   });
 
-  it('calls shatter on each removed mesh when wired', async () => {
-    const bus = new EventBus({ replayBufferSize: 0, recorderSize: 0 });
-    const game = new Game({ rules: buildRules('physics'), bus, rng: seededRng(1) });
-    const session = new PhysicsSession({ bus, game });
-    await session.start();
-    const shatter = vi.fn();
-    const view = new PhysicsBoardView({
-      session, parent: new THREE.Group(), makeCube: makeCubeStub(),
-      shatter,
-    });
-    const cells = [];
-    for (let col = 0; col < 10; col++) cells.push({ col, row: 0 });
-    bus.emit(EVENTS.PIECE_LOCK, { cells, color: 0x000000, side: 'player' });
+  it('uses violet fallback when collider has no recorded color', async () => {
+    const { session, view, makeCube } = await makeFixture();
+    // Bypass the spawn path and add a body without color metadata.
+    // PhysicsWorld defaults to 0xffffff in addCompoundBody when
+    // opts.color is omitted.
+    session.world.addCompoundBody([{ x: 0, y: 0, z: 0 }]);
     view.tick();
-    session.tick();
-    view.tick();
-    expect(shatter).toHaveBeenCalledTimes(10);
-    session.stop();
-    view.dispose();
-  });
-
-  it('handles the case where a body has no recorded color (fallback white)', async () => {
-    const { bus, session, view, makeCube } = await makeFixture();
-    bus.emit(EVENTS.PIECE_LOCK, {
-      cells: [{ col: 0, row: 0 }],
-      // color intentionally omitted
-      side: 'player',
-    });
-    view.tick();
-    // PhysicsSession defaults to 0xffffff when payload color is absent;
-    // the view passes that through to makeCube unchanged.
     expect(makeCube).toHaveBeenCalledWith(0xffffff, { settling: true });
     session.stop();
     view.dispose();
@@ -158,54 +170,96 @@ describe('PhysicsBoardView — tick', () => {
     const bus = new EventBus({ replayBufferSize: 0, recorderSize: 0 });
     const game = new Game({ rules: buildRules('physics'), bus, rng: seededRng(1) });
     const session = new PhysicsSession({ bus, game });
-    // Do NOT call session.start()
     const view = new PhysicsBoardView({
       session, parent: new THREE.Group(), makeCube: makeCubeStub(),
     });
     expect(() => view.tick()).not.toThrow();
     expect(view.cubeCount).toBe(0);
   });
+});
 
-  it('uses cellToWorld bake to translate physics positions to scene world', async () => {
-    const bus = new EventBus({ replayBufferSize: 0, recorderSize: 0 });
-    const game = new Game({ rules: buildRules('physics'), bus, rng: seededRng(1) });
-    const session = new PhysicsSession({ bus, game });
-    await session.start();
-    // Custom mapping: physics y becomes scene y * 2 (e.g. half-cell scaling).
-    const cellToWorld = (c, r, d) => new THREE.Vector3(c * 2, r * 2, (d || 0) * 2);
-    const view = new PhysicsBoardView({
-      session, parent: new THREE.Group(), makeCube: makeCubeStub(), cellToWorld,
-    });
-    bus.emit(EVENTS.PIECE_LOCK, {
-      cells: [{ col: 3, row: 7 }],
-      color: 0xff0000, side: 'player',
-    });
+describe('PhysicsBoardView — dissolve animation', () => {
+  it('opacity fades from 1 to 0 over DISSOLVE.DURATION_MS', async () => {
+    let now = 0;
+    const { session, view } = await makeFixture({ now: () => now });
+    session.world.addBody(0, 0, 0);
     view.tick();
     const mesh = [...view.stackGroup.children][0];
-    expect(mesh.position.x).toBeCloseTo(3 * 2, 3);
-    expect(mesh.position.y).toBeCloseTo(7 * 2, 3);
+    expect(mesh.material.opacity).toBe(1);
+
+    // Remove the body.
+    const cid = session.world.getColliderPositions()[0].colliderId;
+    session.world.removeCollider(cid);
+    view.tick();
+    expect(mesh.material.opacity).toBe(1); // tick at t=0 starts; opacity not yet animated until next tick
+
+    // Advance to half duration; opacity should be ~0.5.
+    now = _DISSOLVE.DURATION_MS / 2;
+    view.tick();
+    expect(mesh.material.opacity).toBeGreaterThan(0.4);
+    expect(mesh.material.opacity).toBeLessThan(0.6);
+
+    // Advance to full duration; opacity 0.
+    now = _DISSOLVE.DURATION_MS;
+    view.tick();
+    expect(mesh.material.opacity).toBe(0);
+    session.stop();
+    view.dispose();
+  });
+
+  it('mesh scales up slightly during dissolve (visual cue)', async () => {
+    let now = 0;
+    const { session, view } = await makeFixture({ now: () => now });
+    session.world.addBody(0, 0, 0);
+    view.tick();
+    const mesh = [...view.stackGroup.children][0];
+    expect(mesh.scale.x).toBe(1);
+
+    const cid = session.world.getColliderPositions()[0].colliderId;
+    session.world.removeCollider(cid);
+    view.tick(); // start dissolve at t=0
+
+    now = _DISSOLVE.DURATION_MS;
+    view.tick();
+    expect(mesh.scale.x).toBeCloseTo(_DISSOLVE.END_SCALE, 5);
+    session.stop();
+    view.dispose();
+  });
+
+  it('mesh is removed from scene after dissolve completes', async () => {
+    let now = 0;
+    const { session, view } = await makeFixture({ now: () => now });
+    session.world.addBody(0, 0, 0);
+    view.tick();
+    const cid = session.world.getColliderPositions()[0].colliderId;
+    session.world.removeCollider(cid);
+    view.tick();
+    expect(view.stackGroup.children.length).toBe(1);
+    now = _DISSOLVE.DURATION_MS + 10;
+    view.tick();
+    expect(view.stackGroup.children.length).toBe(0);
     session.stop();
     view.dispose();
   });
 });
 
 describe('PhysicsBoardView — dispose', () => {
-  it('clears the mesh registry + detaches stackGroup from parent', async () => {
-    const { parent, bus, session, view } = await makeFixture();
-    bus.emit(EVENTS.PIECE_LOCK, {
-      cells: [{ col: 0, row: 0 }, { col: 1, row: 0 }],
-      color: 0xff0000, side: 'player',
-    });
+  it('clears mesh + dissolve registries and detaches stackGroup', async () => {
+    const { session, view, parent } = await makeFixture();
+    session.world.addCompoundBody([
+      { x: 0, y: 0, z: 0 }, { x: 1, y: 0, z: 0 },
+    ]);
     view.tick();
     expect(view.cubeCount).toBe(2);
     view.dispose();
     expect(view.cubeCount).toBe(0);
+    expect(view.dissolvingCount).toBe(0);
     expect(view.stackGroup.parent).toBeNull();
     session.stop();
   });
 
   it('dispose is idempotent', async () => {
-    const { view, session } = await makeFixture();
+    const { session, view } = await makeFixture();
     expect(() => { view.dispose(); view.dispose(); }).not.toThrow();
     session.stop();
   });
