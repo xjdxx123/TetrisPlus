@@ -1,6 +1,6 @@
 # Tetris+ Gameplay Plan v2 — Post-§12 Forward Roadmap
 
-**Date:** 2026-05-09 · **Test surface:** 924 tests across 52 files (all green) ·
+**Date:** 2026-05-09 · **Test surface:** 975 tests across 54 files (all green) ·
 **Predecessor:** `document/archived/plan_gameplay_1.md` (preserved for the
 full design rationale, mode-by-mode specs, and shipped-implementation
 notes). v2 picks up where v1 left off.
@@ -10,9 +10,10 @@ celebration recipes, 1.3 Garbage drain flash, 1.4 In-run B2B/combo
 chips) ✅ shipped on main; the §2.3 Pure Physics chapter — including
 the Force-Physics rework (Phases G/H/J/I plus the K fold-in) — also ✅
 shipped, with playtest tuning (Phase L) as the only remaining
-follow-up. v2 now spans only the speculative chapters (§2.1 3D
-Tetris, §2.2 Online Versus), gated behind the 30-day
-promote-or-delete culture.
+follow-up. **§2.1 3D Tetris is now also ✅ shipped** end-to-end
+(Phases A through G plus the kick-table fold-in D-2); v2 now spans
+only §2.2 Online Versus, gated behind the 30-day promote-or-delete
+culture.
 
 ---
 
@@ -50,6 +51,11 @@ specified them; v2 won't redesign these, only build on top.
 | **§2.3 Pure Physics — Force-Physics Phase J** | v2 §2.3.1 (`f193170`) | `world/physics-board-view.js` reworked: meshes keyed by `colliderId` (not `bodyId`) so a compound tetromino renders as 4 cubes that move + rotate as a unit, and a partial layer clear removes only the cleared cubes while the parent body's survivors stay. Per-tick: snapshot `world.getColliderPositions()`, create / update mesh per collider, copy parent body's quaternion. Removed colliders trigger a 250ms dissolve (opacity 1→0, scale 1→1.10) instead of v1 shatter. 13 tests. |
 | **§2.3 Pure Physics — Force-Physics Phase K** | v2 §2.3.1 (delivered via H + J) | Layer-clear-without-shatter wiring. PhysicsSession's per-tick layer detector calls `world.removeCollider(colliderId)` for each cleared collider (rather than removing whole bodies), preserving any partial-piece survivor as a smaller compound body. PhysicsBoardView's reconciler observes the missing colliderIds and starts the dissolve animation per-cube. No separate phase commit — the contract was small enough to fold into the H + J commits with full test coverage on both sides. |
 | **§2.3 Pure Physics — Force-Physics Phase I** | v2 §2.3.1 (`bd86167`) | `app/main.js` input routing. `tryMove` / `tryRotate` / `softDrop` / `hardDrop` / `holdActive` all branch on `isPhysicsMode()`; in physics mode they route to `physicsSession.applyMove(±1)` / `applyRotate(±1)` / `applySoftDrop()` / `applyHardDrop()` respectively. Held down-arrow applies soft-drop force per tick. BoardView is skipped entirely in physics mode (the active piece is a body from spawn — there's no pre-lock pose to render via the grid path). PhysicsSession's `onEndRun` is wired to the host's `endRun()` so topouts trigger the gameover overlay + cascade. Hold (Shift / KeyC) is a no-op in physics mode (mid-flight body swap would feel like rubber-banding). |
+| **§2.1 3D Tetris — Phase F + B** | v2 §2.1 (`1e538e9`) | `'3d'` registered in `Mode.AVAILABLE` / `LABELS` / `DESCRIPTIONS` / `CONFIG` (Phase F). `Game` extended to hold 3D state — reads `rules.dimensions` (10×20×10) + `pieceSet: 'tetracubes'`, internal `_board` becomes `[depth][rows][cols]` with 2D modes collapsing to depth=1, `getPieceCells` returns `{col, row, depth}`, collides / spawn / lock / serialize / restore / shiftStackDown / applyGarbage / clearLines all depth-aware. Storage `'3d'` slot + mode-stats formatter. Backward compat verified — every 2D test still green. Serialize bumped to v=2 (auto-loads v1 blobs into front depth slice). |
+| **§2.1 3D Tetris — Phase D** | v2 §2.1 (`75bef33`) | `Game.tryRotate(dir, axis)` 3-axis rotation. 2D modes use SRS (unchanged); 3D modes route to `experimental/3d/rotation.js` with axis ∈ {x, y, z}. PIECE_ROTATE payload gains `axis`. |
+| **§2.1 3D Tetris — Phase C** | v2 §2.1 (`c1fc8d8`) | `world/board-view-3d.js` — render side of one 3D Game. Mirrors BoardView's contract (same opts + three groups + bus handlers) but operates on a `[depth][rows][cols]` mesh registry. main.js mode-start branch + `cellToWorld3D` (PLAY_D_3D=10). Keyboard hotkeys: KeyW/S = pitch (X), KeyA/D = yaw (Y), KeyQ/E = depth nudge. |
+| **§2.1 3D Tetris — Phase D-2** | v2 §2.1 (`093cb8f`) | `experimental/3d/kicks.js` — 19-test kick table per rotation axis (identity + 6 face + 12 edge), axis-biased so in-plane shifts come first. Game's `_tryRotate3D` walks the table, restoring 2D-SRS-style "rotate near wall, piece nudges over" feel. |
+| **§2.1 3D Tetris — Phase E + G** | v2 §2.1 (`d9f4ee5`) | `<body data-mode="...">` tagged on every Mode.start so CSS / future panels can target the active mode. Help panel grew a `.help-3d` section with 3-axis rotation keys. LINE_CLEAR pipeline shape-verified: 3D layers fire the same payload (rows/colors/overallColor) the existing vfx/director consumes; BoardView3D's `_onLineClear` shatters the 100 cubes per cleared layer via the shared shard pool. |
 
 ### 0.2 Architectural property to preserve
 
@@ -64,14 +70,17 @@ It is the load-bearing principle of v2 too.
 
 ### 0.3 Test surface
 
-924 tests across 52 files (all green at the Force-Physics-rework
-landing). Each shipped feature carried its own test file under the
-same directory (rules packs ship a `*.test.js` sibling; the §12
-detector ships `t-spin.test.js`; §13 stats writer extends
-`end-of-run.test.js`; the Force-Physics rework adds 16 PhysicsWorld
-compound-body tests, 28 PhysicsSession lifecycle tests including the
-soft-drop velocity-cap regression, and 13 PhysicsBoardView dissolve /
-collider-keyed reconciler tests).
+975 tests across 54 files (all green at the §2.1 3D Tetris landing).
+Each shipped feature carries its own test file under the same
+directory (rules packs ship a `*.test.js` sibling; the §12 detector
+ships `t-spin.test.js`; §13 stats writer extends `end-of-run.test.js`;
+the Force-Physics rework adds 16 PhysicsWorld compound-body tests, 28
+PhysicsSession lifecycle tests including the soft-drop velocity-cap
+regression, and 13 PhysicsBoardView dissolve / collider-keyed
+reconciler tests; the 3D rework adds 100 pure-logic tests across
+`experimental/3d/` plus 16 Game-3D extension tests, 12 BoardView3D
+mesh-registry tests, 7 kick-table tests, and 6 axis-aware tryRotate
+tests).
 
 ---
 
@@ -239,12 +248,13 @@ v2 doesn't restate the specs — they live in `archived/plan_gameplay_1.md`
 §6, §7, §8 — but it does update the **prerequisites and ordering**
 in light of what's now shipped.
 
-### 2.1 3D Tetris (§6) — ~8 days · **Phase A shipped**
+### 2.1 3D Tetris (§6) — ✅ **all phases shipped**
 
-**Status.** Spec is in v1 §6. **Phase A ✅ shipped** (on
-`feat/3d-tetris`) as a pure-JS foundation; phases B–G (3D board
-representation, camera, rendering, HUD, mode-tab UX, kick tables,
-VFX) remain.
+**Status.** Spec is in v1 §6. **All phases A through G ✅ shipped**
+(on `feat/3d-tetris`). The mode is selectable from the picker,
+playable end-to-end via keyboard (X/Y/Z axis rotation, Q/E depth
+nudge, full kick table), with depth-aware rendering, layer-clear VFX,
+and per-mode stats tracking.
 **Prereq updates.** §3.7's `Game` class is the unblocker — 3D
 ships as its own `Game` variant with a 3D board representation,
 not a fork of `app/main.js`. The seeded RNG + serialize/restore
@@ -261,17 +271,23 @@ corner check uses 4 corners). 3D would need to either:
   experimental. Phase A's rules pack hard-codes (a) via
   `goalMultiplier: 1.0` and a `clearType`-ignoring `lineScore`.
 
-**Phase plan:**
+**Phase plan (all ✅ shipped):**
 
-| Phase | Scope | Status | Effort |
-|---|---|---|---|
-| **A — Pure logic + scaffolding** | tetracubes, 3D rotation, layer detection, rules pack, registry entry | ✅ shipped | ½ day |
-| B — Host bridge | `Game` 3D-aware board representation; piece spawn / collision / lock in 3D; depth=1 fallback for 2D modes | open | 1 day |
-| C — Camera + render | tilted-ortho default rig, 45°-snap orbit, slice/X-ray hotkeys, instanced-cube render at 10×10×20 | open | 2 days |
-| D — Input + 3D kick table | 3 rotation axes (yaw/pitch/roll); documented 6-face + 12-edge kick offsets per archived §6.4 | open | 1 day |
-| E — HUD layout | top-bar variants of the side panels (the 10×10 footprint won't fit the 2D side layout); piece preview at low-res isometric | open | 1 day |
-| F — Mode-tab UX | mode visibility flag, settings opt-in, beginner/advanced toggle (6.3.1 vs 6.3.3) | open | ½ day |
-| G — VFX | layer-clear shatter cascade adapted for 10×10 footprint; "reveal the floor" beat | open | 1 day |
+| Phase | Scope | Commit |
+|---|---|---|
+| **A** — Pure logic + scaffolding | tetracubes, 3D rotation, layer detection, rules pack, registry entry | `30d01a9` |
+| **F** — Mode-tab UX | `'3d'` registered in `Mode.AVAILABLE` / `LABELS` / `DESCRIPTIONS` / `CONFIG`, gated as experimental | `1e538e9` |
+| **B** — Host bridge | `Game` reads `rules.dimensions` + `pieceSet`; 3D-shaped `_board[depth][rows][cols]` with depth=1 fallback for 2D; `getPieceCells` returns `{col, row, depth}`; collides / spawn / lock / serialize / restore all depth-aware; storage + stats slots added | `1e538e9` |
+| **D** — Input + 3D rotation | `Game.tryRotate(dir, axis)` routes to `experimental/3d/rotation.js` for tetracubes; PIECE_ROTATE payload carries the axis | `75bef33` |
+| **D-2** — 3D kick table | 19-test face+edge offsets (`experimental/3d/kicks.js`), axis-biased so in-plane shifts come first; restores SRS-style "rotate near wall, piece nudges over" feel | `093cb8f` |
+| **C** — Camera + render | `world/board-view-3d.js` parallels BoardView's contract, mesh registry `[depth][rows][cols]`; main.js mode-start branch + `cellToWorld3D` for the 10-cell-deep well; KeyW/A/S/D for pitch/yaw + KeyQ/E for depth nudges | `c1fc8d8` |
+| **E** — HUD layout | `<body data-mode="...">` set on every Mode.start; help panel grew a `.help-3d` section listing the 3-axis rotation keys; CSS hides the 2D-only "Rotate ↑/X" + "Hold C/Shift" rows in 3D mode | `d9f4ee5` |
+| **G** — VFX | LINE_CLEAR pipeline verified shape-compatible with vfx/director — same `rows`/`colors`/`overallColor` payload, with `colors[i]` now averaging across the full Y-slab. BoardView3D's `_onLineClear` shatters the 100 cubes per cleared layer (10 cols × 10 depths) via the shared shard pool | `d9f4ee5` |
+
+**Total Phase A→G effort delivered:** all phases live; ~975 tests
+green at landing (was 800 pre-3D). The visual chrome reshuffle from
+archived §6.6 (top-bar Stats / Hold / Next variants) is gated on
+visual playtest as a follow-up.
 
 **Phase A — what shipped (`feat/3d-tetris`):**
 - `gameplay/experimental/3d/tetracubes.js` — 8-piece library.
@@ -602,7 +618,7 @@ risks that remain *open* plus new ones discovered in v2 work.
 | Risk | Likelihood | Impact | Mitigation |
 |---|---|---|---|
 | ✅ §12 events outpace HUD/VFX consumers | (resolved) | — | §1.1 surfaces persisted modern stats; §1.2 wires VFX presets + camera shake; §1.3 visualizes garbage drain; §1.4 shows persistent in-run chips. The score now both math-applies AND visually + audibly registers. |
-| Modern-rules state needs 3D generalization for 3D Tetris (§6) | Medium (only if 3D ships) | Medium | Plan §2.1: scope 3D experimental as 2D-rules-only; revisit if 3D promotes. |
+| ✅ Modern-rules state needs 3D generalization for 3D Tetris (§6) | (resolved) | — | Phase A's rules pack opted out of §12 modern rules via `goalMultiplier: 1.0` + `clearType`-ignoring `lineScore` — 3D Tetris ships as 2D-rules-only per the original plan recommendation. T-spin / B2B / Perfect Clear are inert in 3D mode; if the mode promotes out of experimental, a future revision can plug in a 3D-aware §12 layer (24-corner check or face-of-pivot heuristic). |
 | Online wire format must carry §12 events from day one or feel broken | Medium (only if §7 ships before 1.2) | Medium | Land item 1.2 first. The events already flow through the bus; networking layer pipes them through. |
 | Garbage-bar pips are too subtle / fade too fast for casual play | Low | Low | Item 1.3 adds a pip linger animation; further tweaks gated on playtest. |
 | Sprint's "T-spin: score 0" rule is community-controversial (mode chooses to ignore the bonus to keep "time-only" semantics) | Low | Low | T_SPIN events still fire so the HUD callout appears; the score field is 0 by Sprint's `lineScore: () => 0`. Documented in `gameplay/rules/sprint.js` header. |
@@ -621,16 +637,15 @@ risks that remain *open* plus new ones discovered in v2 work.
 3. ✅ **1.3 Garbage drain flash** — `7553c72`
 4. ✅ **1.4 In-run B2B / combo chip** — `c123529` (originally deferred; landed in the same session as 1.1–1.3 per user request)
 5. ✅ **2.3 Pure Physics — Force-Physics rework** — `177a16d` (G) / `5557cd5` (H) / `f193170` (J) / `bd86167` (I); K folded in. Playtest tuning (Phase L) is the only follow-up and gated on human keyboard time.
+6. ✅ **2.1 3D Tetris** — `30d01a9` (A) / `1e538e9` (F + B) / `75bef33` (D) / `c1fc8d8` (C) / `093cb8f` (D-2) / `d9f4ee5` (E + G). End-to-end playable; visual-chrome reshuffle from archived §6.6 (top-bar Stats / Hold / Next variants) is gated on visual playtest.
 
 ### 4.2 Remaining (speculative chapters)
 
-6. **2.1 3D Tetris (experimental)** — 8 days (pause-or-promote; Phase A shipped)
 7. **2.2 Online Versus** — 16 days (the §1.2 prerequisite is now met)
 
-**Total speculative:** 24 days (was: 5 + 8 + 16; physics chapter
-shipped its Force-Physics rework so its budget is retired); expect
-1 chapter to actually ship next based on the 30-day promote-or-delete
-policy.
+**Total speculative:** 16 days (was: 5 + 8 + 16; both Force-Physics
+and 3D Tetris budgets are retired); expect Online Versus to be the
+next chapter under the 30-day promote-or-delete policy.
 
 ### 4.3 Parallelization notes
 
