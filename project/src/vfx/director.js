@@ -319,6 +319,49 @@ export function registerDirector(bus, api) {
     })
   );
 
+  // ─── Pure Physics — layer-cleared recipe (plan v2 §2.3 Phase F) ────
+  //
+  // Physics mode never fires LINE_CLEAR (the grid path is bypassed by
+  // PhysicsSession). PHYSICS_LAYER_CLEARED is the equivalent. We
+  // route it to the same shockwave + sfx + shake surfaces but with
+  // physics-specific accents:
+  //   - Color: violet (the experimental tier's identity).
+  //   - Origin: each layer's `centerY` from the payload, so a
+  //     bottom-row clear feels like it's at the bottom and a stack
+  //     near the top reads as a high-up event. Uses the existing
+  //     shockwave api with synthetic `rows` of the right length.
+  //   - SFX: 'physics-layer' (host's audio bank can map this; falls
+  //     back to a no-op if unwired).
+  //   - Shake: scales with simultaneous layer count (single layer
+  //     0.3 force, double 0.5, three+ 0.7 cap).
+  if (api.lineClearLayers && api.lineClearLayers.shockwave) {
+    offs.push(
+      bus.on(EVENTS.PHYSICS_LAYER_CLEARED, ({ layers, simultaneous, cubeCount }) => {
+        if (!Array.isArray(layers) || layers.length === 0) return;
+        const PHYSICS_VIOLET = 0xd3a8ff; // matches physics-badge accent + T-piece tone
+        for (const layer of layers) {
+          // The shockwave emitter signature is (rows, color, rowCount)
+          // — `rows` indexes are normally board-row integers used to
+          // compute world-Y. For physics, we pass a single-element
+          // synthetic array `[Math.round(centerY)]` so the existing
+          // emitter's bottomRow lookup yields a sensible Y. rowCount
+          // controls intensity; pass the layer size (≥ 10).
+          api.lineClearLayers.shockwave(
+            [Math.round(layer.centerY)],
+            PHYSICS_VIOLET,
+            Math.max(1, layer.size | 0),
+          );
+        }
+        if (typeof api.sfx === 'function') api.sfx('physics-layer', { simultaneous, cubeCount });
+        if (typeof api.shake === 'function') {
+          // 0.3 / 0.5 / 0.7 for 1 / 2 / 3+ simultaneous layers.
+          const force = Math.min(0.7, 0.3 + (Math.max(0, simultaneous - 1)) * 0.2);
+          api.shake(force);
+        }
+      })
+    );
+  }
+
   return () => {
     for (const off of offs) off();
     offs.length = 0;

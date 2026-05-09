@@ -401,6 +401,88 @@ describe('director — §12 modern-rules recipes', () => {
   });
 });
 
+describe('director — Pure Physics layer-cleared recipe (plan v2 §2.3 Phase F)', () => {
+  it('PHYSICS_LAYER_CLEARED fires shockwave per layer in violet at the layer\'s centerY', () => {
+    const bus = new EventBus();
+    const layers = stubLayers();
+    const stage = stubStage({});
+    const api = stubApi({ stageController: stage, lineClearLayers: layers });
+    registerDirector(bus, api);
+
+    bus.emit(EVENTS.PHYSICS_LAYER_CLEARED, {
+      layers: [
+        { centerY: 0.2, minY: 0, maxY: 0.4, size: 10 },
+        { centerY: 5.7, minY: 5.5, maxY: 5.9, size: 12 },
+      ],
+      cubeCount: 22, simultaneous: 2, side: 'player',
+    });
+
+    expect(layers.shockwave).toHaveBeenCalledTimes(2);
+    // Violet color, rounded centerY in rows[0], size as rowCount.
+    expect(layers.shockwave).toHaveBeenNthCalledWith(1, [0],  0xd3a8ff, 10);
+    expect(layers.shockwave).toHaveBeenNthCalledWith(2, [6],  0xd3a8ff, 12);
+  });
+
+  it('PHYSICS_LAYER_CLEARED fires sfx + camera shake (scales with simultaneous count)', () => {
+    const bus = new EventBus();
+    const layers = stubLayers();
+    const stage = stubStage({});
+    const api = stubApi({ stageController: stage, lineClearLayers: layers, shake: vi.fn() });
+    registerDirector(bus, api);
+
+    bus.emit(EVENTS.PHYSICS_LAYER_CLEARED, {
+      layers: [{ centerY: 0, minY: 0, maxY: 0, size: 10 }],
+      cubeCount: 10, simultaneous: 1, side: 'player',
+    });
+    bus.emit(EVENTS.PHYSICS_LAYER_CLEARED, {
+      layers: [
+        { centerY: 0, minY: 0, maxY: 0, size: 10 },
+        { centerY: 1, minY: 1, maxY: 1, size: 10 },
+      ],
+      cubeCount: 20, simultaneous: 2, side: 'player',
+    });
+    bus.emit(EVENTS.PHYSICS_LAYER_CLEARED, {
+      layers: [
+        { centerY: 0, minY: 0, maxY: 0, size: 10 },
+        { centerY: 1, minY: 1, maxY: 1, size: 10 },
+        { centerY: 2, minY: 2, maxY: 2, size: 10 },
+        { centerY: 3, minY: 3, maxY: 3, size: 10 },
+      ],
+      cubeCount: 40, simultaneous: 4, side: 'player',
+    });
+    expect(api.sfx).toHaveBeenCalledTimes(3);
+    expect(api.sfx).toHaveBeenNthCalledWith(1, 'physics-layer', { simultaneous: 1, cubeCount: 10 });
+    expect(api.sfx).toHaveBeenNthCalledWith(2, 'physics-layer', { simultaneous: 2, cubeCount: 20 });
+    // Force scale: 1 → 0.3, 2 → 0.5, 4+ → capped at 0.7.
+    const calls = api.shake.mock.calls;
+    expect(calls[0][0]).toBeCloseTo(0.3, 5);
+    expect(calls[1][0]).toBeCloseTo(0.5, 5);
+    expect(calls[2][0]).toBeCloseTo(0.7, 5);
+  });
+
+  it('empty layers payload (defensive) is a no-op', () => {
+    const bus = new EventBus();
+    const layers = stubLayers();
+    const stage = stubStage({});
+    const api = stubApi({ stageController: stage, lineClearLayers: layers });
+    registerDirector(bus, api);
+    bus.emit(EVENTS.PHYSICS_LAYER_CLEARED, { layers: [], cubeCount: 0, simultaneous: 0, side: 'player' });
+    expect(layers.shockwave).not.toHaveBeenCalled();
+  });
+
+  it('skips entirely when host lacks lineClearLayers wiring (legacy call sites)', () => {
+    const bus = new EventBus();
+    const api = stubApi();
+    expect(() => registerDirector(bus, api)).not.toThrow();
+    expect(() => {
+      bus.emit(EVENTS.PHYSICS_LAYER_CLEARED, {
+        layers: [{ centerY: 0, minY: 0, maxY: 0, size: 10 }],
+        cubeCount: 10, simultaneous: 1, side: 'player',
+      });
+    }).not.toThrow();
+  });
+});
+
 describe('LineClearOrchestrator — §12 modern-rules color overrides', () => {
   it('clearType="tspin" overrides shockwave color with violet', () => {
     const layers = stubLayers();

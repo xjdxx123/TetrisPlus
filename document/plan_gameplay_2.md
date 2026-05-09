@@ -1,6 +1,6 @@
 # Tetris+ Gameplay Plan v2 — Post-§12 Forward Roadmap
 
-**Date:** 2026-05-09 · **Test surface:** 775 tests across 46 files (all green) ·
+**Date:** 2026-05-09 · **Test surface:** 804 tests across 47 files (all green) ·
 **Predecessor:** `document/archived/plan_gameplay_1.md` (preserved for the
 full design rationale, mode-by-mode specs, and shipped-implementation
 notes). v2 picks up where v1 left off.
@@ -38,6 +38,9 @@ specified them; v2 won't redesign these, only build on top.
 | **§1 polish — In-run chips** | v2 §1.4 (`c123529`) | `ui/modern-chips.js` — persistent top-left readout of "B2B ×N" + "Combo ×N" while streaks active; complements transient callouts. |
 | **§2.3 Pure Physics — Phase A** | v2 §2.3 | `gameplay/experimental/physics/` scaffolding + rules pack (`buildPhysicsRules`, registered) + pure connected-component layer-detection algorithm. No Rapier dependency yet — phase A is the JS-only foundation that phases B–F will build on. 38 new tests. |
 | **§2.3 Pure Physics — Phase B** | v2 §2.3 | `physics/world.js` Rapier-backed wrapper + `@dimforge/rapier3d-compat` runtime dep. Lazy `loadRapier()` factory, `createPhysicsWorld()` async constructor, `PhysicsWorld` class with addBody / step / getPositions / removeBody[s] / highestY / awakeCount / wakeAll / dispose. Default geometry: floor + side walls. Tested against real Rapier (no mocks). 20 new tests; all green. |
+| **§2.3 Pure Physics — Phases C+D** | v2 §2.3 | `app/physics-session.js` integration glue: PhysicsSession class wraps Game + PhysicsWorld + detectLayers. Subscribes to PIECE_LOCK (cell→body, board-erase). Per-tick: world.step() → detectLayers → removeBodies → emit `PHYSICS_LAYER_CLEARED` (new event). Cumulative counters for HUD (layersClearedTotal, cubesClearedTotal). 18 new tests against real Rapier. |
+| **§2.3 Pure Physics — Phase E** | v2 §2.3 | `physics` registered in `Mode.AVAILABLE` / LABELS / DESCRIPTIONS / CONFIG (with `isExperimental: true` flag). New `physics` slot in `STATS_DEFAULTS.modeBests` (`bestLayersCleared` / `totalLayersCleared`). Custom `updateBest` hook on the rules pack. New `ui/physics-badge.js` HUD module: live Cubes / Awake / Layers metrics with violet pulse on each PHYSICS_LAYER_CLEARED. Stats-tab formatter extended: physics primary = score; secondary = "best run N · M total layers". |
+| **§2.3 Pure Physics — Phase F** | v2 §2.3 | `vfx/director.js` extended with a PHYSICS_LAYER_CLEARED subscriber: per-layer violet shockwave at the layer's centerY, sfx('physics-layer'), camera shake scaling with simultaneous count (0.3 / 0.5 / 0.7). Skips silently when host lacks lineClearLayers / sfx / shake wiring. 4 new tests. |
 
 ### 0.2 Architectural property to preserve
 
@@ -273,10 +276,10 @@ bonus possible).
 |---|---|---|---|
 | **A — Pure logic + scaffolding** | rules pack, layer-detection algorithm, registry entry, experimental/ README | ✅ shipped | ½ day |
 | **B — Rapier integration** | `physics/world.js` wrapping Rapier, lazy-import factory, body lifecycle primitives | ✅ shipped | 1 day |
-| C — Host bridge | `Mode.start({key:'physics'})` lazy-loads + boots PhysicsWorld; `Game.lockPiece` cell→body conversion; per-frame step + getPositions | open | 1 day |
-| D — Layer detection wiring | host calls detectLayers on snapshots, emits LINE_CLEAR with body IDs, removes via PhysicsWorld | open | ½ day |
-| E — Mode integration + HUD | `ui/physics-badge.js` (settled / awake count), Mode tab visibility, settings opt-in | open | ½ day |
-| F — VFX integration | dust on collision, layer-clear shatter adapts to body positions; render bodies via existing cube mesh path | open | 1 day |
+| **C+D — Host bridge + layer detection** | `app/physics-session.js`: PIECE_LOCK → addBody, per-tick step + detectLayers + emit PHYSICS_LAYER_CLEARED, cumulative HUD counters | ✅ shipped | 1.5 days |
+| **E — Mode integration + HUD** | physics in Mode.AVAILABLE, storage slot, ui/physics-badge.js, mode-stats formatter | ✅ shipped | ½ day |
+| **F — VFX integration (recipe)** | director.js subscriber: per-layer violet shockwave + sfx + camera shake on PHYSICS_LAYER_CLEARED | ✅ shipped | ½ day |
+| F+ — VFX polish (deferred) | per-collision dust on Rapier contact events; body-position-aware shatter on layer clear; render cubes from physics positions (vs. grid positions) — needs main.js host integration that disables BoardView's static cubes for physics mode | open | 1 day |
 
 **Phase A — what shipped (`<TBD-sha>`):**
 - `gameplay/experimental/physics/rules.js` — `buildPhysicsRules()` with
@@ -334,20 +337,32 @@ bonus possible).
   mocks); tests use `toBeCloseTo` for position assertions to
   accommodate Rapier's semi-implicit Euler integration.
 
-**Phase C prep notes:**
-- The host's `Mode.start({key:'physics'})` handler in `app/main.js`
-  does `await createPhysicsWorld()` (lazy-imports Rapier). Stash
-  the world reference for the lifetime of the run; call `dispose()`
-  on Mode.stop.
-- `Game.lockPiece` doesn't change — the rules engine stays grid-
-  aware. The host bridge intercepts PIECE_LOCK events: for each
-  cell in the locked piece, call `world.addBody(cell.col, cell.row, 0)`
-  and remember the resulting bodyId in a side-table indexed by
-  `(col, row)` so render-side mesh updates can find the right body.
-- Per-frame: in the gameplay tick, call `world.step()`; in render,
-  call `getPositions()` and update the cube-mesh transforms from
-  the snapshot. Update `state.physicsHighestY = world.highestY` so
-  the rules pack's `endCondition` sees the live value.
+**What's left (F+ deferred):**
+
+The simulation is fully wired and the player-facing surface (mode
+selector, HUD, stats persistence, layer-clear callouts) is in
+place. What remains is **render integration**: in physics mode,
+locked pieces should render at their *body* positions (which drift
+under gravity), not their *grid* positions. Currently the existing
+BoardView's PIECE_LOCK handler creates cubes at grid coordinates,
+which never move — so the physics simulation runs invisibly under
+the static grid cubes.
+
+The deferred F+ work is a `noLockMeshes` opt on BoardView (skip
+static cube creation in physics mode) plus a parallel
+"physics-cube-renderer" that takes `world.getPositions()` snapshots
+and updates a cube-mesh's transform per frame. Per-collision dust
+emission (Rapier contact events → vfx/emitters/dust spawn) is a
+further polish item on top.
+
+**Host wiring still needed:** `Mode.start({key:'physics'})` should
+do `await createPhysicsWorld()` and `await session.start()`; the
+animate loop should call `session.tick()`; `Mode.stop` should
+`session.stop()`. The session module is testable in isolation
+(see `physics-session.test.js`); host integration is a focused
+~50-line patch in `app/main.js` once F+ is also planned (otherwise
+the player picks physics, plays "regular Tetris that happens to
+have a hidden physics simulation", which is confusing).
 
 ---
 
