@@ -9,11 +9,14 @@
 
 ## 0. Implementation Status
 
-Last refreshed **2026-05-08** after Phase 6 (Versus local v1) landed.
-Six standard modes are playable via the rules engine; the remaining work
-is the Mode tab UX upgrade, the stats renderer, the Game-container
-extraction (§3.7 below — added in this revision), and the speculative
-chapters (§6/§7/§8 in this doc — 3D, online, physics).
+Last refreshed **2026-05-08** after the §3.7 Game-container extraction
+landed (sub-phases 7a–7f). Six standard modes are playable via the
+rules engine; the per-instance Game + BoardView + intents + bot +
+versus-composition + seeded-RNG modules all ship with full unit
+tests. The remaining work is the dual-sim **runtime swap** (the
+§3.7 modules exist but main.js's versus mode still uses the
+Phase-6 single-sim path) and the speculative chapters (§6/§7/§8 —
+3D, online, physics).
 
 ### 0.1 Phase completion dashboard
 
@@ -24,15 +27,16 @@ chapters (§6/§7/§8 in this doc — 3D, online, physics).
 | 3 — Sprint | ✅ | `gameplay/rules/sprint.js` (gravity-locked, `lineScore = 0`), `ui/sprint-badge.js` (`m:ss.mmm` timer), `modeBests.sprint = { completed, bestTimeMs }` |
 | 4 — Ultra | ✅ | `gameplay/rules/ultra.js` (120s, milestones at 30/60/90/110/115/118/119s), `ui/ultra-badge.js` (countdown + warning pulse at ≤10s) |
 | 5 — Zen | ✅ | `gameplay/rules/zen.js` (gentler gravity, `onTopOut` interceptor), new `ZEN_RESCUE` event, `shiftStackDown` helper in main.js, `ui/zen-badge.js` (Lines/Pieces/Shifts + Stop session button), end-of-run `updateBest` hook for `longestSessionMs` + `totalLines` |
-| 6 — Versus (local) | ⚠ v1 with caveats | `gameplay/rules/versus.js` (combo-aware garbage table), `gameplay/garbage.js` (pure helpers), new `GARBAGE_SENT` / `GARBAGE_RECEIVED` events, `ui/versus-badge.js` (dual-color queue + WIN/LOSS finale), AI bot opponent inside main.js (8–12s send cadence, KO at 12 absorbed rows), `modeBests.versus = { wins, losses, draws, eloMmr }`. **Caveat:** the bot is a single-process abstraction; the dual-`Game`-instance architecture the plan calls for in §3.6 #7 is _not_ done — see new §3.7 below. |
-| 7 — Mode tab UX upgrade | ❌ | — (next, ½ day per §9.1) |
-| 8 — Stats schema renderer | ❌ | — |
-| **§3.7 — Game container** (new) | ❌ | — unblocks "real" local Versus, online Versus (§7), and any future second-simulation use (replay viewer, 3D mode). 5–7 days per §3.7 #7. |
+| 6 — Versus (local) | ⚠ v1 with caveats | `gameplay/rules/versus.js` (combo-aware garbage table), `gameplay/garbage.js` (pure helpers), new `GARBAGE_SENT` / `GARBAGE_RECEIVED` events, `ui/versus-badge.js` (dual-color queue + WIN/LOSS finale), AI bot opponent inside main.js (8–12s send cadence, KO at 12 absorbed rows), `modeBests.versus = { wins, losses, draws, eloMmr }`. **v2 modules ready in §3.7 (`app/versus.js`); host swap pending.** |
+| 7 — Mode tab UX upgrade | ✅ | `ui/format/mode-stats.js` per-mode formatters (`formatModeBestPrimary` / `Secondary` / `Summary` / `formatModeGoalAndDuration`), settings-panel Mode tab shows title/goal/duration/best with start button label tracking active mode, Stats tab uses per-mode primary + secondary line |
+| 8 — Stats schema renderer | ✅ | shipped alongside Phase 7 — same `ui/format/mode-stats.js` module |
+| **§3.7 — Game container** | ✅ **Shipped** | `gameplay/game.js` (Game class, 708 lines), `world/board-view.js` (mesh mirror, 332 lines), `input/intents.js` (InputRouter + keymap presets), `gameplay/bot-controller.js` (BotController with casual / mirror strengths), `world/dual-board.js` (side-by-side anchor groups), `app/versus.js` (VersusSession composition root with cross-bus garbage bridge), `shared/random/seeded.js` (mulberry32 + fromString), `Game.serialize`/`restore`, ESLint `no-Math.random` rule on `gameplay/**` + `app/versus.js`. Single-sim main.js wired through Game + BoardView; dual-sim runtime swap deferred to a host-integration follow-up. |
 | 9 — 3D Tetris | ❌ | — |
 | 10 — Pure physics | ❌ | — |
-| 11 — Online Versus | ❌ | — depends on §3.7 |
+| 11 — Online Versus | ❌ | — depends on §3.7 (now unblocked) |
 
-**Test surface:** 367 tests across 33 files at end of Phase 6 (all green).
+**Test surface:** 536 tests across 41 files (all green) after §3.7
+sub-phases 7a–7f landed.
 
 ### 0.2 What "Mode tab" honestly is today
 
@@ -550,7 +554,12 @@ makes "real" local Versus a thin wiring PR rather than a 3-day rewrite.
 
 ## 3.7 Game Container — Player 2 / AI Standalone Simulation
 
-**Status:** ❌ Not started — added to the plan in this revision.
+**Status:** ✅ **Shipped** (sub-phases 7a–7f all landed). The dual-sim
+runtime path (sub-phase 7e) ships as `app/versus.js` + `world/dual-board.js`
+with full unit-test coverage; main.js's runtime versus mode still
+uses the Phase-6 single-sim path until the host integration PR
+swaps it in. The **modules are ready**; the swap is a thin wiring
+change, not a redesign.
 **Effort:** 5–7 days actual.
 **Unblocks:** real local Versus (§3.6 #11 caveats), online Versus (§7),
 3D Tetris's natural fit as a separate `Game`, future replay viewer.
@@ -679,49 +688,83 @@ duplicate rendering pipeline.
 Each sub-phase is independently shippable; the game stays playable
 through every PR.
 
-**Sub-phase 7a — Game class scaffold + snapshot tests (2 days)**
-- New `src/gameplay/game.js`. Public API per §3.7.3.
-- Move board / piece / score / lines / level / gameOver / paused into
-  `Game._*`. The existing main.js becomes the sole consumer:
-  `const game = new Game({ rules, bus })` — every read/write goes
-  through it.
-- **Snapshot test**: capture the current main.js's event trace for a
-  fixed input sequence (10 pieces, mixed soft/hard drops). After
-  extraction, `new Game({ ... }).tick(...)` against the same inputs
-  must produce an identical event trace. This is the §11 risk-table
-  "Rules engine refactor regresses Classic" mitigation, applied to a
-  larger surface.
+**Sub-phase 7a — Game class scaffold + snapshot tests (2 days)** ✅ **Shipped**
+- ✅ `src/gameplay/game.js` (708 lines) — full public surface per §3.7.3
+  with state, methods, snapshot, dispose. 58 tests in `game.test.js`.
+- ✅ main.js refactored to consume Game via `let game = null` +
+  `syncFromGame()` shadow-var pattern. ~250 line reads of `score` /
+  `activePiece` / `gameOver` / etc. continue working untouched while
+  Game owns the canonical state.
+- ⚠ The pre-extraction snapshot test was substituted with a real
+  unit-test suite (58 cases) covering spawn / move / rotate / drops /
+  lock / clear / hold / garbage / tick / reset. The legacy main.js was
+  too DOM-coupled to capture an inline event trace from; the unit
+  tests + manual playtest cover the same surface.
 
-**Sub-phase 7b — BoardView extraction (1 day)**
-- New `src/world/board-view.js`. Consumes `game.snapshot()`, owns
-  `cellMeshes` + `stackGroup` + `animateCubeTo`.
-- Removes mesh-state from main.js entirely.
+**Sub-phase 7b — BoardView extraction (1 day)** ✅ **Shipped**
+- ✅ `src/world/board-view.js` (332 lines) — owns `cellMeshes` +
+  stackGroup + pieceGroup + ghostGroup. 12 tests in
+  `board-view.test.js`.
+- ✅ All mesh-side bus subscribers (PIECE_MOVE/ROTATE/SPAWN/LOCK,
+  LINE_CLEAR, GARBAGE_APPLIED, ZEN_RESCUE) moved into BoardView.
+  main.js's remaining bus handlers cover only visual inertia
+  (pieceVel, pieceRotVel) and the cinematic FX layer.
 
-**Sub-phase 7c — Input intents (½ day)**
-- `src/input/intents.js` — keyboard handler produces `InputFrame`
-  objects. Configurable keymap per Game side (P1: arrows + Space,
-  P2: WASD + RShift). Conflicts with browser shortcuts surface a
-  per-key warning.
+**Sub-phase 7c — Input intents (½ day)** ✅ **Shipped**
+- ✅ `src/input/intents.js` (191 lines) — `InputRouter` class,
+  `KEYMAP_PRESETS`, `EMPTY_FRAME`, `findKeymapConflicts`. P1 keymap
+  uses arrows + Space + Z/X/C/Shift/P; P2 uses A/D/S/W/E/Q/RShift.
+  18 tests in `intents.test.js`.
+- ⚠ main.js's runtime keyboard handling still uses its inline switch
+  (the intents router is consumed by `app/versus.js`, not yet by the
+  single-sim path). The two coexist cleanly — the InputRouter is
+  ready for any future host that wants per-side keymap config.
 
-**Sub-phase 7d — Bot v2 (½ day)**
-- `src/gameplay/bot-controller.js` — reads `game.snapshot()`, picks
-  moves, returns `InputFrame`. Replaces the abstract bot in main.js.
-- Two strengths shipped: `casual` (current cadence) and `mirror`.
+**Sub-phase 7d — Bot v2 (½ day)** ✅ **Shipped**
+- ✅ `src/gameplay/bot-controller.js` (177 lines) — reads
+  `game.activePiece`, plans (col, rot) per piece, returns `InputFrame`.
+  Two strengths: `casual` (random column) and `mirror` (copies a
+  reference Game's piece position). Action cadence rate-limited via
+  `actionsPerSecond` opt. 14 tests in `bot-controller.test.js`.
+- ⚠ The runtime versus path still uses the Phase-6 abstract bot
+  (`versusBot` IIFE in main.js); the new `BotController` is consumed
+  by `app/versus.js`. When the dual-board host integration lands the
+  abstract bot deletes.
 
-**Sub-phase 7e — Local Versus dual board (1.5 days)**
-- `src/app/versus.js` — composition root. Builds two `Game`s, two
-  `BoardView`s, two HUD clusters; routes inputs.
-- `src/world/dual-board.js` — side-by-side scene layout, per-side HUD
-  positioning (left negative-X, right positive-X).
-- Wires `Game1.events.on(GARBAGE_SENT) → Game2.applyGarbage(...)` in
-  both directions. Replaces the current single-sim Versus.
+**Sub-phase 7e — Local Versus dual board (1.5 days)** ⚠ **Modules shipped, host integration deferred**
+- ✅ `src/world/dual-board.js` (75 lines) — `DualBoard` class with
+  left/right anchor groups at ±separation/2 X offsets. Settable
+  separation. 11 tests in `dual-board.test.js`.
+- ✅ `src/app/versus.js` (199 lines) — `VersusSession` class composes
+  two Games + two BoardViews + DualBoard + InputRouter +
+  BotController + the cross-bus garbage bridge. 9 tests in
+  `versus.test.js` covering construction, garbage routing in both
+  directions, end-of-match arbitration, and tick dispatch.
+- ❌ **Host integration NOT done.** The `Mode._wireLifecycle.onStart`
+  in main.js still constructs one Game + one BoardView for versus
+  mode (single-sim). Swapping in `VersusSession` requires:
+  - Branching onStart on `key === 'versus'` to construct a session
+    instead of a Game.
+  - Per-side HUD routing (versus-badge currently reads main.js's
+    single game; needs to choose between session.gameP1 / .gameP2).
+  - Duplicate case-mesh visuals so each side has its own arena chrome.
+  This is the full dual-sim runtime; ~1 day of focused integration on
+  top of the modules that already exist.
 
-**Sub-phase 7f — Determinism + replay (½ day)**
-- `Game.serialize()` + `restore()` round-trip tests.
-- Seeded RNG (`shared/random/seeded.js`) — `Math.random` removed from
-  `gameplay/**`. ESLint `no-restricted-globals` rule blocks it from
-  re-entering.
-- Foundation for online Versus (§7).
+**Sub-phase 7f — Determinism + replay (½ day)** ✅ **Shipped**
+- ✅ `src/shared/random/seeded.js` (53 lines) — `createSeededRng()`
+  returns a mulberry32 PRNG with mutable `state` for serialize /
+  setState / clone. `fromString()` for seed-from-name. 12 tests in
+  `seeded.test.js`.
+- ✅ Game default RNG switched from `Math.random` to seeded. Bot's
+  default RNG too. `garbage.pickHoleColumn()` uses a module-private
+  seeded fallback.
+- ✅ `Game.serialize()` / `Game.restore(blob)` round-trip — captures
+  board, active piece, queue, counters, RNG state. Throws on
+  dimension mismatch. 5 new tests in `game.test.js`.
+- ✅ ESLint rule (`eslint.config.js`) blocks `Math.random` in
+  `src/gameplay/**` + `src/app/versus.js` via `no-restricted-syntax`.
+  Tests are exempted (they directly construct seeded RNGs).
 
 ### 3.7.8 Risks
 

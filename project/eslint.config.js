@@ -81,6 +81,21 @@ export default [
       'no-restricted-imports': ['error', { patterns: forbidden }],
     },
   })),
+  // §3.7 sub-phase 7f — determinism guard. `Math.random` is banned in
+  // gameplay/ + the versus composition root because their RNG flows
+  // through createSeededRng() so replays are bit-for-bit reproducible
+  // and online opponents can rollback to a shared keyframe. Tests are
+  // exempted (they import the seeded source directly).
+  {
+    files: ['src/gameplay/**/*.js', 'src/app/versus.js'],
+    ignores: ['src/gameplay/**/*.test.js'],
+    rules: {
+      'no-restricted-syntax': ['error', {
+        selector: "MemberExpression[object.name='Math'][property.name='random']",
+        message: 'Math.random is banned in gameplay/ + app/versus.js — use createSeededRng() from shared/random/seeded.js so replays are deterministic (plan_gameplay_1.md §3.7 sub-phase 7f).',
+      }],
+    },
+  },
   // The legacy monolith — exempted while it's being decomposed.
   // As subsystems get carved out into their own modules, the carved-out
   // code picks up the strict rules above; what remains here stays lenient

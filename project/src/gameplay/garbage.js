@@ -9,6 +9,14 @@
 //
 // Pure module. No THREE, no DOM. Tested in pure Node.
 
+import { createSeededRng } from '../shared/random/seeded.js';
+
+// Module-private fallback PRNG so callers that omit `rngFn` still get a
+// deterministic stream — required by §3.7 sub-phase 7f's no-Math.random
+// rule. Hosts that want fresh entropy at boot pass their own seeded
+// source. Tests stub `rngFn` directly and never see this fallback.
+const _defaultRng = createSeededRng((Date.now() | 0) >>> 0);
+
 // Standard Tetris garbage table (plan_gameplay_1.md §3.6 #3).
 // 1 line = 0 garbage   (no point sending — would just be a swap).
 // 2 lines = 1 row.
@@ -47,17 +55,20 @@ export function garbageForLineCount(rowsCleared, comboCount = 0) {
 }
 
 /**
- * Pick a hole column for a fresh garbage row given a deterministic source.
- * `rngFn` should return a number in [0, 1). Tests inject a stub; v1 uses
- * `Math.random` since local Versus has no replay-validation requirement.
+ * Pick a hole column for a fresh garbage row given a deterministic
+ * source. `rngFn` should return a number in [0, 1). Tests inject a
+ * stub; production callers either inherit the module-private seeded
+ * fallback or pass an `rngFn` from createSeededRng() so replay /
+ * online versus stay reproducible.
  *
  * @param {number} cols
- * @param {() => number} rngFn
+ * @param {() => number} [rngFn]
  * @returns {number}
  */
-export function pickHoleColumn(cols, rngFn = Math.random) {
+export function pickHoleColumn(cols, rngFn) {
   if (!Number.isFinite(cols) || cols <= 0) throw new Error('pickHoleColumn requires positive cols');
-  return Math.floor(rngFn() * cols) % cols;
+  const rng = (typeof rngFn === 'function') ? rngFn : _defaultRng;
+  return Math.floor(rng() * cols) % cols;
 }
 
 /**

@@ -55,12 +55,12 @@ import SHARD_VERT from '../shaders/shard.vert.glsl?raw';
 import SHARD_FRAG from '../shaders/shard.frag.glsl?raw';
 import SPARKLE_VERT from '../shaders/sparkle.vert.glsl?raw';
 import SPARKLE_FRAG from '../shaders/sparkle.frag.glsl?raw';
-import { PIECES, PIECE_COLORS, PIECE_KEYS } from '../gameplay/pieces.js';
-import { lineClearScore, levelForLines, SOFT_DROP_POINTS_PER_CELL, HARD_DROP_POINTS_PER_CELL } from '../gameplay/scoring.js';
-import { KICK_OFFSETS, nextRotation } from '../gameplay/rotation.js';
+import { PIECES, PIECE_COLORS } from '../gameplay/pieces.js';
 import { buildRules } from '../gameplay/rules.js';
 import { recordEndOfRun } from '../gameplay/end-of-run.js';
-import { applyGarbageToBoard, pickHoleColumn } from '../gameplay/garbage.js';
+import { pickHoleColumn } from '../gameplay/garbage.js';
+import { Game } from '../gameplay/game.js';
+import { BoardView } from '../world/board-view.js';
 
 // =============================================================
 // Tweaks — original three (gravity / mood / shatterPower) are written by
@@ -1680,19 +1680,22 @@ function cellToWorld(c, r, d) {
 // Game State
 // =============================================================
 // Board is COLS × ROWS (no depth dim — pieces always fill all depth slices).
-// Cell stores piece color or null.
-const board = Array.from({ length: ROWS }, () => Array(COLS).fill(null));
-// Mesh registry parallel to board: meshes[r][c] = array of cube meshes (one per depth slice)
-const cellMeshes = Array.from({ length: ROWS }, () => Array(COLS).fill(null));
+// Cell stores piece color or null. After §3.7's Game extraction the
+// canonical board lives in `game._board` — `board` here is a live
+// reference into that array (rebound on each game construction by
+// `syncFromGame()`), so existing `board[r][c]` reads in main.js continue
+// to work without churning every site.
+let board = Array.from({ length: ROWS }, () => Array(COLS).fill(null));
 
-const stackGroup = new THREE.Group();
-caseGroup.add(stackGroup);
-
-// Active piece group
-const pieceGroup = new THREE.Group();
-caseGroup.add(pieceGroup);
-const ghostGroup = new THREE.Group();
-caseGroup.add(ghostGroup);
+// Per-instance gameplay simulation + render mirror. Both are constructed
+// in `Mode._wireLifecycle.onStart`; reused across mode swaps via
+// dispose+reconstruct. Render-side mesh state (cellMeshes, stack/piece/
+// ghost groups, all the lock + line-clear + garbage subscribers) lives
+// in BoardView (§3.7 sub-phase 7b). Visual-inertia state (the spring on
+// the active piece) stays in main.js — it animates BoardView's
+// pieceGroup but isn't part of the simulation.
+let game      = null;
+let boardView = null;
 
 let activePiece = null;
 let nextQueue = [];
@@ -1718,575 +1721,132 @@ let pieceRotVel = 0;
 // builder receives a thunk for `gravityScalar` so the live TWEAKS.gravity
 // slider is reflected on every read.
 let fallTimer = 0;
-// Mode.current was already hydrated from persisted settings at the top of
-// the file, so this picks up the player's last-selected mode. Marathon
-// has its own pack now; the remaining stubs (Sprint/Ultra/Zen/Versus) map
-// to classic-equivalent rules until their packs land.
-//
-// `bus` is passed so packs can emit MODE_GOAL_PROGRESS at milestone
-// crossings (Marathon: every 10 lines). gravityScalar reads TWEAKS.gravity
-// live so the slider keeps working across Mode.start swaps.
+// Active rules pack — initialized to the player's last-selected mode so
+// shadow reads (e.g. `activeRules.lineScore` from a stat refresh before
+// Mode.start fires) have something to consume. `Mode._wireLifecycle.
+// onStart` rebuilds this on every run.
 let activeRules = buildRules(Mode.current, { gravityScalar: () => TWEAKS.gravity, bus });
-function fallInterval() {
-  return activeRules.fallIntervalSec(level);
-}
 
-// Pause-aware gameplay-time accumulator — rules hooks consume this via the
-// state snapshot. Sprint reads it, Ultra counts down from it, Marathon
-// records its completion time from it. Classic doesn't read it but pays
-// the cost of one float add per tick (~zero).
+// Pause-aware gameplay-time accumulator — synced from `game._modeTimeMs`
+// via `syncFromGame()` after each game call.
 let _modeTimeMs = 0;
 
-// Read-only state snapshot — the contract the rules engine reads from.
-// Plan_gameplay_1.md §2.1: this is the only shape rules see.
-function _modeStateSnapshot() {
-  return {
-    score,
-    lines,
-    level,
-    linesCleared: lines,
-    timeMs: _modeTimeMs,
-  };
+/**
+ * Pull the latest state out of the Game instance into the shadow vars
+ * that legacy main.js code still reads. Cheap (object refs + a few
+ * primitive copies); call after any `game.X()` mutation.
+ *
+ * The shadow-var pattern is a §3.7 sub-phase 7a transition: the
+ * canonical state lives in Game, but ~250 reads in this file would each
+ * need editing to read `game.X` directly. Shadowing collapses that into
+ * a single sync call. A future sub-phase (7b: BoardView) is the natural
+ * point to remove the shadows entirely.
+ */
+function syncFromGame() {
+  if (!game) return;
+  board       = game.board;       // same array reference; in-place mutations stay live
+  activePiece = game.activePiece;
+  nextQueue   = game.nextQueue;
+  holdPiece   = game.holdPiece;
+  canHold     = game.canHold;
+  score       = game.score;
+  lines       = game.lines;
+  level       = game.level;
+  gameOver    = game.gameOver;
+  paused      = game.paused;
+  fallTimer   = game.fallTimer;
+  activeRules = game.rules;
+  _modeTimeMs = game.modeTimeMs;
+  _piecesThisSession = game.piecesThisSession;
+  _linesThisSession  = game.linesThisSession;
+  sessionStart       = game.sessionStart;
 }
 
 // =============================================================
-// Versus garbage queue (plan_gameplay_1.md §3.6)
+// Versus garbage queue (plan_gameplay_1.md §3.6 + §3.7)
 // =============================================================
-// Inbound garbage drops the opponent has sent. Each entry is one batched
-// drop with its hole column. The queue is drained AFTER lockPiece's
-// clearLines runs and BEFORE the next spawn — never mid-fall, per the
-// plan's "applied between piece locks" spec. This is what makes the
-// "queue and brace" feel of competitive Tetris work.
-const GARBAGE_QUEUE_CAP_ROWS = 20;     // anti-grief — beyond this, drops the floor
-const GARBAGE_COLOR          = 0x808080; // neutral gray; reads as "not mine"
-/** @type {Array<{ rows: number, holeColumn: number }>} */
-const _garbageQueue = [];
-let _garbageBlocked = false; // surfaces in the badge — "queue full, dropping further sends"
+// Game owns the queue + drain logic; main.js exposes a tiny shim so the
+// versus-badge's existing `getInboundGarbage()` shape doesn't need to
+// change. The mesh-side mutation (cube swap when a queued row applies)
+// is wired below as a GARBAGE_APPLIED subscriber.
+const GARBAGE_COLOR = 0x808080; // neutral gray; reads as "not mine"
 
 function _queuedGarbageRowCount() {
-  let total = 0;
-  for (const entry of _garbageQueue) total += entry.rows;
-  return total;
-}
-
-/**
- * Drain the inbound garbage queue into the live board + meshes. Called
- * once between lockPiece's clearLines and the next spawn. After draining,
- * the next spawn's collision check is what surfaces a topout caused by
- * the garbage push (the natural "garbage killed me" path).
- */
-function _drainInboundGarbage() {
-  if (_garbageQueue.length === 0) return;
-  while (_garbageQueue.length > 0) {
-    const { rows, holeColumn } = _garbageQueue.shift();
-    _applyGarbageToBoardAndMeshes(rows, holeColumn);
-  }
-  _garbageBlocked = false;
-}
-
-/**
- * Insert `rows` garbage rows at the bottom, shifting the stack up. Mirrors
- * the existing line-clear shift pattern — splice/push for the data board,
- * dispose meshes for popped top rows, spawn cubes for new garbage rows,
- * and animateCubeTo for the rest.
- */
-function _applyGarbageToBoardAndMeshes(rows, holeColumn) {
-  const safeHole = ((holeColumn % COLS) + COLS) % COLS;
-
-  for (let i = 0; i < rows; i++) {
-    // Pop the TOP row's meshes (about to be pushed off the playfield).
-    const topMeshes = cellMeshes.pop();
-    board.pop();
-    if (topMeshes) {
-      for (let c = 0; c < COLS; c++) {
-        const slices = topMeshes[c];
-        if (slices) {
-          for (const cube of slices) stackGroup.remove(cube);
-        }
-      }
-    }
-
-    // Build the new garbage row's data + visual cubes at the (eventual)
-    // bottom. We unshift-equivalent by placing them at index 0 below.
-    const newBoardRow = new Array(COLS).fill(GARBAGE_COLOR);
-    const newMeshRow  = new Array(COLS).fill(null);
-    newBoardRow[safeHole] = null;
-    for (let c = 0; c < COLS; c++) {
-      if (newBoardRow[c] === null) continue;
-      const slices = [];
-      for (let d = 0; d < DEPTH; d++) {
-        const cube = makeCube(GARBAGE_COLOR);
-        cube.position.copy(cellToWorld(c, 0, d));
-        stackGroup.add(cube);
-        slices.push(cube);
-      }
-      newMeshRow[c] = slices;
-    }
-    board.unshift(newBoardRow);
-    cellMeshes.unshift(newMeshRow);
-  }
-
-  // Animate every remaining cube to its new (lifted) position. The newly
-  // unshifted garbage already starts at row 0, so this also "settles" them
-  // into final position from a duplicate cellToWorld(c,0,d) target — a
-  // visual no-op but keeps the code path uniform.
-  for (let r = 0; r < ROWS; r++) {
-    for (let c = 0; c < COLS; c++) {
-      const slices = cellMeshes[r][c];
-      if (!slices) continue;
-      for (let d = 0; d < DEPTH; d++) {
-        animateCubeTo(slices[d], cellToWorld(c, r, d));
-      }
-    }
-  }
-  updateHUD();
+  return game ? game.queuedGarbageRows : 0;
 }
 
 // =============================================================
-// Bag randomizer
-// =============================================================
-function refillBag() {
-  const bag = [...PIECE_KEYS];
-  for (let i = bag.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [bag[i], bag[j]] = [bag[j], bag[i]];
-  }
-  nextQueue.push(...bag);
-}
-function nextPieceKey() {
-  if (nextQueue.length < 4) refillBag();
-  return nextQueue.shift();
-}
-
-// =============================================================
-// Active Piece
-// =============================================================
-function spawnPiece(key) {
-  const p = {
-    key: key || nextPieceKey(),
-    rot: 0,
-    col: 3,
-    row: ROWS - 2, // top
-  };
-  p.color = PIECE_COLORS[p.key];
-  if (collides(p, p.col, p.row, p.rot)) {
-    // Mode topout interceptor — Zen returns `{ end: false, shift: 4 }` to
-    // shift the stack down and respawn. Default rules packs return nothing
-    // (or `{ end: true }`), preserving the topout-ends-the-run behaviour.
-    if (_handleTopOutWithRescue(p)) return;
-    triggerGameOver();
-    return;
-  }
-  _commitSpawn(p);
-}
-
-// Shared spawn-commit path — the normal "piece accepted" sequence. Pulled
-// out so the Zen rescue path can re-use it after a successful shift+retry
-// without duplicating the visual-inertia reset.
-function _commitSpawn(p) {
-  // §3.8 piecesPlaced — bumped once per spawn (not once per lock) to catch
-  // pieces lost in a top-out without complicating clearLines.
-  _piecesThisSession++;
-  activePiece = p;
-  rebuildPieceMesh();
-  rebuildGhostMesh();
-  canHold = true;
-  pieceVisualOffset.set(0, 0, 0);
-  pieceVel.set(0, 0, 0);
-  pieceRotVisual = 0;
-  pieceRotTarget = 0;
-  pieceRotVel = 0;
-  updateHUD();
-  // PIECE_SPAWN — declared in gameplay/events.js, consumed by the Zen
-  // badge for its piece counter. Cheap synchronous dispatch; future
-  // listeners (telemetry, replay recorder) plug in here without main.js
-  // changes.
-  bus.emit(EVENTS.PIECE_SPAWN, { key: p.key, color: p.color, rotation: p.rot });
-}
-
-// Zen rescue path. Returns true when the rules pack opted in to a stack
-// shift AND the retry spawn succeeded; false otherwise (caller falls
-// through to the normal topout handler).
-function _handleTopOutWithRescue(originalPiece) {
-  const onTopOutFn = activeRules.onTopOut;
-  if (!onTopOutFn) return false;
-  let result = null;
-  try { result = onTopOutFn(_modeStateSnapshot()); }
-  catch (err) { console.warn('[rules] onTopOut threw:', err); return false; }
-  if (!result || result.end !== false) return false;
-  const shift = (typeof result.shift === 'number') ? Math.max(0, Math.floor(result.shift)) : 0;
-  if (shift <= 0) return false;
-
-  shiftStackDown(shift);
-  bus.emit(EVENTS.ZEN_RESCUE, { rowsRemoved: shift });
-
-  // Retry the spawn from the original top position. If even after the
-  // shift the piece can't fit (extreme pathological case — stack still
-  // touches Y=18 in every column), fall through to topout.
-  const p2 = { ...originalPiece, row: ROWS - 2 };
-  if (collides(p2, p2.col, p2.row, p2.rot)) return false;
-  _commitSpawn(p2);
-  return true;
-}
-
-/**
- * Remove the bottom `rows` rows of the stack, shift the rest down, and
- * animate the cubes to their new positions. Used by Zen's topout-rescue
- * path. Mirrors the existing line-clear shift pattern at clearLines, but
- * always removes the bottom `rows` indices instead of arbitrary cleared
- * rows.
- *
- * Pathologically safe: passing rows > stack-height clears all populated
- * rows and leaves the board empty without throwing.
- */
-function shiftStackDown(rows) {
-  if (!Number.isFinite(rows) || rows <= 0) return;
-  const n = Math.min(rows | 0, ROWS);
-  for (let i = 0; i < n; i++) {
-    // Splice the BOTTOM row (index 0) and dispose its meshes.
-    const removedMeshRow = cellMeshes.splice(0, 1)[0];
-    board.splice(0, 1);
-    if (removedMeshRow) {
-      for (let c = 0; c < COLS; c++) {
-        const slices = removedMeshRow[c];
-        if (slices) {
-          for (const cube of slices) stackGroup.remove(cube);
-        }
-      }
-    }
-    // Push an empty row to the top so dimensions stay constant.
-    board.push(Array(COLS).fill(null));
-    cellMeshes.push(Array(COLS).fill(null));
-  }
-  // Animate the remaining cubes to their new (lower) positions. Re-uses
-  // the existing animateCubeTo helper — visually the stack settles down.
-  for (let r = 0; r < ROWS; r++) {
-    for (let c = 0; c < COLS; c++) {
-      const slices = cellMeshes[r][c];
-      if (!slices) continue;
-      for (let d = 0; d < DEPTH; d++) {
-        animateCubeTo(slices[d], cellToWorld(c, r, d));
-      }
-    }
-  }
-  updateHUD();
-}
-
-function getPieceCells(piece, rot = piece.rot) {
-  const shape = PIECES[piece.key][rot];
-  const cells = [];
-  for (let r = 0; r < 4; r++) {
-    for (let c = 0; c < 4; c++) {
-      if (shape[r][c]) {
-        // shape[r][c] — r = row from top, c = col from left
-        // We translate so piece.col/piece.row is bottom-left of bounding box
-        // shape uses top-down rows; convert: cellRow = piece.row + (3 - r)
-        cells.push({ col: piece.col + c, row: piece.row + (3 - r) });
-      }
-    }
-  }
-  return cells;
-}
-
-function collides(piece, col, row, rot) {
-  const test = { ...piece, col, row, rot };
-  const cells = getPieceCells(test, rot);
-  for (const { col: c, row: r } of cells) {
-    if (c < 0 || c >= COLS) return true;
-    if (r < 0) return true;
-    if (r >= ROWS + 4) continue; // allow above top
-    if (r < ROWS && board[r][c]) return true;
-  }
-  return false;
-}
-
-function rebuildPieceMesh() {
-  pieceGroup.clear();
-  if (!activePiece) return;
-  const cells = getPieceCells(activePiece);
-  for (const { col, row } of cells) {
-    for (let d = 0; d < DEPTH; d++) {
-      const cube = makeCube(activePiece.color, { active: true });
-      cube.position.copy(cellToWorld(col, row, d));
-      pieceGroup.add(cube);
-    }
-  }
-}
-
-function rebuildGhostMesh() {
-  ghostGroup.clear();
-  if (!activePiece) return;
-  // Find lowest valid row
-  let r = activePiece.row;
-  while (!collides(activePiece, activePiece.col, r - 1, activePiece.rot)) {
-    r--;
-  }
-  const ghost = { ...activePiece, row: r };
-  const cells = getPieceCells(ghost);
-  for (const { col, row } of cells) {
-    for (let d = 0; d < DEPTH; d++) {
-      const cube = makeCube(activePiece.color, { ghost: true });
-      cube.position.copy(cellToWorld(col, row, d));
-      ghostGroup.add(cube);
-    }
-  }
-}
-
-// =============================================================
-// Movement
+// Input adapters — each is a thin delegate over `game.X()` plus a
+// trailing `syncFromGame()` so the legacy shadow vars (`activePiece`,
+// `score`, etc.) keep the same values the legacy reads expected.
+// All render side-effects (mesh rebuild, sfx, shatter, ring) are wired
+// as bus subscribers further down — Game emits, the host reacts.
 // =============================================================
 function tryMove(dCol, dRow) {
-  if (!activePiece || gameOver || paused) return false;
-  const nc = activePiece.col + dCol;
-  const nr = activePiece.row + dRow;
-  if (collides(activePiece, nc, nr, activePiece.rot)) return false;
-  activePiece.col = nc;
-  activePiece.row = nr;
-  rebuildPieceMesh();
-  rebuildGhostMesh();
-  // Tick on horizontal moves only — gravity / hard drop / soft drop call this
-  // with dCol=0, and we don't want a click on every fall step.
-  if (dCol !== 0) playSfx('move');
-  return true;
+  if (!game) return false;
+  const moved = game.tryMove(dCol, dRow);
+  syncFromGame();
+  return moved;
 }
 
 function tryRotate(dir) {
-  if (!activePiece || gameOver || paused) return;
-  const nrot = nextRotation(activePiece.rot, dir);
-  for (const k of KICK_OFFSETS) {
-    if (!collides(activePiece, activePiece.col + k, activePiece.row, nrot)) {
-      activePiece.col += k;
-      activePiece.rot = nrot;
-      // Kick the spring with velocity (not a static offset) so it swings
-      // through zero and decays — reads as a rotation impulse.
-      pieceRotVel = dir > 0 ? -8 : 8;
-      rebuildPieceMesh();
-      rebuildGhostMesh();
-      playSfx('rotate');
-      return;
-    }
-  }
+  if (!game) return;
+  game.tryRotate(dir);
+  syncFromGame();
 }
 
 function softDrop() {
-  if (!tryMove(0, -1)) {
-    lockPiece();
-  } else {
-    const delta = activeRules.softDropPerCell;
-    score += delta;
-    bus.emit(EVENTS.SCORE_DELTA, { delta, total: score, source: 'soft-drop' });
-  }
+  if (!game) return;
+  game.softDrop();
+  syncFromGame();
 }
 
 function hardDrop() {
-  if (!activePiece || gameOver || paused) return;
-  let dropped = 0;
-  while (tryMove(0, -1)) dropped++;
-  const hardScoreDelta = dropped * activeRules.hardDropPerCell;
-  score += hardScoreDelta;
-  bus.emit(EVENTS.SCORE_DELTA, { delta: hardScoreDelta, total: score, source: 'hard-drop' });
-  // Big downward inertia visual on settled piece
-  pieceVel.y -= 8 + dropped * 0.4;
-  // Brief screen kick scaled by drop distance — keeps multi-line clears
-  // clearly louder than routine hard drops.
-  shake.impulse(0.15 + dropped * 0.02);
-  // Impact ring at the lock row's floor, centered horizontally on the
-  // piece's bottom-most cells (was previously fixed at playfield center).
-  const cells = getPieceCells(activePiece);
-  let minRow = Infinity;
-  for (const cell of cells) if (cell.row < minRow) minRow = cell.row;
+  if (!game) return;
+  const result = game.hardDrop();
+  if (!result) { syncFromGame(); return; }
+  // Compute world-space ring coords + emit HARD_DROP *before* the
+  // lock cascade — preserves the legacy ordering that vfx/director.js
+  // subscribers rely on (impact ring shows BEFORE the shatter).
+  pieceVel.y -= 8 + result.dropRows * 0.4;
+  shake.impulse(0.15 + result.dropRows * 0.02);
   let xSum = 0, xCount = 0;
-  for (const cell of cells) {
-    if (cell.row === minRow) {
+  for (const cell of result.cells) {
+    if (cell.row === result.minRow) {
       xSum += -PLAY_W / 2 + (cell.col + 0.5) * CELL;
       xCount++;
     }
   }
   const ringX = xSum / xCount;
-  const ringY = -PLAY_H / 2 + minRow * CELL;
+  const ringY = -PLAY_H / 2 + result.minRow * CELL;
   bus.emit(EVENTS.HARD_DROP, {
-    dropRows: dropped,
-    color: activePiece.color,
-    ringX, ringY, minRow,
-    cells: cells.map(({ col, row }) => ({ col, row })),
+    dropRows: result.dropRows,
+    color:    result.color,
+    ringX, ringY,
+    minRow:   result.minRow,
+    cells:    result.cells,
   });
-  lockPiece();
+  game.lockPiece();
+  syncFromGame();
 }
 
-// =============================================================
-// Locking & Line Clear
-// =============================================================
 function lockPiece() {
-  if (!activePiece) return;
-  const cells = getPieceCells(activePiece);
-  const lockColor = activePiece.color;
-  for (const { col, row } of cells) {
-    if (row >= ROWS) {
-      triggerGameOver();
-      return;
-    }
-    board[row][col] = activePiece.color;
-    // Build mesh slices for this cell (one cube per depth slice). Each cube
-    // starts in a "settling" state — energized like the active piece, then
-    // smoothly cools to the locked look over SETTLE_DURATION.
-    const slices = [];
-    for (let d = 0; d < DEPTH; d++) {
-      const cube = makeCube(activePiece.color, { settling: true });
-      cube.position.copy(cellToWorld(col, row, d));
-      stackGroup.add(cube);
-      slices.push(cube);
-      startLockAnim(cube);
-    }
-    cellMeshes[row][col] = slices;
-  }
-  // Settle bounce
-  pieceVel.y = -1.0;
-
-  bus.emit(EVENTS.PIECE_LOCK, {
-    cells: cells.map(({ col, row }) => ({ col, row })),
-    color: lockColor,
-  });
-
-  // Find full rows
-  const fullRows = [];
-  for (let r = 0; r < ROWS; r++) {
-    if (board[r].every(c => c !== null)) fullRows.push(r);
-  }
-  if (fullRows.length > 0) {
-    clearLines(fullRows);
-    announceLineClear(fullRows.length);
-  } else {
-    noteNoClearLock();
-  }
-  // Versus inbound garbage — applied AFTER any line clears resolve so a
-  // tetris-then-garbage sequence visually reads as "I cleared, then they
-  // dumped on me," not "I cleared into already-shifted garbage." Topout
-  // caused by the lift surfaces on the next spawn's collision check.
-  _drainInboundGarbage();
-  spawnPiece();
+  if (!game) return;
+  game.lockPiece();
+  syncFromGame();
 }
 
-function clearLines(rows) {
-  // Sort top-down so we can splice safely
-  rows.sort((a, b) => b - a);
-  // Glassy shatter sfx — scales with row count.
-  playSfx('clear', rows.length);
-  const scoreDelta = activeRules.lineScore(rows.length, level);
-  score += scoreDelta;
-  lines += rows.length;
-  // §3.8 totals: track per-session line count so end-of-run can increment
-  // Stats.totals.linesCleared without double-counting across the restart.
-  _linesThisSession += rows.length;
-  bus.emit(EVENTS.SCORE_DELTA, { delta: scoreDelta, total: score, source: 'line-clear' });
-  // Optional rules hook — Marathon emits MODE_GOAL_PROGRESS at 10-line
-  // milestones, etc. Classic's hook is null, so cheap no-op today.
-  if (activeRules.onLinesCleared) {
-    try { activeRules.onLinesCleared(_modeStateSnapshot(), rows.length); }
-    catch (err) { console.warn('[rules] onLinesCleared threw:', err); }
-  }
-  const newLevel = activeRules.levelForLines(lines);
-  if (newLevel > level) {
-    level = newLevel;
-    bus.emit(EVENTS.LEVEL_UP, { level: newLevel });
-  }
-
-  // Compute per-row average colors BEFORE shattering — the loop below
-  // nulls cellMeshes[r][c] so we'd lose color identity if we read after.
-  const rowColors = rows.map(r => {
-    let rs = 0, gs = 0, bs = 0, n = 0;
-    for (let c = 0; c < COLS; c++) {
-      const slices = cellMeshes[r] && cellMeshes[r][c];
-      if (slices && slices.length) {
-        const hex = slices[0].userData.color;
-        rs += (hex >> 16) & 0xff;
-        gs += (hex >> 8) & 0xff;
-        bs += hex & 0xff;
-        n++;
-      }
-    }
-    if (n === 0) return 0xffffff;
-    return ((Math.round(rs/n) & 0xff) << 16) |
-           ((Math.round(gs/n) & 0xff) << 8)  |
-            (Math.round(bs/n) & 0xff);
-  });
-  // Overall average for callout + popup colors
-  let ar = 0, ag = 0, ab = 0;
-  for (const c of rowColors) {
-    ar += (c >> 16) & 0xff; ag += (c >> 8) & 0xff; ab += c & 0xff;
-  }
-  const overallColor =
-    ((Math.round(ar/rowColors.length) & 0xff) << 16) |
-    ((Math.round(ag/rowColors.length) & 0xff) << 8)  |
-     (Math.round(ab/rowColors.length) & 0xff);
-
-  bus.emit(EVENTS.LINE_CLEAR, {
-    rows: rows.slice(),
-    simultaneous: rows.length,
-    colors: rowColors.slice(),
-    overallColor,
-    scoreDelta,
-  });
-
-  // Shatter effect for all cleared cells
-  for (const r of rows) {
-    for (let c = 0; c < COLS; c++) {
-      const slices = cellMeshes[r][c];
-      if (slices) {
-        for (const cube of slices) {
-          shatter(cube);
-          stackGroup.remove(cube);
-        }
-        cellMeshes[r][c] = null;
-      }
-    }
-  }
-  // §1.6 line-clear layers (sparkle / flash / shockwave / veil) are now
-  // owned by the LineClearOrchestrator (vfx/director.js, Stage 8b). The
-  // bus.emit(EVENTS.LINE_CLEAR, ...) above is the single trigger; the
-  // active stage's `clearRecipe` decides which layers fire per tier.
-  // §1.3 attention-budget dim is still triggered indirectly inside
-  // emitLineClearBurst via triggerAttentionDim — that fires through the
-  // orchestrator for sparkle-enabled tiers.
-
-  // Multi-line callout (G6) and floating score popup (G5)
-  if (rows.length >= 2) triggerCallout(rows.length, overallColor);
-  // Anchor popup to the lowest cleared row (rows is sorted top-down, so
-  // the last entry is the bottom-most).
-  triggerScorePopup(scoreDelta, rows[rows.length - 1], overallColor);
-
-  // Slow-mo on triple/tetris clears (G3)
-  triggerSlowmo(rows.length);
-
-  // Camera shake — scales with rows AND shatter power. shakeMul (§3.5)
-  // lets nervous players turn shake down without nuking the shatter
-  // particle counts that share the shatterPower lever.
-  shake.setForce((0.25 + rows.length * 0.22) * TWEAKS.shatterPower * TWEAKS.shakeMul);
-  // Punch-zoom on multi-line clears (≥2)
-  if (rows.length >= 2) {
-    triggerPunchZoom(rows.length);
-  }
-
-  // Remove rows from board, drop above rows down
-  for (const r of rows) {
-    board.splice(r, 1);
-    cellMeshes.splice(r, 1);
-    board.push(Array(COLS).fill(null));
-    cellMeshes.push(Array(COLS).fill(null));
-  }
-  // Re-position remaining cubes
-  for (let r = 0; r < ROWS; r++) {
-    for (let c = 0; c < COLS; c++) {
-      const slices = cellMeshes[r][c];
-      if (slices) {
-        for (let d = 0; d < DEPTH; d++) {
-          // Animate to new position
-          const target = cellToWorld(c, r, d);
-          animateCubeTo(slices[d], target);
-        }
-      }
-    }
-  }
+function holdActive() {
+  if (!game) return;
+  game.holdActive();
+  syncFromGame();
   updateHUD();
+}
+
+function spawnPiece(key) {
+  if (!game) return;
+  game.spawnPiece(key);
+  syncFromGame();
 }
 
 const cubeAnims = [];
@@ -2835,35 +2395,14 @@ function updateHUD() {
 // =============================================================
 // Hold
 // =============================================================
-function holdActive() {
-  if (!activePiece || !canHold || gameOver || paused) return;
-  const cur = activePiece.key;
-  if (holdPiece) {
-    const swap = holdPiece;
-    holdPiece = cur;
-    spawnPiece(swap);
-  } else {
-    holdPiece = cur;
-    spawnPiece();
-  }
-  canHold = false;
-  updateHUD();
-}
-
 // =============================================================
 // Game Over
 // =============================================================
-// Gameplay-side: flips the gameOver flag and announces the event. All
-// presentational consequences (DOM update, voice, stack shatter cascade,
-// camera shake, bloom bump, overlay reveal) live in the GAME_OVER listener
-// at the bottom of this file.
-function triggerGameOver() {
-  // Topout — endRun unifies the stats write and emits MODE_END so future
-  // modes (Marathon goal, Sprint completion, Ultra time-out) all funnel
-  // through the same terminal. GAME_OVER is still emitted because the
-  // director's cascade visuals listen to it.
-  endRun({ reason: 'topout' });
-}
+// Topout / goal / time / forfeit all funnel through endRun. After §3.7
+// the simulation lives in Game; topouts flow as
+// `Game._signalEndRun → onEndRun callback → endRun({reason:'topout'})`.
+// The `triggerGameOver()` helper that legacy code called is gone — the
+// callback is the single entry point.
 
 // Universal terminal. Emits GAME_OVER (for the existing cascade visuals
 // that listen to it) only on topout; emits MODE_END unconditionally so
@@ -2879,12 +2418,22 @@ function triggerGameOver() {
 // ('player' for bot KO, 'opponent' for player KO, null for double-KO
 // draw), the value flows through to MODE_END + the per-mode wins/losses
 // updater. Non-versus modes always pass winner=null/undefined.
+// Single-shot guard. After §3.7, Game's _signalEndRun has already set
+// game.gameOver=true before calling our onEndRun callback — so the
+// legacy `if (gameOver) return` guard would always early-out. We use a
+// host-local invocation flag instead, reset by resetRunState.
+let _endRunInvoked = false;
+
 function endRun({ reason = 'topout', winner } = {}) {
-  if (gameOver) return;
-  gameOver = true;
+  if (_endRunInvoked) return;
+  _endRunInvoked = true;
+  // Sync from game so the local shadow vars (score / lines / level /
+  // modeTimeMs / sessionStart / _piecesThisSession / _linesThisSession)
+  // reflect the final simulation state before the stats write.
+  syncFromGame();
   // Versus topout disambiguation — when the player tops out via
-  // spawnPiece's collision check (no explicit winner), default to
-  // "opponent wins" for versus mode.
+  // Game's collide check (no explicit winner), default to "opponent
+  // wins" for versus mode.
   if (Mode.current === 'versus' && reason === 'topout' && winner === undefined) {
     winner = 'opponent';
   }
@@ -2894,13 +2443,9 @@ function endRun({ reason = 'topout', winner } = {}) {
   // High-score / per-mode best / cumulative totals — extracted helper.
   // Run BEFORE the player can hit "Play Again" so a mid-cascade tab close
   // still records the run. recordEndOfRun returns the multiplied score
-  // (when applicable) so we can sync the live `score` variable for any
-  // downstream consumer (HUD, director, MODE_END subscribers).
+  // (when applicable) so we sync the multiplied value back to game so
+  // downstream MODE_END consumers (badges, settings panel) see it too.
   try {
-    // Versus uses a wins/losses/draws best updater; other modes either
-    // bring their own (Zen) or fall through to the default score-based
-    // path. We pick the updater here so the rules pack itself stays
-    // free of host-state concerns (winner side is a runtime fact).
     let updateBest = activeRules.updateBest;
     if (Mode.current === 'versus') {
       updateBest = (best, summary) => {
@@ -2924,6 +2469,7 @@ function endRun({ reason = 'topout', winner } = {}) {
       updateBest,
     }, { loadStats, saveStats });
     if (result && result.multiplied) {
+      if (game) game.setScore(result.score);
       score = result.score;
     }
     if (settingsPanel) settingsPanel.refreshStats();
@@ -2941,19 +2487,20 @@ function endRun({ reason = 'topout', winner } = {}) {
 // to the moment-before-first-piece initial conditions. Wrapped in a named
 // function so Mode.start({restart:true}) can call it directly without
 // going through the DOM button.
+//
+// After §3.7's Game extraction the canonical board+scoring lives in
+// `game`; this function clears the *render-side* spillage (mesh slices,
+// particle pools, in-flight animations, FX state) and then asks Game to
+// reset its simulation. `game.reset()` calls `spawnPiece()` internally,
+// which fires PIECE_SPAWN — the subscriber rebuilds the piece + ghost
+// mesh from the post-reset state.
 function resetRunState() {
-  for (let r = 0; r < ROWS; r++) {
-    for (let c = 0; c < COLS; c++) {
-      board[r][c] = null;
-      if (cellMeshes[r][c]) {
-        for (const cube of cellMeshes[r][c]) stackGroup.remove(cube);
-        cellMeshes[r][c] = null;
-      }
-    }
-  }
-  stackGroup.clear();
-  pieceGroup.clear();
-  ghostGroup.clear();
+  // Render-side cleanup. BoardView owns cellMeshes + stackGroup +
+  // pieceGroup + ghostGroup post-§3.7 sub-phase 7b — it disposes its
+  // own cube registry. Anything else (line-clear shards, sparkles,
+  // flash slabs, trails, in-flight cube animations, score bursts,
+  // overlay state) lives in main.js and is reset here.
+  if (boardView) boardView.clear();
   flashes.length = 0;
   cubeAnims.length = 0;
   lockAnims.length = 0;
@@ -2991,27 +2538,21 @@ function resetRunState() {
   // Cancel any in-flight score bursts so a quick restart doesn't leave
   // animations playing over the new game.
   resetScoreBursts();
-  score = 0;
-  lines = 0;
-  level = 1;
   _prevScore = 0;
   _prevLines = 0;
   _displayedScore = 0;
   scoreTween.active = false;
-  gameOver = false;
-  paused = false;
-  activePiece = null;
-  holdPiece = null;
-  nextQueue = [];
   resetAnnouncerForNewGame();
-  // §3.8 reset session-counters so the next game contributes a clean
-  // delta to Stats.totals on triggerGameOver.
-  sessionStart = (typeof performance !== 'undefined') ? performance.now() : 0;
-  _piecesThisSession = 0;
-  _linesThisSession = 0;
-  _modeTimeMs = 0;
   document.getElementById('gameOver').classList.remove('show');
-  spawnPiece();
+  // Single-shot end-run guard — flipped to true by endRun, reset here so
+  // the next run can fire its terminal exactly once.
+  _endRunInvoked = false;
+  // Reset simulation. game.reset() → spawnPiece() → emits PIECE_SPAWN,
+  // which the subscriber consumes to rebuild the piece + ghost mesh. We
+  // sync at the end so legacy reads of `score` / `activePiece` etc. are
+  // current.
+  if (game) game.reset();
+  syncFromGame();
 }
 
 // Wire the DOM "Play Again" button + Mode.start lifecycle hook to the
@@ -3023,21 +2564,46 @@ document.getElementById('goRestart').addEventListener('click', () => {
 
 Mode._wireLifecycle({
   onStart: ({ key, seed, restart }) => {
-    // Build a fresh rules pack — needed even on classic restarts because
-    // future packs may capture mutable state (per-run goal counters etc.)
-    // and rebuilding is cheap. The gravityScalar thunk keeps the live
-    // TWEAKS slider working across mode swaps.
-    activeRules = buildRules(key, { gravityScalar: () => TWEAKS.gravity, bus });
-    if (restart) resetRunState();
-    // Versus state hygiene — drop any leftover queued garbage from a
-    // previous round, reset bot, etc. Idempotent for non-versus modes.
-    _garbageQueue.length = 0;
-    _garbageBlocked = false;
+    // Build the rules pack first; Game owns it from here on. The
+    // gravityScalar thunk keeps the live TWEAKS slider working across
+    // mode swaps without having to plumb it through Game.
+    const rules = buildRules(key, { gravityScalar: () => TWEAKS.gravity, bus });
+    // Tear down any prior Game + BoardView (mode swap or restart).
+    // dispose() unhooks Game's GARBAGE_RECEIVED subscription and
+    // BoardView's mesh-side subscribers so a stale pair doesn't
+    // double-emit or double-render against the new instance.
+    if (boardView) boardView.dispose();
+    if (game)      game.dispose();
+    game = new Game({
+      rules,
+      bus,
+      side: 'player',
+      onEndRun: ({ reason, winner }) => endRun({ reason, winner }),
+    });
+    boardView = new BoardView({
+      game, bus,
+      parent: caseGroup,
+      side: 'player',
+      cols: COLS, rows: ROWS, depth: DEPTH,
+      cellToWorld, makeCube, shatter, animateCubeTo, startLockAnim,
+      playSfx,
+    });
+    if (restart) {
+      resetRunState();
+    } else {
+      // Fresh game (boot path) — Game has no active piece yet. Seed
+      // the first one; PIECE_SPAWN fires synchronously and BoardView's
+      // subscriber rebuilds the piece + ghost mesh.
+      game.spawnPiece();
+      syncFromGame();
+    }
+    // Bot still lives in main.js (host concern). Reset is idempotent for
+    // non-versus modes.
     if (typeof versusBot !== 'undefined') versusBot.reset();
     bus.emit(EVENTS.MODE_START, {
       key,
       seed: typeof seed === 'number' ? seed : null,
-      initialModeView: activeRules.initialModeView,
+      initialModeView: rules.initialModeView,
     });
   },
   onStop: (reason) => {
@@ -3045,26 +2611,63 @@ Mode._wireLifecycle({
   },
 });
 
-// Inbound garbage subscription — the opponent (or in v1, the bot) emits
-// GARBAGE_RECEIVED, the host queues it, and lockPiece's drainer applies
-// it between piece locks. We cap the queue at GARBAGE_QUEUE_CAP_ROWS to
-// keep a slow player from being snowballed if the opponent runs away.
-bus.on(EVENTS.GARBAGE_RECEIVED, (e) => {
-  if (!e || typeof e.rows !== 'number' || e.rows <= 0) return;
-  // Anti-grief — once the queue grows beyond the cap, additional sends
-  // are dropped on the floor. The badge surfaces this with a "BLOCKED"
-  // indicator (plan §3.6 #8).
-  if (_queuedGarbageRowCount() + e.rows > GARBAGE_QUEUE_CAP_ROWS) {
-    _garbageBlocked = true;
-    return;
-  }
-  _garbageQueue.push({
-    rows: e.rows | 0,
-    holeColumn: (typeof e.holeColumn === 'number')
-      ? e.holeColumn
-      : pickHoleColumn(COLS, Math.random),
-  });
+// Game owns the inbound-garbage queue post-§3.7. The bot's emission
+// flows through the bus → Game's internal subscription → Game's queue.
+// Main.js no longer maintains its own queue; the versus-badge reads via
+// `_queuedGarbageRowCount()` (which delegates to game.queuedGarbageRows).
+
+// =============================================================
+// Host-side bus subscribers (visual inertia + cinematic FX + HUD)
+// =============================================================
+// BoardView (world/board-view.js) handles all *mesh* state mutation
+// off the same bus events. The handlers here cover the rest: the
+// active piece's spring/wobble (visual inertia), the cinematic FX
+// layer (callout / popup / slowmo / shake / punch), and HUD refresh.
+// They live in main.js because the rotation spring + score popup +
+// announcer state are host-scoped — dual-board (§7e) doesn't double
+// them; both BoardViews share the same cinematic + HUD.
+
+// PIECE_ROTATE — kick the rotation spring with velocity so the wobble
+// swings through zero and decays. Reads as a rotational impulse.
+bus.on(EVENTS.PIECE_ROTATE, ({ dir }) => {
+  pieceRotVel = dir > 0 ? -8 : 8;
 });
+
+// PIECE_SPAWN — reset the visual-inertia state so the new piece reads
+// as crisp, and refresh the HUD's hold/next/score readout.
+bus.on(EVENTS.PIECE_SPAWN, () => {
+  pieceVisualOffset.set(0, 0, 0);
+  pieceVel.set(0, 0, 0);
+  pieceRotVisual = 0;
+  pieceRotTarget = 0;
+  pieceRotVel = 0;
+  updateHUD();
+});
+
+// PIECE_LOCK — bounce the piece's downward velocity and route the
+// announcer based on whether the lock cleared anything.
+bus.on(EVENTS.PIECE_LOCK, ({ cleared }) => {
+  pieceVel.y = -1.0;
+  if (cleared > 0) announceLineClear(cleared);
+  else             noteNoClearLock();
+});
+
+// LINE_CLEAR — cinematic layer (callout / popup / slowmo / shake /
+// punch) + HUD refresh. The mesh shatter + stack-down animation is in
+// BoardView; this subscriber doesn't touch cellMeshes.
+bus.on(EVENTS.LINE_CLEAR, ({ rows, scoreDelta, overallColor }) => {
+  if (rows.length >= 2) triggerCallout(rows.length, overallColor);
+  triggerScorePopup(scoreDelta, rows[rows.length - 1], overallColor);
+  triggerSlowmo(rows.length);
+  shake.setForce((0.25 + rows.length * 0.22) * TWEAKS.shatterPower * TWEAKS.shakeMul);
+  if (rows.length >= 2) triggerPunchZoom(rows.length);
+  updateHUD();
+});
+
+// GARBAGE_APPLIED / ZEN_RESCUE — BoardView mirrored the data shift on
+// the mesh side; the host just refreshes the HUD so the badge updates.
+bus.on(EVENTS.GARBAGE_APPLIED, () => updateHUD());
+bus.on(EVENTS.ZEN_RESCUE,      () => updateHUD());
 
 // =============================================================
 // Versus AI bot (plan §3.6 v1 — single-process opponent stand-in).
@@ -3215,7 +2818,10 @@ window.addEventListener('keydown', (e) => {
       e.preventDefault();
       break;
     case 'KeyP':
-      paused = !paused;
+      if (game) {
+        game.setPaused(!game.paused);
+        syncFromGame();
+      }
       break;
     case 'KeyR':
       resetCamera();
@@ -3696,36 +3302,16 @@ function animate(dt, envTime) {
       }
     }
 
-    // Soft-drop
-    if (keyState.down) {
-      fallTimer += dtGame * 12;
-    }
-    fallTimer += dtGame;
-    if (fallTimer > fallInterval()) {
-      fallTimer = 0;
-      if (!tryMove(0, -1)) {
-        lockPiece();
-      }
-    }
-
-    // Mode tick — accumulate gameplay-time (pause-aware), then let the
-    // active rules pack react and check its end condition. All three
-    // calls are no-ops for Classic; future packs (Sprint timer, Ultra
-    // countdown, Marathon goal-line) hang their per-frame logic here.
+    // Mode tick — Game owns gravity, modeTimeMs accumulation, the
+    // rules pack's onTick + endCondition polling. Soft-drop input is
+    // signalled via the InputFrame so Game accelerates fallTimer 12×
+    // (matches the legacy down-arrow-held behavior).
     const dtMs = dtGame * 1000;
-    _modeTimeMs += dtMs;
-    // Versus bot tick — paused-aware via the gameplay block's gating.
-    // No-op when Mode.current !== 'versus' (bot.active is false).
-    versusBot.tick(dtMs);
-    if (activeRules.onTick) {
-      try { activeRules.onTick(_modeStateSnapshot(), dtMs); }
-      catch (err) { console.warn('[rules] onTick threw:', err); }
-    }
-    let _endResult = null;
-    try { _endResult = activeRules.endCondition(_modeStateSnapshot()); }
-    catch (err) { console.warn('[rules] endCondition threw:', err); }
-    if (_endResult && _endResult.reason) {
-      endRun({ reason: _endResult.reason });
+    versusBot.tick(dtMs); // host-owned bot — versus only, no-op otherwise
+    const tickResult = game ? game.tick(dtMs, { softDrop: !!keyState.down }) : null;
+    syncFromGame();
+    if (tickResult && tickResult.reason) {
+      endRun({ reason: tickResult.reason });
     }
   }
 
@@ -3748,8 +3334,10 @@ function animate(dt, envTime) {
   const maxOff = 0.45;
   pieceVisualOffset.clampLength(-maxOff, maxOff);
 
-  pieceGroup.position.copy(pieceVisualOffset);
-  pieceGroup.rotation.z = pieceRotVisual * 0.15;
+  if (boardView) {
+    boardView.pieceGroup.position.copy(pieceVisualOffset);
+    boardView.pieceGroup.rotation.z = pieceRotVisual * 0.15;
+  }
 
   // ---- Active-piece energized highlight ----
   // Slow breathing pulse + brief boost when the piece is moving fast.
@@ -4098,26 +3686,31 @@ bus.on(EVENTS.GAME_OVER, ({ score, lines, level }) => {
   // call itself reuses the existing GPU pool, so no allocation per cube.
   const ROW_STAGGER_MS = 12;
   let scheduledRows = 0;
-  for (let r = ROWS - 1; r >= 0; r--) {
-    let rowHasCubes = false;
-    for (let c = 0; c < COLS; c++) {
-      if (cellMeshes[r][c]) { rowHasCubes = true; break; }
-    }
-    if (!rowHasCubes) continue;
-    const delay = scheduledRows * ROW_STAGGER_MS;
-    scheduledRows++;
-    setTimeout(() => {
+  // Snapshot the BoardView reference at schedule time — a Play-Again
+  // could swap it out from under the staggered setTimeouts otherwise.
+  const cascadeView = boardView;
+  if (cascadeView) {
+    for (let r = ROWS - 1; r >= 0; r--) {
+      let rowHasCubes = false;
       for (let c = 0; c < COLS; c++) {
-        const slices = cellMeshes[r][c];
-        if (!slices) continue;
-        for (const cube of slices) {
-          shatter(cube);
-          stackGroup.remove(cube);
-        }
-        cellMeshes[r][c] = null;
-        board[r][c] = null;
+        if (cascadeView.cellMeshes[r][c]) { rowHasCubes = true; break; }
       }
-    }, delay);
+      if (!rowHasCubes) continue;
+      const delay = scheduledRows * ROW_STAGGER_MS;
+      scheduledRows++;
+      setTimeout(() => {
+        for (let c = 0; c < COLS; c++) {
+          const slices = cascadeView.cellMeshes[r][c];
+          if (!slices) continue;
+          for (const cube of slices) {
+            shatter(cube);
+            cascadeView.stackGroup.remove(cube);
+          }
+          cascadeView.cellMeshes[r][c] = null;
+          board[r][c] = null;
+        }
+      }, delay);
+    }
   }
   // Catastrophic camera reaction — Tetris-strength shake + a transient bloom
   // bump, both on the real (unscaled) renderer because the game over moment
@@ -4816,7 +4409,7 @@ const versusBadge = createVersusBadge({
   }),
   getInboundGarbage: () => ({
     rows:    _queuedGarbageRowCount(),
-    blocked: _garbageBlocked,
+    blocked: game ? game.garbageBlocked : false,
   }),
 });
 // Re-render whenever the player swaps modes via the settings panel — the
@@ -5123,18 +4716,13 @@ function applyMood() {
 // Boot
 // =============================================================
 applyMood();
-spawnPiece();
+// Boot the simulation through the same lifecycle as a mode swap or
+// Play-Again — Mode.start fires onStart, which constructs the Game and
+// emits MODE_START. `restart: false` skips the resetRunState() pass
+// since this is the very first run; the freshly-constructed Game seeds
+// the first piece via spawnPiece() in onStart.
+Mode.start({ key: Mode.current, restart: false });
 updateHUD();
-// Emit MODE_START for the first run so HUD / director / future telemetry
-// listeners get a canonical signal regardless of whether the run started
-// from boot or from a "Play Again" click. The lifecycle wiring that fires
-// MODE_START on Play-Again is in resetRunState's wrapper above; this is
-// the boot-time analogue.
-bus.emit(EVENTS.MODE_START, {
-  key: Mode.current,
-  seed: null,
-  initialModeView: activeRules.initialModeView,
-});
 
 // =============================================================
 // Vanilla tweaks panel (no React) — host protocol compliant

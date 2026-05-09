@@ -58,4 +58,10 @@ export const EVENTS = Object.freeze({
   // and applies between piece locks.
   GARBAGE_SENT:       'GARBAGE_SENT',       // { rows: number, target: 'opponent' }
   GARBAGE_RECEIVED:   'GARBAGE_RECEIVED',   // { rows: number, holeColumn: number, source: 'opponent'|'mode' }
+
+  // Fired by Game once a queued garbage entry has been applied to the
+  // board (rows pushed up, new garbage row inserted at the bottom). The
+  // host's BoardView listener mirrors the data-side mutation on the mesh
+  // side. Per-game; carries `side` for dual-board routing.
+  GARBAGE_APPLIED:    'GARBAGE_APPLIED',    // { rows: number, holeColumn: number, side: string }
 });

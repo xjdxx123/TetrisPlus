@@ -61,7 +61,17 @@
       "Bash(curl -s -o /dev/null -w \"versus-badge.js=%{http_code}\\\\n\" http://localhost:5185/src/ui/versus-badge.js)",
       "Bash(curl -s -o /dev/null -w \"tetris.html=%{http_code}\\\\n\" http://localhost:5186/tetris.html)",
       "Bash(curl -s -o /dev/null -w \"format/mode-stats.js=%{http_code}\\\\n\" http://localhost:5186/src/ui/format/mode-stats.js)",
-      "Bash(curl -s -o /dev/null -w \"settings-panel.js=%{http_code}\\\\n\"   http://localhost:5186/src/ui/settings-panel.js)"
+      "Bash(curl -s -o /dev/null -w \"settings-panel.js=%{http_code}\\\\n\"   http://localhost:5186/src/ui/settings-panel.js)",
+      "Bash(grep -n \"spawnPiece\\(\\);$\\\\|^bus.emit\\(EVENTS.MODE_START\" /Users/clintongao/coding/TetrisPlus/project/src/app/main.js)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" http://127.0.0.1:5174/tetris.html)",
+      "Bash(curl -s http://127.0.0.1:5174/tetris.html)",
+      "Bash(curl -s http://127.0.0.1:5174/src/app/main.js)",
+      "Bash(curl -s -o /dev/null -w \"main.js HTTP: %{http_code}\\\\n\" http://127.0.0.1:5174/src/app/main.js)",
+      "Bash(curl -s -o /dev/null -w \"game.js HTTP: %{http_code}\\\\n\" http://127.0.0.1:5174/src/gameplay/game.js)",
+      "Bash(pkill -f \"vite --port 5174\")",
+      "Bash(curl -s -o /dev/null -w \"tetris.html=%{http_code}\\\\nmain.js=\" http://127.0.0.1:5174/tetris.html)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\nboard-view.js=\" http://127.0.0.1:5174/src/app/main.js)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" http://127.0.0.1:5174/src/world/board-view.js)"
     ]
   }
 }
