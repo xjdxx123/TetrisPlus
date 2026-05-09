@@ -2816,6 +2816,13 @@ Mode._wireLifecycle({
     // gravityScalar thunk keeps the live TWEAKS slider working across
     // mode swaps without having to plumb it through Game.
     const rules = buildRules(key, { gravityScalar: () => TWEAKS.gravity, bus });
+    // Case dimensions — the chromeGroup (walls + frame + bottom) was
+    // built at PLAY_W×PLAY_H×PLAY_D=10×20×3 for 2D play. 3D Tetris
+    // (plan v2 §2.1) needs a 10×20×10 well; we scale the group's Z
+    // axis by PLAY_D_3D/PLAY_D so the visible case matches the
+    // 10-cell-deep playable footprint. Reset to 1 for every other
+    // mode so a 3D→2D mode swap restores the 2D thin-slab look.
+    chromeGroup.scale.z = (key === '3d') ? (PLAY_D_3D / PLAY_D) : 1;
     // Tear down any prior simulation. dispose() chains down through
     // VersusSession → both games + both boardViews. Solo state is
     // disposed redundantly (game/boardView may alias session.gameP1/
@@ -3970,7 +3977,18 @@ function animate(dt, envTime) {
 
   if (boardView) {
     boardView.pieceGroup.position.copy(pieceVisualOffset);
-    boardView.pieceGroup.rotation.z = pieceRotVisual * 0.15;
+    // The Z-axis "rotation wobble" reads as a tiny in-plane twist on
+    // 2D pieces (where every cube is at the same depth so the rotation
+    // is around the piece's own depth axis). In 3D mode the piece
+    // spans the depth axis — rotating the whole pieceGroup around
+    // world-Z would swing back-of-well cubes off into X/Y, visibly
+    // distorting the tetracube's shape. Skip the wobble in 3D so the
+    // piece reads as a rigid voxel body.
+    if (game && game.pieceSet === 'tetracubes') {
+      boardView.pieceGroup.rotation.z = 0;
+    } else {
+      boardView.pieceGroup.rotation.z = pieceRotVisual * 0.15;
+    }
   }
 
   // ---- Active-piece energized highlight ----
