@@ -2890,6 +2890,12 @@ Mode._wireLifecycle({
       physicsSession = new PhysicsSession({
         bus, game, side: 'player',
         cols: COLS, rows: ROWS,
+        // Force-Physics renders cells with the same depth-3 thickness
+        // as the grid path — each (col, row) cell becomes 3 colliders
+        // at z = 0 / 1 / 2. Without this, a tetromino would render as
+        // a single 1×1×1 cube per cell instead of the 1×1×3 voxel
+        // stack the rest of the game uses.
+        depth: DEPTH,
         // PhysicsSession may topout the run independently of Game's
         // gravity-driven endCondition (a body's highest collider sits
         // above the field for too long). Wire it to the same endRun

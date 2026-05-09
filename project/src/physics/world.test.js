@@ -45,6 +45,9 @@ describe('createPhysicsWorld — boot', () => {
     // on the player's hard drop.)
     expect(_DEFAULT_OPTS.restitution).toBe(0);
     expect(_DEFAULT_OPTS.stepDtSec).toBe(1 / 60);
+    // 2D-axis lock — no z translation, only z rotation. Set false for
+    // a future full-3D mode.
+    expect(_DEFAULT_OPTS.mode2D).toBe(true);
   });
 });
 
@@ -155,6 +158,47 @@ describe('PhysicsWorld — gravity / step', () => {
     // Walls at x=-1 (left) and x=10 (right). A body inside should
     // stay above x=-0.5 (left wall's right face).
     expect(pos.x).toBeGreaterThan(-0.5);
+    world.dispose();
+  });
+
+  it('mode2D=true (default): cross-axis impulse can NOT drift a body in z', async () => {
+    // Rapier's enabledTranslations lock zeros out impulses + forces on
+    // disabled axes (NOT direct setLinvel — that's an explicit author
+    // override). The Force-Physics gameplay path goes through applyImpulse
+    // and gravity, both of which obey the lock — so a stray collision-
+    // induced z-impulse can't punch a tetromino through the front /
+    // back face of the playfield.
+    const world = await createPhysicsWorld({ floor: false, walls: false });
+    const id = world.addBody(0, 5, 0);
+    world.applyImpulse(id, { x: 0, y: 0, z: 5 });
+    stepN(world, 60); // 1s
+    const pos = world.getBodyPosition(id);
+    expect(Math.abs(pos.z)).toBeLessThan(0.05);
+    world.dispose();
+  });
+
+  it('mode2D=true: cross-axis torque can NOT tip a body off the screen-perpendicular plane', async () => {
+    // The player's applyRotate is z-only; the lock prevents collision-
+    // induced cross-axis torques from rotating the body out of plane.
+    const world = await createPhysicsWorld({ floor: false, walls: false });
+    const id = world.addBody(0, 5, 0);
+    world.applyTorqueImpulse(id, { x: 5, y: 5, z: 0 });
+    stepN(world, 60);
+    const r = world.getBodyRotation(id);
+    // Identity quaternion has |q.x|=|q.y|=0. Allow tiny solver noise.
+    expect(Math.abs(r.x)).toBeLessThan(0.05);
+    expect(Math.abs(r.y)).toBeLessThan(0.05);
+    world.dispose();
+  });
+
+  it('mode2D=false (opt-in 3D): cross-axis impulse drifts a body in z', async () => {
+    const world = await createPhysicsWorld({ floor: false, walls: false, mode2D: false });
+    const id = world.addBody(0, 5, 0);
+    world.applyImpulse(id, { x: 0, y: 0, z: 5 });
+    stepN(world, 60);
+    const pos = world.getBodyPosition(id);
+    // With the lock off, the impulse is honored.
+    expect(pos.z).toBeGreaterThan(2);
     world.dispose();
   });
 

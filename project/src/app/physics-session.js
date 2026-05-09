@@ -80,6 +80,13 @@ const FORCE = Object.freeze({
  * @property {string} [side='player']
  * @property {number} [cols=10]
  * @property {number} [rows=20]
+ * @property {number} [depth=1]
+ *   Number of z-layers a tetromino's cells extrude into. The base 2D
+ *   game has cells at one z-slice (depth=1, one collider per cell); the
+ *   3D-rendered host playfield uses depth=3, so each cell becomes 3
+ *   stacked colliders at z=0 / 1 / 2 — visually identical to the
+ *   3-slice grid renderer. Layer-clear's minSize scales with depth so
+ *   a "full row" still means all `cols * depth` cubes present.
  * @property {Object} [worldOpts]
  *   Forwarded to createPhysicsWorld (gravity, friction, etc.).
  * @property {(c:number, r:number) => {x:number, y:number, z:number}} [cellToWorld]
@@ -98,7 +105,13 @@ const FORCE = Object.freeze({
  * @property {string} side
  */
 
-const DEFAULT_CELL_TO_WORLD = (col, row) => ({ x: col, y: row, z: 0 });
+// Default cellToWorld for the physics simulation keeps grid + depth
+// indices identity-mapped to physics-world coords. The renderer-side
+// cellToWorld (host-supplied to PhysicsBoardView) translates these to
+// scene units. Identity here means a body's translation matches its
+// (col, row, d) directly, which is what addCompoundBody expects when
+// computing the centroid + per-collider local offsets.
+const DEFAULT_CELL_TO_WORLD = (col, row, d = 0) => ({ x: col, y: row, z: d });
 
 export class PhysicsSession {
   /** @param {PhysicsSessionOpts} opts */
@@ -111,6 +124,7 @@ export class PhysicsSession {
     this._side      = opts.side || 'player';
     this._cols      = opts.cols || 10;
     this._rows      = opts.rows || 20;
+    this._depth     = (opts.depth | 0) > 0 ? (opts.depth | 0) : 1;
     this._worldOpts = opts.worldOpts || {};
     this._cellToWorld = opts.cellToWorld || DEFAULT_CELL_TO_WORLD;
     this._onEndRun  = (typeof opts.onEndRun === 'function') ? opts.onEndRun : null;
@@ -345,7 +359,12 @@ export class PhysicsSession {
 
   _processLayers() {
     const colliders = this._world.getColliderPositions();
-    const layers = detectLayers(colliders);
+    // Scale "full row" by depth — at depth=3, a complete row is
+    // cols * 3 = 30 cubes. The default minSize=10 would otherwise
+    // false-positive on a partially-filled row whose front+middle+back
+    // z-slices alone exceed 10 cubes.
+    const minSize = this._cols * this._depth;
+    const layers = detectLayers(colliders, { minSize });
     if (layers.length === 0) return null;
 
     // Map cubeIndices (positions array indices) to colliderIds and
@@ -430,11 +449,19 @@ export class PhysicsSession {
     // Build the compound body. cellToWorld maps grid (col, row) to
     // physics-world coords; default identity since the existing
     // renderer already uses `cellToWorld(col, row, depth)` to bake
-    // scene positions linearly.
-    const points = cells.map(({ col, row }) => {
-      const w = this._cellToWorld(col, row);
-      return { x: w.x, y: w.y, z: w.z || 0 };
-    });
+    // scene positions linearly. With depth>1, each grid cell extrudes
+    // into N z-layers — a T-piece at depth=3 spawns 4 cells × 3 z =
+    // 12 colliders attached to one compound body. The 2D-axis lock on
+    // the body (PhysicsWorld's `mode2D`) keeps the body from rotating
+    // out of plane or drifting in z, so the cubes stay aligned to
+    // their starting z-slice through the whole simulation.
+    const points = [];
+    for (const { col, row } of cells) {
+      for (let d = 0; d < this._depth; d++) {
+        const w = this._cellToWorld(col, row, d);
+        points.push({ x: w.x, y: w.y, z: w.z });
+      }
+    }
     const color = (typeof e?.color === 'number') ? (e.color | 0) : 0xffffff;
     this._activeBodyId = this._world.addCompoundBody(points, { color });
     this._activePieceColor = color;

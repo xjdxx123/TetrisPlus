@@ -78,6 +78,7 @@ export function _resetRapierForTests() {
  * @property {number} [friction=0.6]    Per-cube friction. Calibrated per archived §8.4.
  * @property {number} [restitution=0]   Per-cube bounciness. Zero by default — Force-Physics mode wants cubes to absorb their landing impulse and settle, not rebound off the floor / walls / each other. (Rapier's default restitution combine rule is "max", so even a low non-zero value reads as a perceptible bounce on the player's hard drop.)
  * @property {number} [stepDtSec=1/60]  Fixed timestep. Matches gameplay tick.
+ * @property {boolean} [mode2D=true]    Lock dynamic bodies to 2D play: no z-axis translation, no x/y-axis rotation. Force-Physics is a 2D Tetris rendered with depth-3 thickness — a body can spin around the screen-perpendicular Z axis (player's `applyRotate`) but cannot tip forward / backward / drift through the front face of the container even when collisions inject cross-axis impulses. Set false for a future full-3D mode.
  */
 
 const DEFAULT_OPTS = Object.freeze({
@@ -89,6 +90,7 @@ const DEFAULT_OPTS = Object.freeze({
   friction: 0.6,
   restitution: 0,
   stepDtSec: 1 / 60,
+  mode2D: true,
 });
 
 /**
@@ -241,6 +243,16 @@ export class PhysicsWorld {
       .setLinearDamping(opts.damping ?? 0.05)
       .setAngularDamping(opts.angularDamping ?? 0.10)
       .setCanSleep(true);
+    if (this._opts.mode2D) {
+      // Lock the body to 2D play. enabledTranslations(x, y, z): keep
+      // X/Y free for grid-style horizontal + gravity, lock Z so a
+      // collision-induced cross-axis impulse can't drift the piece off
+      // the front / back face of the container. enabledRotations(x, y,
+      // z): keep only Z (the screen-perpendicular axis the player's
+      // applyRotate uses) so the piece can't tip forward / backward.
+      desc.enabledTranslations(true, true, false);
+      desc.enabledRotations(false, false, true);
+    }
     if (opts.velocity) {
       desc.setLinvel(opts.velocity.x | 0, opts.velocity.y | 0, opts.velocity.z | 0);
     }

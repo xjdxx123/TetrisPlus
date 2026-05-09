@@ -88,8 +88,28 @@ describe('PhysicsSession — PIECE_SPAWN bridge (Force-Physics, plan v2 §2.3.1)
     // Compound body: bodyCount === 1 even though the T-piece has 4 cells.
     expect(session.bodyCount).toBe(1);
     expect(session.activeBodyId).toBe(1); // first body in monotonic ID space
-    // The world has 4 colliders (one per cell of the T).
+    // The world has 4 colliders (one per cell of the T) — default depth=1.
     expect(session.world.getColliderPositions()).toHaveLength(4);
+    session.stop();
+  });
+
+  it('depth>1: PIECE_SPAWN extrudes each cell into N z-stacked colliders (T-piece @ depth=3 → 12 colliders)', async () => {
+    const { game, session } = makeFixture({ depth: 3 });
+    await session.start();
+    game.spawnPiece('T');
+    expect(session.bodyCount).toBe(1);
+    const cs = session.world.getColliderPositions();
+    expect(cs).toHaveLength(12); // 4 cells × 3 z-slices
+
+    // Z values cover the full depth range. Sort + dedupe to confirm
+    // {0, 1, 2} are all represented.
+    const zs = [...new Set(cs.map(c => Math.round(c.z)))].sort();
+    expect(zs).toEqual([0, 1, 2]);
+
+    // Per z-slice there should be exactly 4 colliders (the T's cells).
+    for (const z of [0, 1, 2]) {
+      expect(cs.filter(c => Math.round(c.z) === z)).toHaveLength(4);
+    }
     session.stop();
   });
 
