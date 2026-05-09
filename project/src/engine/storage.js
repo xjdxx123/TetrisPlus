@@ -41,6 +41,15 @@ const SETTINGS_DEFAULTS = Object.freeze({
     bgmTrackIndex: 0,
   },
   mode: 'classic',
+  // Versus AI opponent strength (§3.7 sub-phase 7e polish). Forwarded
+  // to BotController on Mode.start({key:'versus'}). 'casual' (default)
+  // uses the heuristic at 8 actions/sec; 'random' is the dumber pre-
+  // heuristic strategy retained for tutorial stand-in; 'mirror' echoes
+  // the player's piece position (sparring partner). Settings panel
+  // surfaces this as a select when the active mode is versus.
+  versus: {
+    botStrength: 'casual',
+  },
   // panel.hidden defaults to FALSE — the settings panel is the primary UI
   // surface (plan_UI_1.md §2.0); making it discoverable on first launch
   // matters more than the slight visual clutter on a fresh install. The

@@ -46,7 +46,16 @@ import { buildRules } from '../gameplay/rules.js';
  *                                              `{ cellToWorld, makeCube, shatter, animateCubeTo, startLockAnim, playSfx }`.
  * @property {Object}  [opponentMode]          'bot' (default) or 'local' (second InputRouter).
  * @property {string}  [opponentStrength]      Forwarded to BotController (default 'casual').
+ * @property {string}  [playerInputMode]       'router' (default) — VersusSession owns an InputRouter for P1.
+ *                                             'host'   — host (e.g. main.js) drives gameP1 directly via
+ *                                             game.tryMove / hardDrop / etc; VersusSession only ticks the bot.
  * @property {EventTarget} [inputTarget]       Default globalThis.
+ * @property {import('../engine/events/bus.js').EventBus} [busP1]
+ *   Bus to use for player-side gameplay events. Defaults to a fresh
+ *   per-session bus (full isolation). When the host wants its global-
+ *   bus subscribers (HUD / cinematic FX / audio) to fire on the
+ *   player's events, pass the global bus here. Opponent always gets a
+ *   private bus regardless — that's how cross-bus garbage stays one-way.
  * @property {() => number} [rngP1]            Seeded PRNG for player 1; default Math.random.
  * @property {() => number} [rngP2]            Seeded PRNG for opponent;  default Math.random.
  * @property {(reason:string, side:string) => void} [onSideEnd]
@@ -63,12 +72,17 @@ export class VersusSession {
 
     this._opts = opts;
     this._opponentMode = opts.opponentMode || 'bot';
+    this._playerInputMode = opts.playerInputMode || 'router';
 
     this.dualBoard = new DualBoard({ parent: opts.parent });
 
-    // Per-game buses — keep emissions local to one side. The garbage
-    // bridge below is the only cross-bus traffic.
-    const busP1 = new EventBus({ replayBufferSize: 0, recorderSize: 0 });
+    // Per-side buses. Player side accepts a host-supplied bus so the
+    // host's global subscribers (versus-badge, cinematic FX, audio)
+    // fire on the player's events without an extra bridge. Opponent
+    // is always isolated on a private bus — that's what keeps the
+    // garbage bridge one-way (a global subscriber for GARBAGE_RECEIVED
+    // would otherwise see both sides' incoming queues).
+    const busP1 = opts.busP1 || new EventBus({ replayBufferSize: 0, recorderSize: 0 });
     const busP2 = new EventBus({ replayBufferSize: 0, recorderSize: 0 });
 
     const rulesP1 = buildRules('versus', { bus: busP1 });
@@ -102,13 +116,18 @@ export class VersusSession {
       ...opts.rendererDeps,
     });
 
-    // Inputs: P1 always uses the player keymap. P2 is either a bot or
-    // a second human (local 2P mode).
-    this.routerP1 = new InputRouter({
-      side: 'player',
-      keymap: KEYMAP_PRESETS.player,
-      target: opts.inputTarget,
-    });
+    // Inputs: P1 either uses VersusSession's InputRouter or is host-
+    // driven (main.js's existing keyboard handlers). P2 is either a
+    // bot or a second human (local 2P mode).
+    if (this._playerInputMode === 'host') {
+      this.routerP1 = null;
+    } else {
+      this.routerP1 = new InputRouter({
+        side: 'player',
+        keymap: KEYMAP_PRESETS.player,
+        target: opts.inputTarget,
+      });
+    }
     if (this._opponentMode === 'local') {
       this.routerP2 = new InputRouter({
         side: 'opponent',
@@ -167,14 +186,33 @@ export class VersusSession {
    * Pulls input frames from both routers / bot, dispatches discrete
    * actions, advances both Games.
    *
+   * In `playerInputMode: 'host'`, the player side is NOT advanced here
+   * — the host (e.g. main.js) is expected to drive `gameP1` directly
+   * via tryMove / hardDrop / game.tick. Calling `tick()` in that mode
+   * forwards to `tickOpponent()` for symmetry.
+   *
    * @param {number} dtMs
    */
   tick(dtMs) {
-    const fP1 = this.routerP1 ? this.routerP1.frame() : { ...EMPTY_FRAME };
+    if (this._playerInputMode !== 'host') {
+      const fP1 = this.routerP1 ? this.routerP1.frame() : { ...EMPTY_FRAME };
+      this._dispatchSide(this.gameP1, fP1, dtMs);
+    }
+    this.tickOpponent(dtMs);
+  }
+
+  /**
+   * Advance only the opponent side. Use this when the host drives the
+   * player side itself (the §3.7-7e dual-board host integration: main.js
+   * still manages keyboard input + `game.tick(dtMs)` for the player;
+   * VersusSession is responsible for the bot/P2 game).
+   *
+   * @param {number} dtMs
+   */
+  tickOpponent(dtMs) {
     const fP2 = this.routerP2
       ? this.routerP2.frame()
       : (this.bot ? this.bot.tick(dtMs) : { ...EMPTY_FRAME });
-    this._dispatchSide(this.gameP1, fP1, dtMs);
     this._dispatchSide(this.gameP2, fP2, dtMs);
   }
 

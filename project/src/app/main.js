@@ -61,6 +61,7 @@ import { recordEndOfRun } from '../gameplay/end-of-run.js';
 import { pickHoleColumn } from '../gameplay/garbage.js';
 import { Game } from '../gameplay/game.js';
 import { BoardView } from '../world/board-view.js';
+import { VersusSession } from './versus.js';
 
 // =============================================================
 // Tweaks — original three (gravity / mood / shatterPower) are written by
@@ -1374,6 +1375,19 @@ function makeCube(color, opts = {}) {
 const caseGroup = new THREE.Group();
 scene.add(caseGroup);
 
+// Sub-group that holds ONLY the static chrome (walls / bottom / frame /
+// rims / lights / inner floor). Gameplay-FX meshes (impact rings,
+// flash lights, trails) stay parented directly under caseGroup so
+// they're shared across both sides in versus mode.
+//
+// Why a sub-group: in versus mode (§3.7 sub-phase 7e) we
+// `chromeGroup.clone(true)` and mount the clone at the opponent's
+// X-offset so the bot's well has its own frame around it. Cloning
+// a Group recursively duplicates its mesh children but shares
+// geometry + material refs — adding a second copy is cheap.
+const chromeGroup = new THREE.Group();
+caseGroup.add(chromeGroup);
+
 // Glass shell — built as 4 individual side walls + bottom (no top, like reference).
 // Uses the custom fresnel-driven glass shader (above): nearly invisible at
 // face-on view, bright glassy rim at grazing angles. This is what gives the
@@ -1396,7 +1410,7 @@ function addWall(w, h, d, x, y, z) {
   // looking through the front wall washes out the energized-piece glow that
   // is clearly visible from above (where no wall is in the line of sight).
   m.renderOrder = -1;
-  caseGroup.add(m);
+  chromeGroup.add(m);
   return m;
 }
 // Front, back, left, right
@@ -1418,7 +1432,7 @@ const bottom = new THREE.Mesh(bottomGeo, bottomMat);
 bottom.position.y = -PLAY_H/2 - 0.06;
 // Same rationale as walls: render before transparent overlays.
 bottom.renderOrder = -1;
-caseGroup.add(bottom);
+chromeGroup.add(bottom);
 
 // Edge frame — bright glowing wires around the entire case (top rim, vertical edges, bottom rim)
 const frameOuterGeo = new THREE.BoxGeometry(
@@ -1435,7 +1449,7 @@ const frameMat = new THREE.LineBasicMaterial({
   depthWrite: false,
 });
 const frame = new THREE.LineSegments(frameEdges, frameMat);
-caseGroup.add(frame);
+chromeGroup.add(frame);
 
 // Inner edge frame — traces the interior of the play volume so the case
 // reads as a contained box even when the outer frame is camera-occluded.
@@ -1449,7 +1463,7 @@ const innerFrameMat = new THREE.LineBasicMaterial({
   depthWrite: false,
 });
 const innerFrame = new THREE.LineSegments(innerFrameEdges, innerFrameMat);
-caseGroup.add(innerFrame);
+chromeGroup.add(innerFrame);
 
 // Bright top rim — extra-prominent (like the reference's lit top edge)
 const topRimGeo = new THREE.BoxGeometry(
@@ -1466,12 +1480,12 @@ const topRim = new THREE.LineSegments(topRimEdges, new THREE.LineBasicMaterial({
   depthWrite: false,
 }));
 topRim.position.y = PLAY_H / 2;
-caseGroup.add(topRim);
+chromeGroup.add(topRim);
 
 // Inner light strip running around the top rim (additive)
 const rimLightStrip = new THREE.PointLight(0xaee7ff, 1.2, 14, 1.6);
 rimLightStrip.position.set(0, PLAY_H/2 + 0.4, 0);
-caseGroup.add(rimLightStrip);
+chromeGroup.add(rimLightStrip);
 
 // Inner grid lines on back wall (subtle gameplay aid)
 const backGridMat = new THREE.LineBasicMaterial({
@@ -1493,7 +1507,7 @@ for (let j = 0; j <= ROWS; j++) {
 }
 backGridGeo.setAttribute('position', new THREE.Float32BufferAttribute(backVerts, 3));
 const backGrid = new THREE.LineSegments(backGridGeo, backGridMat);
-caseGroup.add(backGrid);
+chromeGroup.add(backGrid);
 
 // Floor inside case — polished reflective surface so cubes get a faint reflection
 const innerFloorGeo = new THREE.PlaneGeometry(PLAY_W, PLAY_D);
@@ -1510,7 +1524,7 @@ innerFloorMat.userData.enableBloom = false;
 const innerFloor = new THREE.Mesh(innerFloorGeo, innerFloorMat);
 innerFloor.rotation.x = -Math.PI / 2;
 innerFloor.position.y = -PLAY_H / 2 + 0.015;
-caseGroup.add(innerFloor);
+chromeGroup.add(innerFloor);
 
 // Static flash-light pool — pre-allocated PointLights for line-clear flashes.
 // Adding/removing PointLights at runtime forces Three.js to recompile every
@@ -1694,8 +1708,45 @@ let board = Array.from({ length: ROWS }, () => Array(COLS).fill(null));
 // in BoardView (§3.7 sub-phase 7b). Visual-inertia state (the spring on
 // the active piece) stays in main.js — it animates BoardView's
 // pieceGroup but isn't part of the simulation.
-let game      = null;
-let boardView = null;
+//
+// In versus mode `versusSession` owns a real second simulation (the
+// AI opponent — §3.7 sub-phase 7e). When non-null, `game` and
+// `boardView` are aliased to the player side (`gameP1` / `viewP1`)
+// so the existing legacy gameplay wrappers keep working untouched.
+let game           = null;
+let boardView      = null;
+let versusSession  = null;
+
+// Additional bus subscriptions on the opponent's *private* bus
+// (`versusSession.gameP2.bus`) for visual feedback that the global-bus
+// subscribers can't see. Score popups for the bot's line clears live
+// here. Tracked + disposed on mode change so a stale subscriber from
+// the previous round doesn't fire on a freshly-spawned session.
+const _opponentVizUnsubs = [];
+
+// Dual-board layout constants for versus mode. Player's well sits at
+// the case origin (existing chrome wraps it); the opponent's well is
+// at +OPPONENT_OFFSET_X with a *cloned* chrome around it (see
+// `chromeGroup` and the `opponentChromeClone` lifecycle below).
+const OPPONENT_OFFSET_X    = 14;
+const VERSUS_CAM_POS       = new THREE.Vector3(21, 4, 34);
+const VERSUS_CAM_TARGET    = new THREE.Vector3(7, 0, 0);
+
+// Cloned chrome for the opponent's side — built on entering versus,
+// torn down on leaving. THREE.Group.clone(true) does a recursive
+// shallow-clone: meshes get new transform wrappers but share geometry
+// + material refs with the original, and Light subclasses (PointLight)
+// produce real new lights at the cloned positions. Cheap to add.
+let opponentChromeClone = null;
+
+// Bot strength preference for versus mode. Persisted in
+// SETTINGS_DEFAULTS.versus.botStrength; the settings panel exposes
+// it as a select on the Mode tab. Read at Mode.start({key:'versus'})
+// and forwarded to VersusSession's BotController.
+let _versusBotStrength = (
+  (_persistedSettings.versus && _persistedSettings.versus.botStrength)
+  || 'casual'
+);
 
 let activePiece = null;
 let nextQueue = [];
@@ -1773,6 +1824,20 @@ const GARBAGE_COLOR = 0x808080; // neutral gray; reads as "not mine"
 
 function _queuedGarbageRowCount() {
   return game ? game.queuedGarbageRows : 0;
+}
+
+/**
+ * Highest non-empty row in a board, 1-indexed (0 = empty board, ROWS =
+ * stack reaches the top). Used by versus-badge to render the
+ * opponent's stack-height meter.
+ */
+function _highestFilledRow(board) {
+  if (!Array.isArray(board)) return 0;
+  for (let r = board.length - 1; r >= 0; r--) {
+    const row = board[r];
+    if (row && row.some(c => c != null)) return r + 1;
+  }
+  return 0;
 }
 
 // =============================================================
@@ -2216,6 +2281,109 @@ holdObj.position.set(-13, -5, 4);
 holdObj.scale.setScalar(0.025);
 cssScene.add(holdObj);
 
+// Per-side identification labels for dual-board versus mode (§3.7
+// sub-phase 7e polish). Both objects are constructed at module load
+// and toggled visible only when versusSession is active — solo modes
+// hide them entirely. Anchored above each well's top via CSS3DObject
+// so they track with camera orbit.
+function _makeSideLabel(text, hex) {
+  const el = document.createElement('div');
+  el.textContent = text;
+  el.style.cssText = `
+    font: 700 22px ui-sans-serif, system-ui, sans-serif;
+    letter-spacing: 0.32em;
+    color: ${hex};
+    text-shadow: 0 0 14px ${hex}80, 0 0 32px ${hex}40;
+    padding: 6px 18px;
+    border: 1px solid ${hex}80;
+    border-radius: 6px;
+    background: rgba(10, 14, 24, 0.55);
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+    white-space: nowrap;
+    user-select: none;
+    pointer-events: none;
+  `;
+  return el;
+}
+const playerLabelEl   = _makeSideLabel('YOU',      '#6cf0ff');
+const opponentLabelEl = _makeSideLabel('OPPONENT', '#ff6c8a');
+const playerLabelObj   = new CSS3DObject(playerLabelEl);
+const opponentLabelObj = new CSS3DObject(opponentLabelEl);
+playerLabelObj.position.set(0, PLAY_H / 2 + 2.0, 0.4);
+opponentLabelObj.position.set(OPPONENT_OFFSET_X, PLAY_H / 2 + 2.0, 0.4);
+playerLabelObj.scale.setScalar(0.025);
+opponentLabelObj.scale.setScalar(0.025);
+playerLabelObj.visible   = false;
+opponentLabelObj.visible = false;
+cssScene.add(playerLabelObj);
+cssScene.add(opponentLabelObj);
+
+// Per-side inbound-garbage indicators (§3.7 sub-phase 7e polish).
+// Shown next to each well in versus mode; hidden when queue is empty
+// or in solo modes. Updated each frame in updateHUD's versus branch.
+// The §12 M5 spawn-delay window will repurpose these into per-row
+// timer bars; for now they're a simple count readout.
+function _makeGarbageIndicator(hex) {
+  const el = document.createElement('div');
+  el.textContent = '';
+  el.style.cssText = `
+    font: 700 16px ui-sans-serif, system-ui, sans-serif;
+    letter-spacing: 0.18em;
+    color: ${hex};
+    text-shadow: 0 0 10px ${hex}80;
+    padding: 4px 10px;
+    border: 1px solid ${hex}80;
+    border-radius: 4px;
+    background: rgba(10, 14, 24, 0.7);
+    white-space: nowrap;
+    user-select: none;
+    pointer-events: none;
+  `;
+  return el;
+}
+const playerGarbageEl   = _makeGarbageIndicator('#ff6c8a'); // pink — DANGER, incoming on you
+const opponentGarbageEl = _makeGarbageIndicator('#6cf0ff'); // cyan — what YOU sent them
+const playerGarbageObj   = new CSS3DObject(playerGarbageEl);
+const opponentGarbageObj = new CSS3DObject(opponentGarbageEl);
+// Anchored to the right of each well (-PLAY_W/2 = -5 left edge,
+// +PLAY_W/2 = +5 right edge; offset further to clear the chrome).
+playerGarbageObj.position.set(PLAY_W / 2 + 1.5, 0, 0.4);
+opponentGarbageObj.position.set(OPPONENT_OFFSET_X + PLAY_W / 2 + 1.5, 0, 0.4);
+playerGarbageObj.scale.setScalar(0.025);
+opponentGarbageObj.scale.setScalar(0.025);
+playerGarbageObj.visible   = false;
+opponentGarbageObj.visible = false;
+cssScene.add(playerGarbageObj);
+cssScene.add(opponentGarbageObj);
+
+/**
+ * Refresh the per-side garbage indicators. Reads the current queues
+ * from `versusSession.gameP1` (incoming on you) and `gameP2` (what
+ * you've sent them that hasn't applied yet). No-op outside versus.
+ */
+function _updateGarbageIndicators() {
+  if (!versusSession) {
+    playerGarbageObj.visible   = false;
+    opponentGarbageObj.visible = false;
+    return;
+  }
+  const playerInbound  = versusSession.gameP1.queuedGarbageRows;
+  const opponentInbound = versusSession.gameP2.queuedGarbageRows;
+  if (playerInbound > 0) {
+    playerGarbageEl.textContent = `+${playerInbound} ▲`;
+    playerGarbageObj.visible = true;
+  } else {
+    playerGarbageObj.visible = false;
+  }
+  if (opponentInbound > 0) {
+    opponentGarbageEl.textContent = `+${opponentInbound} ▲`;
+    opponentGarbageObj.visible = true;
+  } else {
+    opponentGarbageObj.visible = false;
+  }
+}
+
 // Make panels draggable in 3D space (project mouse onto a plane parallel to camera)
 function makeDraggable(el, obj) {
   let dragging = false;
@@ -2346,6 +2514,8 @@ function pulsePanel(el, intensity) {
   inner.classList.add('panel-pulse');
 }
 function updateHUD() {
+  // Per-side garbage indicators (versus only; cheap no-op otherwise).
+  _updateGarbageIndicators();
   const dScore = score - _prevScore;
   const dLines = lines - _prevLines;
   // Big score deltas (line clears) tween from displayed → target over 0.4s
@@ -2438,7 +2608,7 @@ function endRun({ reason = 'topout', winner } = {}) {
     winner = 'opponent';
   }
   if (reason === 'topout') {
-    bus.emit(EVENTS.GAME_OVER, { score, lines, level });
+    bus.emit(EVENTS.GAME_OVER, { score, lines, level, winner });
   }
   // High-score / per-mode best / cumulative totals — extracted helper.
   // Run BEFORE the player can hit "Play Again" so a mid-cascade tab close
@@ -2568,38 +2738,110 @@ Mode._wireLifecycle({
     // gravityScalar thunk keeps the live TWEAKS slider working across
     // mode swaps without having to plumb it through Game.
     const rules = buildRules(key, { gravityScalar: () => TWEAKS.gravity, bus });
-    // Tear down any prior Game + BoardView (mode swap or restart).
-    // dispose() unhooks Game's GARBAGE_RECEIVED subscription and
-    // BoardView's mesh-side subscribers so a stale pair doesn't
-    // double-emit or double-render against the new instance.
-    if (boardView) boardView.dispose();
-    if (game)      game.dispose();
-    game = new Game({
-      rules,
-      bus,
-      side: 'player',
-      onEndRun: ({ reason, winner }) => endRun({ reason, winner }),
-    });
-    boardView = new BoardView({
-      game, bus,
-      parent: caseGroup,
-      side: 'player',
-      cols: COLS, rows: ROWS, depth: DEPTH,
-      cellToWorld, makeCube, shatter, animateCubeTo, startLockAnim,
-      playSfx,
-    });
-    if (restart) {
-      resetRunState();
+    // Tear down any prior simulation. dispose() chains down through
+    // VersusSession → both games + both boardViews. Solo state is
+    // disposed redundantly (game/boardView may alias session.gameP1/
+    // viewP1 from a prior versus run); BoardView/Game.dispose are
+    // idempotent so the double-call is safe.
+    _disposeOpponentViz();
+    if (versusSession) versusSession.dispose();
+    if (boardView)     boardView.dispose();
+    if (game)          game.dispose();
+    versusSession = null;
+    _endRunInvoked = false; // reset host-side end-run guard
+
+    if (key === 'versus') {
+      // Real dual-sim — VersusSession owns both Games + BoardViews +
+      // the cross-bus garbage bridge. main.js drives the player side
+      // via its existing keyboard handlers (`playerInputMode: 'host'`);
+      // VersusSession's tickOpponent() drives the bot. Player events
+      // ride the global bus so HUD / cinematic FX / audio fire as
+      // usual; opponent events stay on a private bus (no leak).
+      versusSession = new VersusSession({
+        parent: caseGroup,
+        rendererDeps: { cellToWorld, makeCube, shatter, animateCubeTo, startLockAnim, playSfx },
+        opponentMode: 'bot',
+        opponentStrength: _versusBotStrength,
+        playerInputMode: 'host',
+        inputTarget: window,
+        busP1: bus,
+        onSideEnd: (reason, side) => {
+          // Player KO or session-forced opponent_topout → host's endRun
+          // does stats persistence + MODE_END. The `_endRunInvoked`
+          // guard covers the case where both sides signal in one tick
+          // (single-shot per run).
+          // Cinematic camera zoom on the loser's well so the moment
+          // reads. The KO side is whichever topped out FIRST: that's
+          // `side` for a real topout, or the opposite side for the
+          // session's force-topout follow-up.
+          if (side === 'player') {
+            _focusKOCamera('player');
+            const winner = reason === 'topout' ? 'opponent' : undefined;
+            endRun({ reason, winner });
+          } else if (side === 'opponent') {
+            _focusKOCamera('opponent');
+            // Bot KO — player wins.
+            endRun({ reason: 'topout', winner: 'player' });
+          }
+        },
+      });
+      // Layout: player's well at the case origin (existing chrome
+      // wraps it); opponent's well at +OPPONENT_OFFSET_X with a
+      // *cloned* chrome wrapping it. Both sides now have proper
+      // case mesh — the user feedback called out the missing
+      // opponent container; this is the fix.
+      versusSession.dualBoard.leftAnchor.position.x  = 0;
+      versusSession.dualBoard.rightAnchor.position.x = OPPONENT_OFFSET_X;
+      _attachOpponentChrome();
+      _attachOpponentViz();
+      // Per-side labels visible only in versus.
+      playerLabelObj.visible   = true;
+      opponentLabelObj.visible = true;
+      // Alias the player side into the legacy refs so the gameplay
+      // function wrappers (tryMove, hardDrop, etc.) keep driving
+      // gameP1 unchanged.
+      game      = versusSession.gameP1;
+      boardView = versusSession.viewP1;
+      // Disable the Phase-6 abstract bot — VersusSession's BotController
+      // owns the opponent now. Without this, both bots emit garbage.
+      if (typeof versusBot !== 'undefined') {
+        versusBot.reset();
+        versusBot.setEnabled(false);
+      }
+      enterVersusCamera();
+      versusSession.start();
+      if (restart) resetRunState();
+      else         syncFromGame();
     } else {
-      // Fresh game (boot path) — Game has no active piece yet. Seed
-      // the first one; PIECE_SPAWN fires synchronously and BoardView's
-      // subscriber rebuilds the piece + ghost mesh.
-      game.spawnPiece();
-      syncFromGame();
+      // Solo modes — single Game + single BoardView, mounted directly
+      // under caseGroup at origin (the legacy layout).
+      game = new Game({
+        rules,
+        bus,
+        side: 'player',
+        onEndRun: ({ reason, winner }) => endRun({ reason, winner }),
+      });
+      boardView = new BoardView({
+        game, bus,
+        parent: caseGroup,
+        side: 'player',
+        cols: COLS, rows: ROWS, depth: DEPTH,
+        cellToWorld, makeCube, shatter, animateCubeTo, startLockAnim,
+        playSfx,
+      });
+      if (typeof versusBot !== 'undefined') versusBot.reset();
+      _detachOpponentChrome();
+      // Hide per-side labels in solo modes.
+      playerLabelObj.visible   = false;
+      opponentLabelObj.visible = false;
+      exitVersusCamera();
+      if (restart) {
+        resetRunState();
+      } else {
+        game.spawnPiece();
+        syncFromGame();
+      }
     }
-    // Bot still lives in main.js (host concern). Reset is idempotent for
-    // non-versus modes.
-    if (typeof versusBot !== 'undefined') versusBot.reset();
     bus.emit(EVENTS.MODE_START, {
       key,
       seed: typeof seed === 'number' ? seed : null,
@@ -2747,6 +2989,17 @@ const versusBot = (() => {
   return {
     reset,
     tick,
+    /**
+     * Force-disable the abstract bot. Called by `Mode._wireLifecycle.
+     * onStart` when versusSession owns the opponent — the abstract bot
+     * shouldn't ALSO emit garbage or absorb the player's clears.
+     * Setting active+alive to false makes both `tick()` and the
+     * GARBAGE_SENT subscriber early-return.
+     */
+    setEnabled(b) {
+      alive  = b && (Mode.current === 'versus');
+      active = b && (Mode.current === 'versus');
+    },
     get alive()       { return alive; },
     get active()      { return active; },
     get score()       { return Math.round(score); },
@@ -2860,6 +3113,138 @@ function resetCamera() {
 }
 
 const camTween = { active: false, t: 0, dur: 0.7, from:null, to:null, fromTarget:null, toTarget:null };
+
+/**
+ * Slide the camera to the dual-board midpoint so both wells fit in
+ * the frame. Called on entering versus mode; `exitVersusCamera`
+ * restores the default for solo modes.
+ */
+function enterVersusCamera() {
+  camTween.from = camera.position.clone();
+  camTween.to   = VERSUS_CAM_POS.clone();
+  camTween.fromTarget = controls.target.clone();
+  camTween.toTarget   = VERSUS_CAM_TARGET.clone();
+  camTween.t = 0;
+  camTween.dur = 0.9;
+  camTween.active = true;
+}
+
+function exitVersusCamera() {
+  // Only tween if we're not already at default — avoids a 0.9s
+  // no-op on every solo Mode.start.
+  if (camera.position.distanceToSquared(DEFAULT_CAM_POS) < 1e-3 &&
+      controls.target.distanceToSquared(DEFAULT_CAM_TARGET) < 1e-3) return;
+  camTween.from = camera.position.clone();
+  camTween.to   = DEFAULT_CAM_POS.clone();
+  camTween.fromTarget = controls.target.clone();
+  camTween.toTarget   = DEFAULT_CAM_TARGET.clone();
+  camTween.t = 0;
+  camTween.dur = 0.9;
+  camTween.active = true;
+}
+
+/**
+ * Cinematic zoom-in on the loser's well at KO, then settle back to
+ * the versus midpoint after `restoreDelayMs`. Called from versusSession
+ * `onSideEnd` so the user gets a clear "look at where it ended"
+ * moment before the game-over overlay covers everything.
+ *
+ * @param {string} side  'player' | 'opponent'
+ */
+function _focusKOCamera(side) {
+  const wellX = side === 'opponent' ? OPPONENT_OFFSET_X : 0;
+  // Pull the camera in close to the loser's well — angle still matches
+  // the versus default's (camera 14 units right of target, ~30 z), just
+  // tighter.
+  const focusPos    = new THREE.Vector3(wellX + 8, 4, 22);
+  const focusTarget = new THREE.Vector3(wellX, 0, 0);
+  camTween.from       = camera.position.clone();
+  camTween.to         = focusPos;
+  camTween.fromTarget = controls.target.clone();
+  camTween.toTarget   = focusTarget;
+  camTween.t   = 0;
+  camTween.dur = 0.45;
+  camTween.active = true;
+  // After the focus tween + a brief hold, restore to the versus midpoint
+  // shot so the gameOver overlay reads against the full layout.
+  setTimeout(() => {
+    if (!versusSession) return; // user already left versus mode
+    camTween.from       = camera.position.clone();
+    camTween.to         = VERSUS_CAM_POS.clone();
+    camTween.fromTarget = controls.target.clone();
+    camTween.toTarget   = VERSUS_CAM_TARGET.clone();
+    camTween.t   = 0;
+    camTween.dur = 0.7;
+    camTween.active = true;
+  }, 850);
+}
+
+/**
+ * Build (or rebuild) the opponent's chrome by cloning chromeGroup
+ * and shifting it to OPPONENT_OFFSET_X. Idempotent — calling twice
+ * disposes the prior clone first. Called from versus onStart.
+ *
+ * THREE.Group.clone(true) does a recursive clone: meshes are new
+ * Object3D wrappers but share geometry + material refs with the
+ * original, so a frame-color swap from applyMood() updates both
+ * sides automatically. Light subclasses (PointLight) produce real
+ * new lights at the cloned local positions.
+ */
+function _attachOpponentChrome() {
+  _detachOpponentChrome();
+  opponentChromeClone = chromeGroup.clone(true);
+  opponentChromeClone.position.x = OPPONENT_OFFSET_X;
+  caseGroup.add(opponentChromeClone);
+}
+
+/** Tear down the opponent's chrome. Called when leaving versus mode. */
+function _detachOpponentChrome() {
+  if (!opponentChromeClone) return;
+  if (opponentChromeClone.parent) opponentChromeClone.parent.remove(opponentChromeClone);
+  opponentChromeClone.traverse(node => {
+    // Lights cloned via Group.clone don't hold any unique GPU resources
+    // (just JS-side state), so no explicit dispose is needed. Meshes
+    // share geometry + material with the original, so we MUST NOT
+    // dispose those — that would break the original chrome too.
+    if (node.parent) {/* no-op, just walking */}
+  });
+  opponentChromeClone = null;
+}
+
+/** Drop all bus subscriptions on the opponent's private bus. */
+function _disposeOpponentViz() {
+  for (const u of _opponentVizUnsubs) {
+    try { u(); } catch { /* ignore */ }
+  }
+  _opponentVizUnsubs.length = 0;
+}
+
+/**
+ * Wire visual feedback for the bot's gameplay events on the opponent's
+ * *private* bus. The global-bus subscribers (cinematic FX, audio, HUD)
+ * fire only on player events because gameP2 is on `busP2` — without
+ * this hook the bot's clears would shatter cubes (BoardView's job)
+ * but produce no score popup, no callout, no signal that anything
+ * happened. We deliberately mirror only the per-side cues (popup);
+ * global cues (slowmo / camera shake / punch / callout) stay
+ * player-only so the screen doesn't react to the opponent's plays.
+ */
+function _attachOpponentViz() {
+  _disposeOpponentViz();
+  if (!versusSession) return;
+  const opp = versusSession.gameP2.bus;
+  _opponentVizUnsubs.push(opp.on(EVENTS.LINE_CLEAR, ({ rows, scoreDelta, overallColor }) => {
+    if (!rows || rows.length === 0) return;
+    // rows is sorted top-down — last entry is the bottom-most cleared row.
+    const anchorRow = rows[rows.length - 1];
+    triggerScorePopup(scoreDelta, anchorRow, overallColor, OPPONENT_OFFSET_X);
+    // Triple/tetris clears get the shockwave ring too, anchored at the
+    // opponent's well. Same threshold (rowCount >= 3) the player gets.
+    if (rows.length >= 3) {
+      triggerLineClearShockwave(rows, overallColor, rows.length, OPPONENT_OFFSET_X);
+    }
+  }));
+}
 
 // =============================================================
 // Punch-zoom for multi-line clears
@@ -3133,11 +3518,14 @@ function spawnScorePopupBurst(worldPos, color, intensity) {
 
 // ---- Public entry: replaces the legacy 2D popup ----------------------------
 const _popupWorldPos = new THREE.Vector3();
-function triggerScorePopup(amount, rowIndex, color) {
+function triggerScorePopup(amount, rowIndex, color, worldX = 0) {
   // Anchor the burst at the cleared row's world center, slightly toward
-  // camera so it pops in front of cubes.
+  // camera so it pops in front of cubes. `worldX` defaults to 0 (the
+  // player's well center); §3.7 sub-phase 7e polish passes the opponent
+  // anchor's X-offset so the bot's clears get their own popup at the
+  // correct side of the dual-board layout.
   const worldY = -PLAY_H / 2 + (rowIndex + 0.5) * CELL;
-  _popupWorldPos.set(0, worldY, 1.5);
+  _popupWorldPos.set(worldX, worldY, 1.5);
 
   // (1) Text popup
   const slot = acquireScorePopup();
@@ -3181,12 +3569,14 @@ function triggerScorePopup(amount, rowIndex, color) {
 // where the popup text lands. Same pool, same scaling curve as before — we
 // just lift the gate decision out to the orchestrator.
 const _orchShockwavePos = new THREE.Vector3();
-function triggerLineClearShockwave(rows, color, rowCount) {
+function triggerLineClearShockwave(rows, color, rowCount, worldX = 0) {
   // `rows` is sorted top-down by clearLines (largest row index first), so
-  // the last entry is the bottom-most cleared row.
+  // the last entry is the bottom-most cleared row. `worldX` defaults to 0
+  // (player's well center); versus polish passes OPPONENT_OFFSET_X for
+  // the bot's clears so the ring expands from the opponent's well.
   const bottomRow = rows[rows.length - 1];
   const worldY = -PLAY_H / 2 + (bottomRow + 0.5) * CELL;
-  _orchShockwavePos.set(0, worldY, 1.5);
+  _orchShockwavePos.set(worldX, worldY, 1.5);
   // intensity drives ring radius (peakScale = 4 + intensity * 1.4); using
   // rowCount keeps the previous curve (triple→8.2, tetris→9.6).
   triggerShockwave(_orchShockwavePos, color, rowCount);
@@ -3306,8 +3696,15 @@ function animate(dt, envTime) {
     // rules pack's onTick + endCondition polling. Soft-drop input is
     // signalled via the InputFrame so Game accelerates fallTimer 12×
     // (matches the legacy down-arrow-held behavior).
+    //
+    // In versus mode, VersusSession.tickOpponent advances gameP2 (bot
+    // intents → tryMove/Rotate/hardDrop on gameP2 + gameP2.tick).
+    // The abstract Phase-6 versusBot is disabled in versusSession
+    // mode (alive=false from setEnabled(false)), so its tick is a
+    // safe no-op even though we still call it.
     const dtMs = dtGame * 1000;
-    versusBot.tick(dtMs); // host-owned bot — versus only, no-op otherwise
+    versusBot.tick(dtMs);
+    if (versusSession) versusSession.tickOpponent(dtMs);
     const tickResult = game ? game.tick(dtMs, { softDrop: !!keyState.down }) : null;
     syncFromGame();
     if (tickResult && tickResult.reason) {
@@ -3674,10 +4071,25 @@ registerDirector(bus, {
   },
 });
 
-bus.on(EVENTS.GAME_OVER, ({ score, lines, level }) => {
+bus.on(EVENTS.GAME_OVER, ({ score, lines, level, winner }) => {
   document.getElementById('goScore').textContent = score.toLocaleString();
   document.getElementById('goLines').textContent = lines;
   document.getElementById('goLevel').textContent = level;
+  // Versus mode rewrites the overlay text so the player can tell at a
+  // glance whether they won or lost. Solo modes keep the legacy
+  // "Shattered / The stack reached the top" copy.
+  const titleEl    = document.getElementById('goTitle');
+  const subtitleEl = document.getElementById('goSubtitle');
+  if (Mode.current === 'versus' && winner === 'player') {
+    titleEl.textContent    = 'Victory';
+    subtitleEl.textContent = 'Your opponent topped out';
+  } else if (Mode.current === 'versus' && winner === 'opponent') {
+    titleEl.textContent    = 'Defeat';
+    subtitleEl.textContent = 'Your stack reached the top';
+  } else {
+    titleEl.textContent    = 'Shattered';
+    subtitleEl.textContent = 'The stack reached the top';
+  }
   playVoice('manbaout');
 
   // G20: shatter the entire stack as a top-down cascade so the case visibly
@@ -4069,6 +4481,9 @@ function _persistSettingsSnapshot() {
       bgmTrackIndex: bgmPlaylist.index,
     },
     mode: Mode.current,
+    versus: {
+      botStrength: _versusBotStrength,
+    },
     // Snapshot the panel's pose AND its current visibility so a player
     // who hides the panel keeps it hidden on next launch.
     panel: {
@@ -4222,6 +4637,22 @@ const settingsPanel = createSettingsPanel({
       Mode.start({ restart: true });
     },
     onChange: (handler) => Mode.onChange(handler),
+  },
+
+  // Versus-only options (§3.7 sub-phase 7e polish). Bot strength is
+  // surfaced as a Mode-tab select that's only shown when the active
+  // mode is versus. The change callback updates the live preference;
+  // the next Mode.start({key:'versus'}) picks it up — existing rounds
+  // keep their original BotController so a strength flip mid-match
+  // doesn't surprise the player.
+  versus: {
+    botStrength: _versusBotStrength,
+    onBotStrengthChange: (s) => {
+      _versusBotStrength = s;
+      if (!_persistedSettings.versus) _persistedSettings.versus = { botStrength: s };
+      _persistedSettings.versus.botStrength = s;
+      _persistSettingsSnapshot();
+    },
   },
 
   stats: {
@@ -4401,12 +4832,26 @@ const versusBadge = createVersusBadge({
   bus,
   events: EVENTS,
   getActiveModeKey: () => Mode.current,
-  getOpponentSnapshot: () => ({
-    score:           versusBot.score,
-    stackHeight:     versusBot.stackHeight,
-    deathThreshold:  versusBot.deathThreshold,
-    alive:           versusBot.alive,
-  }),
+  // Opponent snapshot routes to whichever bot is active: the §3.7 7e
+  // VersusSession (real second sim with a visible board) when present,
+  // or the Phase-6 abstract bot (no visible board) as fallback.
+  getOpponentSnapshot: () => {
+    if (versusSession) {
+      const op = versusSession.gameP2;
+      return {
+        score:          op.score,
+        stackHeight:    _highestFilledRow(op.board),
+        deathThreshold: ROWS - 1,
+        alive:          !op.gameOver,
+      };
+    }
+    return {
+      score:          versusBot.score,
+      stackHeight:    versusBot.stackHeight,
+      deathThreshold: versusBot.deathThreshold,
+      alive:          versusBot.alive,
+    };
+  },
   getInboundGarbage: () => ({
     rows:    _queuedGarbageRowCount(),
     blocked: game ? game.garbageBlocked : false,
