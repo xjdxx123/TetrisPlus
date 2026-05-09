@@ -98,4 +98,15 @@ export const EVENTS = Object.freeze({
   // host's BoardView listener mirrors the data-side mutation on the mesh
   // side. Per-game; carries `side` for dual-board routing.
   GARBAGE_APPLIED:    'GARBAGE_APPLIED',    // { rows: number, holeColumn: number, side: string }
+
+  // Pure Physics — fired by `app/physics-session.js` when the
+  // connected-component layer detector identifies a clearable slab and
+  // removes the bodies from the Rapier world. Replaces LINE_CLEAR for
+  // physics mode (which never fires there since the grid path is
+  // bypassed). Payload mirrors LINE_CLEAR's shape where it makes
+  // sense — `simultaneous` = layer count cleared, `cubeCount` = total
+  // cubes removed across all layers — but adds physics-specific
+  // metadata (each layer's center-Y so VFX can fire bursts at the
+  // correct world-space positions).
+  PHYSICS_LAYER_CLEARED: 'PHYSICS_LAYER_CLEARED', // { layers: [{centerY,minY,maxY,size}], cubeCount, simultaneous, side }
 });
