@@ -66,6 +66,7 @@ export default [
         getComputedStyle: 'readonly',
         Event: 'readonly',
         EventTarget: 'readonly',
+        structuredClone: 'readonly',
       },
     },
     rules: {

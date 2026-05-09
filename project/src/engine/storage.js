@@ -52,7 +52,30 @@ const SETTINGS_DEFAULTS = Object.freeze({
 const STATS_DEFAULTS = Object.freeze({
   highScore: 0,
   modeBests: {
-    classic: { score: 0, lines: 0, level: 1 },
+    // `attempts` is bumped at every MODE_END (regardless of reason), so a
+    // player who tops out in the first 5 seconds still contributes to the
+    // count. Existing pre-refactor blobs backfill this to 0 via deep-merge.
+    classic:  { score: 0, lines: 0, level: 1, attempts: 0 },
+    // Marathon adds `completed` (whether the player has *ever* cleared
+    // 150 lines) and `bestTimeMs` (fastest completion). null bestTimeMs
+    // sentinel means no completion on record yet — distinct from 0ms which
+    // would be a real (impossible) duration.
+    marathon: { score: 0, lines: 0, level: 1, attempts: 0, completed: false, bestTimeMs: null },
+    // Sprint records ONLY bestTimeMs + attempts + completed — score is
+    // always 0 so the score/lines/level fields never receive meaningful
+    // writes. They're kept for shape uniformity with the deep-merge.
+    sprint:   { score: 0, lines: 0, level: 1, attempts: 0, completed: false, bestTimeMs: null },
+    ultra:    { score: 0, lines: 0, level: 1, attempts: 0 },
+    // Zen's "best" is the longest session, not score. `totalLines` is
+    // a CUMULATIVE counter across all Zen sessions — Zen is the slow-
+    // burn mode (plan §3.5 #5). The score/lines/level fields stay for
+    // shape uniformity but are never written to.
+    zen:      { score: 0, lines: 0, level: 1, attempts: 0, longestSessionMs: 0, totalLines: 0 },
+    // Versus tracks wins/losses (+ ELO reserved for online — plan §3.6 #5).
+    // The score/lines/level fields stay for shape uniformity; the score-
+    // based default best-update path is skipped (resetsHighScoreSlot:false
+    // in the rules pack) so they're never written to.
+    versus:   { score: 0, lines: 0, level: 1, attempts: 0, wins: 0, losses: 0, draws: 0, eloMmr: 1200 },
   },
   totals: {
     linesCleared:  0,

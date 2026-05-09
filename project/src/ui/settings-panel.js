@@ -24,6 +24,13 @@ import {
   makeSegmentedRow,
 } from './panel-shared.js';
 import { makeDraggableRotatable } from './draggable-rotatable.js';
+import {
+  formatModeBestPrimary,
+  formatModeBestSecondary,
+  formatModeBestSummary,
+  formatModeGoalAndDuration,
+  formatTimeFriendly,
+} from './format/mode-stats.js';
 
 const PANEL_WIDTH_PX  = 360;
 const PANEL_HEIGHT_PX = 480;
@@ -280,6 +287,55 @@ export function createSettingsPanel(cfg) {
   panes.mode = modePane;
   content.appendChild(modePane);
 
+  // Phase 7 — per-mode info panel above the button grid: goal text +
+  // estimated duration + a one-line "Personal best" summary that updates
+  // when the player switches modes. Static "Modes coming soon" note is
+  // gone — every mode now plays its own rules.
+  const modeInfo = document.createElement('div');
+  modeInfo.className = 'tp-mode-info';
+  modeInfo.style.cssText = 'padding:6px 6px 8px; margin-bottom:8px; ' +
+    'border-bottom:1px solid rgba(255,255,255,0.06);';
+
+  const modeInfoTitle = document.createElement('div');
+  modeInfoTitle.style.cssText = 'font-size:13px; color:var(--accent, #6cf0ff); ' +
+    'font-weight:500; letter-spacing:0.04em; margin-bottom:2px;';
+  const modeInfoGoal = document.createElement('div');
+  modeInfoGoal.style.cssText = 'font-size:11px; color:var(--ink, #f3f5fb); ' +
+    'opacity:0.85; letter-spacing:0.03em;';
+  const modeInfoDuration = document.createElement('div');
+  modeInfoDuration.style.cssText = 'font-size:10px; color:var(--muted, #8b93ad); ' +
+    'opacity:0.65; letter-spacing:0.06em; margin-top:1px;';
+  const modeInfoBest = document.createElement('div');
+  modeInfoBest.style.cssText = 'font-size:10.5px; color:var(--muted, #8b93ad); ' +
+    'margin-top:6px; font-family:"SF Mono", ui-monospace, Menlo, Consolas, monospace; ' +
+    'letter-spacing:0.04em; font-variant-numeric:tabular-nums;';
+  modeInfo.appendChild(modeInfoTitle);
+  modeInfo.appendChild(modeInfoGoal);
+  modeInfo.appendChild(modeInfoDuration);
+  modeInfo.appendChild(modeInfoBest);
+  modePane.appendChild(modeInfo);
+
+  function _refreshModeInfo(mKey) {
+    const label = cfg.mode.labels[mKey] || mKey;
+    modeInfoTitle.textContent = `Mode · ${label}`;
+    if (cfg.mode.config) {
+      const cfgEntry = cfg.mode.config(mKey) || {};
+      const goalDur = formatModeGoalAndDuration(mKey, cfgEntry);
+      modeInfoGoal.textContent = `Goal: ${goalDur.goal}`;
+      modeInfoDuration.textContent = goalDur.duration ? `Estimated duration: ${goalDur.duration}` : 'Endless — runs until topout or forfeit';
+    } else {
+      modeInfoGoal.textContent = '';
+      modeInfoDuration.textContent = '';
+    }
+    if (cfg.stats && typeof cfg.stats.load === 'function') {
+      const stats = cfg.stats.load();
+      const best = (stats.modeBests && stats.modeBests[mKey]) || {};
+      modeInfoBest.textContent = `Personal best: ${formatModeBestSummary(mKey, best)}`;
+    } else {
+      modeInfoBest.textContent = '';
+    }
+  }
+
   // Render the 6 modes in a 3x2 grid for readable, balanced layout.
   const modeGrid = document.createElement('div');
   modeGrid.style.cssText = 'display:grid; grid-template-columns: 1fr 1fr 1fr; gap:6px; padding:4px;';
@@ -299,9 +355,23 @@ export function createSettingsPanel(cfg) {
     modeButtons.set(m, btn);
     modeGrid.appendChild(btn);
   }
+  // Start button — declared above _setModeActive so the active-mode
+  // dispatcher can update its label in one place.
+  const startRow = document.createElement('div');
+  startRow.style.cssText = 'display:flex; justify-content:center; padding:14px 4px 4px;';
+  const startBtn = document.createElement('button');
+  startBtn.type = 'button';
+  startBtn.className = 'tp-button tp-button--primary';
+
   function _setModeActive(m) {
     for (const [k, btn] of modeButtons) btn.classList.toggle('is-active', k === m);
+    _refreshModeInfo(m);
+    // Start-button label tracks the active mode so the action reads
+    // honestly ("Start Marathon" vs "Start with selected mode" vague-speak).
+    const label = cfg.mode.labels[m] || m;
+    startBtn.textContent = `▶ Start ${label}`;
   }
+  _setModeActive(cfg.mode.current);
   modePane.appendChild(modeGrid);
 
   // External mode-change subscription so console-side `__mode.select(...)`
@@ -311,22 +381,9 @@ export function createSettingsPanel(cfg) {
     modeUnsubscribe = cfg.mode.onChange((m) => _setModeActive(m));
   }
 
-  // Start button.
-  const startRow = document.createElement('div');
-  startRow.style.cssText = 'display:flex; justify-content:center; padding:14px 4px 4px;';
-  const startBtn = document.createElement('button');
-  startBtn.type = 'button';
-  startBtn.className = 'tp-button tp-button--primary';
-  startBtn.textContent = '▶ Start with selected mode';
   startBtn.addEventListener('click', () => cfg.mode.onStart && cfg.mode.onStart());
   startRow.appendChild(startBtn);
   modePane.appendChild(startRow);
-
-  // Honest-status note for v1: only Classic plays.
-  const note = document.createElement('div');
-  note.className = 'tp-mode-note';
-  note.textContent = 'Modes coming soon — Classic plays now. Other selections persist for when their rules ship.';
-  modePane.appendChild(note);
 
   // === Stats tab =======================================================
   const statsPane = document.createElement('div');
@@ -337,16 +394,10 @@ export function createSettingsPanel(cfg) {
   const statsBody = document.createElement('div');
   statsPane.appendChild(statsBody);
 
-  function defaultFormatTime(ms) {
-    const s = Math.floor(ms / 1000);
-    const h = Math.floor(s / 3600);
-    const m = Math.floor((s % 3600) / 60);
-    const sec = s % 60;
-    if (h > 0) return `${h}h ${m}m`;
-    if (m > 0) return `${m}m ${sec}s`;
-    return `${sec}s`;
-  }
-  const formatTime = cfg.stats.formatTime || defaultFormatTime;
+  // Phase 8 — friendly-time formatter delegated to the shared formatter
+  // module; cfg.stats.formatTime is honored for legacy callers, but the
+  // default now matches the rest of the project's time formatting.
+  const formatTime = cfg.stats.formatTime || formatTimeFriendly;
 
   function fmtNumber(n) {
     return (n || 0).toLocaleString();
@@ -354,6 +405,15 @@ export function createSettingsPanel(cfg) {
 
   function refreshStats() {
     const s = cfg.stats.load();
+    // Phase 7 — keep the Mode tab's "Personal best" line in sync. Cheap;
+    // refreshStats() is called from main.js's endRun() and after the
+    // confirm-reset button fires. The current mode key is whatever has
+    // is-active in the button grid.
+    let activeKey = cfg.mode.current;
+    for (const [k, btn] of modeButtons) {
+      if (btn.classList.contains('is-active')) { activeKey = k; break; }
+    }
+    _refreshModeInfo(activeKey);
     statsBody.innerHTML = '';
     // Hero row — high score.
     const hero = document.createElement('div');
@@ -364,22 +424,38 @@ export function createSettingsPanel(cfg) {
     `;
     statsBody.appendChild(hero);
 
-    // Per-mode bests.
+    // Per-mode bests — Phase 8: each row is `<label>  <primary>` plus a
+    // muted secondary line below for context (attempts, time, etc.).
+    // Sprint shows a time, Zen shows a duration, Versus shows W-L; the
+    // shared formatter dispatches on mode key.
     const sectionA = document.createElement('div');
     sectionA.className = 'tp-panel__section-label';
     sectionA.style.marginTop = '12px';
     sectionA.textContent = 'Best by mode';
     statsBody.appendChild(sectionA);
     for (const m of cfg.mode.available) {
+      const best = (s.modeBests && s.modeBests[m]) || {};
+      const primary   = formatModeBestPrimary(m, best);
+      const secondary = formatModeBestSecondary(m, best);
+
       const row = document.createElement('div');
       row.className = 'tp-stat-row';
-      const best = (s.modeBests && s.modeBests[m]) || {};
-      const v = best.score ? fmtNumber(best.score) : '—';
       row.innerHTML = `
         <span class="tp-stat-row__label">${cfg.mode.labels[m] || m}</span>
-        <span class="tp-stat-row__value">${v}</span>
+        <span class="tp-stat-row__value">${primary}</span>
       `;
       statsBody.appendChild(row);
+
+      if (secondary) {
+        const sub = document.createElement('div');
+        sub.className = 'tp-stat-row';
+        sub.style.cssText = 'padding-top:0; padding-bottom:6px; opacity:0.65; font-size:9.5px;';
+        sub.innerHTML = `
+          <span class="tp-stat-row__label" style="font-size:9.5px;"></span>
+          <span class="tp-stat-row__value" style="font-size:9.5px;">${secondary}</span>
+        `;
+        statsBody.appendChild(sub);
+      }
     }
 
     // Totals.

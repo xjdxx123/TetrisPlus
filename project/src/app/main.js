@@ -9,6 +9,11 @@ import { createPunchZoom } from '../camera/punch-zoom.js';
 import { createAudioPlayback } from '../audio/playback.js';
 import { createBgmPlaylist, defaultVaporwaveTracks } from '../audio/bgm-playlist.js';
 import { createPlaylistPanel } from '../ui/playlist-panel.js';
+import { createMarathonBadge } from '../ui/marathon-badge.js';
+import { createSprintBadge }   from '../ui/sprint-badge.js';
+import { createUltraBadge }    from '../ui/ultra-badge.js';
+import { createZenBadge }      from '../ui/zen-badge.js';
+import { createVersusBadge }   from '../ui/versus-badge.js';
 import { createStarfield } from '../world/starfield.js';
 import { createNebulaSky } from '../world/nebula-sky.js';
 import { createMoon } from '../world/moon.js';
@@ -53,6 +58,9 @@ import SPARKLE_FRAG from '../shaders/sparkle.frag.glsl?raw';
 import { PIECES, PIECE_COLORS, PIECE_KEYS } from '../gameplay/pieces.js';
 import { lineClearScore, levelForLines, SOFT_DROP_POINTS_PER_CELL, HARD_DROP_POINTS_PER_CELL } from '../gameplay/scoring.js';
 import { KICK_OFFSETS, nextRotation } from '../gameplay/rotation.js';
+import { buildRules } from '../gameplay/rules.js';
+import { recordEndOfRun } from '../gameplay/end-of-run.js';
+import { applyGarbageToBoard, pickHoleColumn } from '../gameplay/garbage.js';
 
 // =============================================================
 // Tweaks — original three (gravity / mood / shatterPower) are written by
@@ -1704,11 +1712,134 @@ let pieceRotVisual = 0;
 let pieceRotTarget = 0;
 let pieceRotVel = 0;
 
-// Falling timing
+// Falling timing — gravity curve sourced from the active rules pack so
+// per-mode overrides (Sprint locks gravity, future packs can ramp
+// differently) Just Work without per-call branching here. The rules pack
+// builder receives a thunk for `gravityScalar` so the live TWEAKS.gravity
+// slider is reflected on every read.
 let fallTimer = 0;
+// Mode.current was already hydrated from persisted settings at the top of
+// the file, so this picks up the player's last-selected mode. Marathon
+// has its own pack now; the remaining stubs (Sprint/Ultra/Zen/Versus) map
+// to classic-equivalent rules until their packs land.
+//
+// `bus` is passed so packs can emit MODE_GOAL_PROGRESS at milestone
+// crossings (Marathon: every 10 lines). gravityScalar reads TWEAKS.gravity
+// live so the slider keeps working across Mode.start swaps.
+let activeRules = buildRules(Mode.current, { gravityScalar: () => TWEAKS.gravity, bus });
 function fallInterval() {
-  // Speeds up with level; gravity tweak scales overall fall speed
-  return Math.max(0.04, (0.85 * Math.pow(0.85, level - 1)) / TWEAKS.gravity);
+  return activeRules.fallIntervalSec(level);
+}
+
+// Pause-aware gameplay-time accumulator — rules hooks consume this via the
+// state snapshot. Sprint reads it, Ultra counts down from it, Marathon
+// records its completion time from it. Classic doesn't read it but pays
+// the cost of one float add per tick (~zero).
+let _modeTimeMs = 0;
+
+// Read-only state snapshot — the contract the rules engine reads from.
+// Plan_gameplay_1.md §2.1: this is the only shape rules see.
+function _modeStateSnapshot() {
+  return {
+    score,
+    lines,
+    level,
+    linesCleared: lines,
+    timeMs: _modeTimeMs,
+  };
+}
+
+// =============================================================
+// Versus garbage queue (plan_gameplay_1.md §3.6)
+// =============================================================
+// Inbound garbage drops the opponent has sent. Each entry is one batched
+// drop with its hole column. The queue is drained AFTER lockPiece's
+// clearLines runs and BEFORE the next spawn — never mid-fall, per the
+// plan's "applied between piece locks" spec. This is what makes the
+// "queue and brace" feel of competitive Tetris work.
+const GARBAGE_QUEUE_CAP_ROWS = 20;     // anti-grief — beyond this, drops the floor
+const GARBAGE_COLOR          = 0x808080; // neutral gray; reads as "not mine"
+/** @type {Array<{ rows: number, holeColumn: number }>} */
+const _garbageQueue = [];
+let _garbageBlocked = false; // surfaces in the badge — "queue full, dropping further sends"
+
+function _queuedGarbageRowCount() {
+  let total = 0;
+  for (const entry of _garbageQueue) total += entry.rows;
+  return total;
+}
+
+/**
+ * Drain the inbound garbage queue into the live board + meshes. Called
+ * once between lockPiece's clearLines and the next spawn. After draining,
+ * the next spawn's collision check is what surfaces a topout caused by
+ * the garbage push (the natural "garbage killed me" path).
+ */
+function _drainInboundGarbage() {
+  if (_garbageQueue.length === 0) return;
+  while (_garbageQueue.length > 0) {
+    const { rows, holeColumn } = _garbageQueue.shift();
+    _applyGarbageToBoardAndMeshes(rows, holeColumn);
+  }
+  _garbageBlocked = false;
+}
+
+/**
+ * Insert `rows` garbage rows at the bottom, shifting the stack up. Mirrors
+ * the existing line-clear shift pattern — splice/push for the data board,
+ * dispose meshes for popped top rows, spawn cubes for new garbage rows,
+ * and animateCubeTo for the rest.
+ */
+function _applyGarbageToBoardAndMeshes(rows, holeColumn) {
+  const safeHole = ((holeColumn % COLS) + COLS) % COLS;
+
+  for (let i = 0; i < rows; i++) {
+    // Pop the TOP row's meshes (about to be pushed off the playfield).
+    const topMeshes = cellMeshes.pop();
+    board.pop();
+    if (topMeshes) {
+      for (let c = 0; c < COLS; c++) {
+        const slices = topMeshes[c];
+        if (slices) {
+          for (const cube of slices) stackGroup.remove(cube);
+        }
+      }
+    }
+
+    // Build the new garbage row's data + visual cubes at the (eventual)
+    // bottom. We unshift-equivalent by placing them at index 0 below.
+    const newBoardRow = new Array(COLS).fill(GARBAGE_COLOR);
+    const newMeshRow  = new Array(COLS).fill(null);
+    newBoardRow[safeHole] = null;
+    for (let c = 0; c < COLS; c++) {
+      if (newBoardRow[c] === null) continue;
+      const slices = [];
+      for (let d = 0; d < DEPTH; d++) {
+        const cube = makeCube(GARBAGE_COLOR);
+        cube.position.copy(cellToWorld(c, 0, d));
+        stackGroup.add(cube);
+        slices.push(cube);
+      }
+      newMeshRow[c] = slices;
+    }
+    board.unshift(newBoardRow);
+    cellMeshes.unshift(newMeshRow);
+  }
+
+  // Animate every remaining cube to its new (lifted) position. The newly
+  // unshifted garbage already starts at row 0, so this also "settles" them
+  // into final position from a duplicate cellToWorld(c,0,d) target — a
+  // visual no-op but keeps the code path uniform.
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      const slices = cellMeshes[r][c];
+      if (!slices) continue;
+      for (let d = 0; d < DEPTH; d++) {
+        animateCubeTo(slices[d], cellToWorld(c, r, d));
+      }
+    }
+  }
+  updateHUD();
 }
 
 // =============================================================
@@ -1739,22 +1870,105 @@ function spawnPiece(key) {
   };
   p.color = PIECE_COLORS[p.key];
   if (collides(p, p.col, p.row, p.rot)) {
+    // Mode topout interceptor — Zen returns `{ end: false, shift: 4 }` to
+    // shift the stack down and respawn. Default rules packs return nothing
+    // (or `{ end: true }`), preserving the topout-ends-the-run behaviour.
+    if (_handleTopOutWithRescue(p)) return;
     triggerGameOver();
     return;
   }
-  // §3.8 piecesPlaced — bumped once per spawn (not once per lock) to
-  // catch pieces lost in a top-out without complicating clearLines.
+  _commitSpawn(p);
+}
+
+// Shared spawn-commit path — the normal "piece accepted" sequence. Pulled
+// out so the Zen rescue path can re-use it after a successful shift+retry
+// without duplicating the visual-inertia reset.
+function _commitSpawn(p) {
+  // §3.8 piecesPlaced — bumped once per spawn (not once per lock) to catch
+  // pieces lost in a top-out without complicating clearLines.
   _piecesThisSession++;
   activePiece = p;
   rebuildPieceMesh();
   rebuildGhostMesh();
   canHold = true;
-  // Reset visual inertia
-  pieceVisualOffset.set(0,0,0);
-  pieceVel.set(0,0,0);
+  pieceVisualOffset.set(0, 0, 0);
+  pieceVel.set(0, 0, 0);
   pieceRotVisual = 0;
   pieceRotTarget = 0;
   pieceRotVel = 0;
+  updateHUD();
+  // PIECE_SPAWN — declared in gameplay/events.js, consumed by the Zen
+  // badge for its piece counter. Cheap synchronous dispatch; future
+  // listeners (telemetry, replay recorder) plug in here without main.js
+  // changes.
+  bus.emit(EVENTS.PIECE_SPAWN, { key: p.key, color: p.color, rotation: p.rot });
+}
+
+// Zen rescue path. Returns true when the rules pack opted in to a stack
+// shift AND the retry spawn succeeded; false otherwise (caller falls
+// through to the normal topout handler).
+function _handleTopOutWithRescue(originalPiece) {
+  const onTopOutFn = activeRules.onTopOut;
+  if (!onTopOutFn) return false;
+  let result = null;
+  try { result = onTopOutFn(_modeStateSnapshot()); }
+  catch (err) { console.warn('[rules] onTopOut threw:', err); return false; }
+  if (!result || result.end !== false) return false;
+  const shift = (typeof result.shift === 'number') ? Math.max(0, Math.floor(result.shift)) : 0;
+  if (shift <= 0) return false;
+
+  shiftStackDown(shift);
+  bus.emit(EVENTS.ZEN_RESCUE, { rowsRemoved: shift });
+
+  // Retry the spawn from the original top position. If even after the
+  // shift the piece can't fit (extreme pathological case — stack still
+  // touches Y=18 in every column), fall through to topout.
+  const p2 = { ...originalPiece, row: ROWS - 2 };
+  if (collides(p2, p2.col, p2.row, p2.rot)) return false;
+  _commitSpawn(p2);
+  return true;
+}
+
+/**
+ * Remove the bottom `rows` rows of the stack, shift the rest down, and
+ * animate the cubes to their new positions. Used by Zen's topout-rescue
+ * path. Mirrors the existing line-clear shift pattern at clearLines, but
+ * always removes the bottom `rows` indices instead of arbitrary cleared
+ * rows.
+ *
+ * Pathologically safe: passing rows > stack-height clears all populated
+ * rows and leaves the board empty without throwing.
+ */
+function shiftStackDown(rows) {
+  if (!Number.isFinite(rows) || rows <= 0) return;
+  const n = Math.min(rows | 0, ROWS);
+  for (let i = 0; i < n; i++) {
+    // Splice the BOTTOM row (index 0) and dispose its meshes.
+    const removedMeshRow = cellMeshes.splice(0, 1)[0];
+    board.splice(0, 1);
+    if (removedMeshRow) {
+      for (let c = 0; c < COLS; c++) {
+        const slices = removedMeshRow[c];
+        if (slices) {
+          for (const cube of slices) stackGroup.remove(cube);
+        }
+      }
+    }
+    // Push an empty row to the top so dimensions stay constant.
+    board.push(Array(COLS).fill(null));
+    cellMeshes.push(Array(COLS).fill(null));
+  }
+  // Animate the remaining cubes to their new (lower) positions. Re-uses
+  // the existing animateCubeTo helper — visually the stack settles down.
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      const slices = cellMeshes[r][c];
+      if (!slices) continue;
+      for (let d = 0; d < DEPTH; d++) {
+        animateCubeTo(slices[d], cellToWorld(c, r, d));
+      }
+    }
+  }
   updateHUD();
 }
 
@@ -1858,8 +2072,9 @@ function softDrop() {
   if (!tryMove(0, -1)) {
     lockPiece();
   } else {
-    score += SOFT_DROP_POINTS_PER_CELL;
-    bus.emit(EVENTS.SCORE_DELTA, { delta: SOFT_DROP_POINTS_PER_CELL, total: score, source: 'soft-drop' });
+    const delta = activeRules.softDropPerCell;
+    score += delta;
+    bus.emit(EVENTS.SCORE_DELTA, { delta, total: score, source: 'soft-drop' });
   }
 }
 
@@ -1867,7 +2082,7 @@ function hardDrop() {
   if (!activePiece || gameOver || paused) return;
   let dropped = 0;
   while (tryMove(0, -1)) dropped++;
-  const hardScoreDelta = dropped * HARD_DROP_POINTS_PER_CELL;
+  const hardScoreDelta = dropped * activeRules.hardDropPerCell;
   score += hardScoreDelta;
   bus.emit(EVENTS.SCORE_DELTA, { delta: hardScoreDelta, total: score, source: 'hard-drop' });
   // Big downward inertia visual on settled piece
@@ -1943,6 +2158,11 @@ function lockPiece() {
   } else {
     noteNoClearLock();
   }
+  // Versus inbound garbage — applied AFTER any line clears resolve so a
+  // tetris-then-garbage sequence visually reads as "I cleared, then they
+  // dumped on me," not "I cleared into already-shifted garbage." Topout
+  // caused by the lift surfaces on the next spawn's collision check.
+  _drainInboundGarbage();
   spawnPiece();
 }
 
@@ -1951,15 +2171,20 @@ function clearLines(rows) {
   rows.sort((a, b) => b - a);
   // Glassy shatter sfx — scales with row count.
   playSfx('clear', rows.length);
-  const scoreDelta = lineClearScore(rows.length, level);
+  const scoreDelta = activeRules.lineScore(rows.length, level);
   score += scoreDelta;
   lines += rows.length;
-  // §3.8 totals: track per-session line count so triggerGameOver can
-  // increment Stats.totals.linesCleared without double-counting across
-  // the goRestart reset.
+  // §3.8 totals: track per-session line count so end-of-run can increment
+  // Stats.totals.linesCleared without double-counting across the restart.
   _linesThisSession += rows.length;
   bus.emit(EVENTS.SCORE_DELTA, { delta: scoreDelta, total: score, source: 'line-clear' });
-  const newLevel = levelForLines(lines);
+  // Optional rules hook — Marathon emits MODE_GOAL_PROGRESS at 10-line
+  // milestones, etc. Classic's hook is null, so cheap no-op today.
+  if (activeRules.onLinesCleared) {
+    try { activeRules.onLinesCleared(_modeStateSnapshot(), rows.length); }
+    catch (err) { console.warn('[rules] onLinesCleared threw:', err); }
+  }
+  const newLevel = activeRules.levelForLines(lines);
   if (newLevel > level) {
     level = newLevel;
     bus.emit(EVENTS.LEVEL_UP, { level: newLevel });
@@ -2633,34 +2858,90 @@ function holdActive() {
 // camera shake, bloom bump, overlay reveal) live in the GAME_OVER listener
 // at the bottom of this file.
 function triggerGameOver() {
+  // Topout — endRun unifies the stats write and emits MODE_END so future
+  // modes (Marathon goal, Sprint completion, Ultra time-out) all funnel
+  // through the same terminal. GAME_OVER is still emitted because the
+  // director's cascade visuals listen to it.
+  endRun({ reason: 'topout' });
+}
+
+// Universal terminal. Emits GAME_OVER (for the existing cascade visuals
+// that listen to it) only on topout; emits MODE_END unconditionally so
+// HUD/director listeners get a single terminal regardless of reason.
+//
+// Goal-multiplier: when the rules pack defines a `goalMultiplier` and the
+// run ends with `reason: 'goal'`, the live `score` is multiplied in-place
+// before any consumer reads it. This is the surface Marathon's "+50%"
+// shows up in: the recorded best, the MODE_END payload, and the
+// game-over overlay all see the multiplied number consistently.
+//
+// Versus winner: when `reason: 'topout'` is paired with a `winner` field
+// ('player' for bot KO, 'opponent' for player KO, null for double-KO
+// draw), the value flows through to MODE_END + the per-mode wins/losses
+// updater. Non-versus modes always pass winner=null/undefined.
+function endRun({ reason = 'topout', winner } = {}) {
   if (gameOver) return;
   gameOver = true;
-  bus.emit(EVENTS.GAME_OVER, { score, lines, level });
-  // §3.8 high-score plumbing. Run BEFORE goRestart resets `score` etc.
-  // — top-outs that the player quits on must still record the run. Stats
-  // are flushed synchronously so the write survives a tab close.
+  // Versus topout disambiguation — when the player tops out via
+  // spawnPiece's collision check (no explicit winner), default to
+  // "opponent wins" for versus mode.
+  if (Mode.current === 'versus' && reason === 'topout' && winner === undefined) {
+    winner = 'opponent';
+  }
+  if (reason === 'topout') {
+    bus.emit(EVENTS.GAME_OVER, { score, lines, level });
+  }
+  // High-score / per-mode best / cumulative totals — extracted helper.
+  // Run BEFORE the player can hit "Play Again" so a mid-cascade tab close
+  // still records the run. recordEndOfRun returns the multiplied score
+  // (when applicable) so we can sync the live `score` variable for any
+  // downstream consumer (HUD, director, MODE_END subscribers).
   try {
-    const stats = loadStats();
-    if (score > (stats.highScore || 0)) stats.highScore = score;
-    if (!stats.modeBests[Mode.current]) stats.modeBests[Mode.current] = { score: 0, lines: 0, level: 1 };
-    const best = stats.modeBests[Mode.current];
-    if (score > (best.score || 0)) {
-      best.score = score; best.lines = lines; best.level = level;
+    // Versus uses a wins/losses/draws best updater; other modes either
+    // bring their own (Zen) or fall through to the default score-based
+    // path. We pick the updater here so the rules pack itself stays
+    // free of host-state concerns (winner side is a runtime fact).
+    let updateBest = activeRules.updateBest;
+    if (Mode.current === 'versus') {
+      updateBest = (best, summary) => {
+        const w = summary && summary.winner;
+        if (w === 'player')        best.wins   = (best.wins   || 0) + 1;
+        else if (w === 'opponent') best.losses = (best.losses || 0) + 1;
+        else if (reason === 'topout' && w === null) best.draws = (best.draws || 0) + 1;
+      };
     }
-    if (!stats.totals) stats.totals = { linesCleared: 0, piecesPlaced: 0, playTimeMs: 0 };
-    stats.totals.linesCleared  = (stats.totals.linesCleared  || 0) + _linesThisSession;
-    stats.totals.piecesPlaced  = (stats.totals.piecesPlaced  || 0) + _piecesThisSession;
-    stats.totals.playTimeMs    = (stats.totals.playTimeMs    || 0) +
-      Math.round((typeof performance !== 'undefined' ? performance.now() : 0) - sessionStart);
-    stats.lastUpdated = new Date().toISOString();
-    saveStats(stats, { flush: true });
+    const result = recordEndOfRun({
+      score, lines, level,
+      modeKey: Mode.current,
+      reason,
+      sessionStartMs: sessionStart,
+      piecesPlacedThisRun: _piecesThisSession,
+      linesClearedThisRun: _linesThisSession,
+      resetsHighScoreSlot: activeRules.resetsHighScoreSlot,
+      goalMultiplier:      activeRules.goalMultiplier,
+      runTimeMs:           _modeTimeMs,
+      winner,
+      updateBest,
+    }, { loadStats, saveStats });
+    if (result && result.multiplied) {
+      score = result.score;
+    }
     if (settingsPanel) settingsPanel.refreshStats();
   } catch (err) {
-    console.warn('[stats] failed to persist game-over stats:', err);
+    console.warn('[stats] failed to persist end-of-run stats:', err);
   }
+  bus.emit(EVENTS.MODE_END, {
+    reason,
+    score, lines, level,
+    timeMs: _modeTimeMs,
+    winner,                  // versus only — undefined for solo modes
+  });
 }
-document.getElementById('goRestart').addEventListener('click', () => {
-  // Reset
+// Reset everything — board state, render queues, audio cascade, score —
+// to the moment-before-first-piece initial conditions. Wrapped in a named
+// function so Mode.start({restart:true}) can call it directly without
+// going through the DOM button.
+function resetRunState() {
   for (let r = 0; r < ROWS; r++) {
     for (let c = 0; c < COLS; c++) {
       board[r][c] = null;
@@ -2728,9 +3009,148 @@ document.getElementById('goRestart').addEventListener('click', () => {
   sessionStart = (typeof performance !== 'undefined') ? performance.now() : 0;
   _piecesThisSession = 0;
   _linesThisSession = 0;
+  _modeTimeMs = 0;
   document.getElementById('gameOver').classList.remove('show');
   spawnPiece();
+}
+
+// Wire the DOM "Play Again" button + Mode.start lifecycle hook to the
+// shared reset path. Both end up calling resetRunState then emitting
+// MODE_START so HUD/director listeners get a single canonical signal.
+document.getElementById('goRestart').addEventListener('click', () => {
+  Mode.start({ restart: true });
 });
+
+Mode._wireLifecycle({
+  onStart: ({ key, seed, restart }) => {
+    // Build a fresh rules pack — needed even on classic restarts because
+    // future packs may capture mutable state (per-run goal counters etc.)
+    // and rebuilding is cheap. The gravityScalar thunk keeps the live
+    // TWEAKS slider working across mode swaps.
+    activeRules = buildRules(key, { gravityScalar: () => TWEAKS.gravity, bus });
+    if (restart) resetRunState();
+    // Versus state hygiene — drop any leftover queued garbage from a
+    // previous round, reset bot, etc. Idempotent for non-versus modes.
+    _garbageQueue.length = 0;
+    _garbageBlocked = false;
+    if (typeof versusBot !== 'undefined') versusBot.reset();
+    bus.emit(EVENTS.MODE_START, {
+      key,
+      seed: typeof seed === 'number' ? seed : null,
+      initialModeView: activeRules.initialModeView,
+    });
+  },
+  onStop: (reason) => {
+    endRun({ reason });
+  },
+});
+
+// Inbound garbage subscription — the opponent (or in v1, the bot) emits
+// GARBAGE_RECEIVED, the host queues it, and lockPiece's drainer applies
+// it between piece locks. We cap the queue at GARBAGE_QUEUE_CAP_ROWS to
+// keep a slow player from being snowballed if the opponent runs away.
+bus.on(EVENTS.GARBAGE_RECEIVED, (e) => {
+  if (!e || typeof e.rows !== 'number' || e.rows <= 0) return;
+  // Anti-grief — once the queue grows beyond the cap, additional sends
+  // are dropped on the floor. The badge surfaces this with a "BLOCKED"
+  // indicator (plan §3.6 #8).
+  if (_queuedGarbageRowCount() + e.rows > GARBAGE_QUEUE_CAP_ROWS) {
+    _garbageBlocked = true;
+    return;
+  }
+  _garbageQueue.push({
+    rows: e.rows | 0,
+    holeColumn: (typeof e.holeColumn === 'number')
+      ? e.holeColumn
+      : pickHoleColumn(COLS, Math.random),
+  });
+});
+
+// =============================================================
+// Versus AI bot (plan §3.6 v1 — single-process opponent stand-in).
+// =============================================================
+// The bot is a simple state machine. It exists only when Mode.current ===
+// 'versus'; otherwise its tick is a no-op. The player's onLinesCleared
+// emits GARBAGE_SENT — the bot subscribes and absorbs into its own
+// "stack height" counter. When that counter crosses BOT_DEATH_THRESHOLD,
+// the bot tops out and the player wins. The bot also emits its own
+// outbound garbage at random 8-12s intervals — slow enough that a
+// reasonable player can keep up with clears, fast enough that ignoring
+// the queue is fatal.
+//
+// The bot's `score` is purely cosmetic — it climbs at ~60pts/sec to give
+// the HUD's opponent-score readout something to do. Real Versus scoring
+// uses wins/losses; the score is flavor.
+const BOT_SCORE_PER_MS        = 0.06;      // ~60 pts/sec passive growth
+const BOT_GARBAGE_MIN_INTERVAL_MS = 8000;
+const BOT_GARBAGE_MAX_INTERVAL_MS = 12000;
+const BOT_DEATH_THRESHOLD_ROWS = 12;       // accumulated player→bot garbage to KO
+const versusBot = (() => {
+  let alive  = false;
+  let score  = 0;
+  let stackHeight = 0;       // rows of garbage absorbed from the player
+  let nextSendInMs = 0;
+  let active = false;        // mirrors Mode.current === 'versus'
+
+  function rollNextInterval() {
+    return BOT_GARBAGE_MIN_INTERVAL_MS +
+      Math.random() * (BOT_GARBAGE_MAX_INTERVAL_MS - BOT_GARBAGE_MIN_INTERVAL_MS);
+  }
+
+  function reset() {
+    alive  = (Mode.current === 'versus');
+    active = (Mode.current === 'versus');
+    score  = 0;
+    stackHeight = 0;
+    nextSendInMs = rollNextInterval();
+  }
+
+  function absorbPlayerGarbage(rows) {
+    if (!alive || !active) return;
+    stackHeight += rows;
+    if (stackHeight >= BOT_DEATH_THRESHOLD_ROWS) {
+      alive = false;
+      // Bot KO → player wins. Routed through endRun so the wins/losses
+      // accounting fires and MODE_END reaches every subscriber uniformly.
+      endRun({ reason: 'topout', winner: 'player' });
+    }
+  }
+
+  function tick(dtMs) {
+    if (!active || !alive) return;
+    if (gameOver || paused) return;
+    score += dtMs * BOT_SCORE_PER_MS;
+    nextSendInMs -= dtMs;
+    if (nextSendInMs <= 0) {
+      bus.emit(EVENTS.GARBAGE_RECEIVED, {
+        rows:       1,
+        holeColumn: pickHoleColumn(COLS, Math.random),
+        source:     'opponent',
+      });
+      nextSendInMs = rollNextInterval();
+    }
+  }
+
+  // The bot watches the player's outbound stream. Unlike the player's
+  // GARBAGE_RECEIVED handler (which feeds the visual queue), the bot
+  // applies sent garbage *immediately* to its abstract stack — there's no
+  // visual board for the bot in v1.
+  bus.on(EVENTS.GARBAGE_SENT, (e) => {
+    if (!active || !alive) return;
+    if (!e || typeof e.rows !== 'number' || e.rows <= 0) return;
+    absorbPlayerGarbage(e.rows);
+  });
+
+  return {
+    reset,
+    tick,
+    get alive()       { return alive; },
+    get active()      { return active; },
+    get score()       { return Math.round(score); },
+    get stackHeight() { return stackHeight; },
+    get deathThreshold() { return BOT_DEATH_THRESHOLD_ROWS; },
+  };
+})();
 
 // =============================================================
 // Input
@@ -3188,6 +3608,14 @@ function animate(dt, envTime) {
   // Once BPM is cached, projects upcoming beat times from bgmEl.currentTime
   // and dispatches beat / preBeat events — bindings consume `anticipation`.
   beatGrid.tick();
+  // Mode HUD per-frame ticks. Each is cheap when the badge isn't visible
+  // (one thunk call + an early return). Per the plan, Sprint's timer must
+  // update at gameplay rate, not render rate — `_modeTimeMs` is only
+  // advanced inside the gameplay block, so reading it here gives the
+  // pause-aware value without extra plumbing.
+  sprintBadge.tick();
+  ultraBadge.tick();
+  versusBadge.tick(score);
   bindings.tick();
   featureDebug.update();
   playbackProgress.update();
@@ -3278,6 +3706,26 @@ function animate(dt, envTime) {
       if (!tryMove(0, -1)) {
         lockPiece();
       }
+    }
+
+    // Mode tick — accumulate gameplay-time (pause-aware), then let the
+    // active rules pack react and check its end condition. All three
+    // calls are no-ops for Classic; future packs (Sprint timer, Ultra
+    // countdown, Marathon goal-line) hang their per-frame logic here.
+    const dtMs = dtGame * 1000;
+    _modeTimeMs += dtMs;
+    // Versus bot tick — paused-aware via the gameplay block's gating.
+    // No-op when Mode.current !== 'versus' (bot.active is false).
+    versusBot.tick(dtMs);
+    if (activeRules.onTick) {
+      try { activeRules.onTick(_modeStateSnapshot(), dtMs); }
+      catch (err) { console.warn('[rules] onTick threw:', err); }
+    }
+    let _endResult = null;
+    try { _endResult = activeRules.endCondition(_modeStateSnapshot()); }
+    catch (err) { console.warn('[rules] endCondition threw:', err); }
+    if (_endResult && _endResult.reason) {
+      endRun({ reason: _endResult.reason });
     }
   }
 
@@ -4168,11 +4616,17 @@ const settingsPanel = createSettingsPanel({
     labels:       Mode.labels,
     descriptions: Mode.descriptions,
     disabled:     Mode.disabled,
+    // Phase 7 — surface Mode.config(key) for the per-mode goal/duration
+    // text that renders above the mode-button grid. Wrapped as a thunk so
+    // the panel always reads the live config (cheap; no caching surprises
+    // if metadata is ever made dynamic).
+    config:       (key) => Mode.config(key),
     onSelect: (m) => { Mode.select(m); _persistSettingsSnapshot(); },
     onStart:  () => {
-      // Use the existing reset path. Real per-mode rules ship later;
-      // this just gives the button something to do.
-      document.getElementById('goRestart').click();
+      // Goes through Mode.start so the lifecycle hook (rules-pack rebuild
+      // + MODE_START emit + resetRunState) runs regardless of how the
+      // start was initiated (settings button, hotkey, "Play Again").
+      Mode.start({ restart: true });
     },
     onChange: (handler) => Mode.onChange(handler),
   },
@@ -4306,6 +4760,76 @@ cssScene.add(settingsPanel.obj);
 // BGM progress + scrubber — click anywhere on the bar to seek. Useful for
 // VFX tuning so you can jump to drops/breakdowns on demand.
 const playbackProgress = createPlaybackProgress({ bgmEl: document.getElementById('bgmAudio') });
+
+// =============================================================
+// Mode HUD badges — gated by Mode.current. Each badge subscribes
+// permanently to MODE_* events and gates its own visibility on the
+// active mode key (per-mode badges read trivially as no-ops in other
+// modes). Future Sprint/Ultra/Zen badges plug into the same pattern.
+// =============================================================
+const marathonBadge = createMarathonBadge({
+  bus,
+  events: EVENTS,
+  getActiveModeKey: () => Mode.current,
+  // The badge re-renders on MODE_START; passing the current line count
+  // covers HMR mid-run reloads where lines !== 0 at boot.
+  getLinesCleared: () => _linesThisSession,
+});
+const sprintBadge = createSprintBadge({
+  bus,
+  events: EVENTS,
+  getActiveModeKey: () => Mode.current,
+  // Sprint's headline timer reads from the host's pause-aware accumulator.
+  // _modeTimeMs only advances inside the gameplay block, so pause / topout
+  // freeze the clock automatically without per-mode plumbing.
+  getModeTimeMs:    () => _modeTimeMs,
+  getLinesCleared:  () => _linesThisSession,
+});
+const ultraBadge = createUltraBadge({
+  bus,
+  events: EVENTS,
+  getActiveModeKey: () => Mode.current,
+  getModeTimeMs:    () => _modeTimeMs,
+  getScore:         () => score,
+  duration:         120_000,
+});
+const zenBadge = createZenBadge({
+  bus,
+  events: EVENTS,
+  getActiveModeKey: () => Mode.current,
+  // Stop session — the only way out of Zen. Routes through Mode.stop so
+  // the lifecycle hook (endRun + MODE_END emit) fires the same way as
+  // every other terminal.
+  onStop:           () => Mode.stop('forfeit'),
+  getLinesCleared:  () => _linesThisSession,
+  getPiecesPlaced:  () => _piecesThisSession,
+});
+const versusBadge = createVersusBadge({
+  bus,
+  events: EVENTS,
+  getActiveModeKey: () => Mode.current,
+  getOpponentSnapshot: () => ({
+    score:           versusBot.score,
+    stackHeight:     versusBot.stackHeight,
+    deathThreshold:  versusBot.deathThreshold,
+    alive:           versusBot.alive,
+  }),
+  getInboundGarbage: () => ({
+    rows:    _queuedGarbageRowCount(),
+    blocked: _garbageBlocked,
+  }),
+});
+// Re-render whenever the player swaps modes via the settings panel — the
+// badges' refresh() reads `Mode.current` (via getActiveModeKey) and toggles
+// their own visibility, so a mode change without a restart still settles
+// the chrome correctly.
+Mode.onChange(() => {
+  marathonBadge.refresh();
+  sprintBadge.refresh();
+  ultraBadge.refresh();
+  zenBadge.refresh();
+  versusBadge.refresh();
+});
 
 // =============================================================
 // Playlist panel (M) — transport + scrollable track list.
@@ -4601,6 +5125,16 @@ function applyMood() {
 applyMood();
 spawnPiece();
 updateHUD();
+// Emit MODE_START for the first run so HUD / director / future telemetry
+// listeners get a canonical signal regardless of whether the run started
+// from boot or from a "Play Again" click. The lifecycle wiring that fires
+// MODE_START on Play-Again is in resetRunState's wrapper above; this is
+// the boot-time analogue.
+bus.emit(EVENTS.MODE_START, {
+  key: Mode.current,
+  seed: null,
+  initialModeView: activeRules.initialModeView,
+});
 
 // =============================================================
 // Vanilla tweaks panel (no React) — host protocol compliant

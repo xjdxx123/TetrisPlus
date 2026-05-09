@@ -105,7 +105,14 @@ describe('storage — stats', () => {
     const s = loadStats();
     expect(s.highScore).toBe(0);
     expect(s.totals.linesCleared).toBe(0);
-    expect(s.modeBests.classic).toEqual({ score: 0, lines: 0, level: 1 });
+    // Phase-1 of the rules engine added `attempts` to every mode-best slot.
+    expect(s.modeBests.classic).toEqual({ score: 0, lines: 0, level: 1, attempts: 0 });
+    // Every mode key gets a default slot — backfilled on existing saves
+    // via the deep-merge load path, so older blobs don't break.
+    for (const key of ['classic', 'marathon', 'sprint', 'ultra', 'zen', 'versus']) {
+      expect(s.modeBests[key]).toBeDefined();
+      expect(s.modeBests[key].attempts).toBe(0);
+    }
   });
 
   it('saveStats with flush:true writes synchronously', () => {

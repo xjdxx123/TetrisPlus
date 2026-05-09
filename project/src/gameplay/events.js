@@ -30,6 +30,32 @@ export const EVENTS = Object.freeze({
   SCORE_DELTA:   'SCORE_DELTA',   // { delta, total, source: 'soft-drop'|'hard-drop'|'line-clear' }
   LEVEL_UP:      'LEVEL_UP',      // { level }
 
-  // Terminal
+  // Terminal — fires on topout. The director still listens to GAME_OVER
+  // for the cascade visuals; MODE_END is the universal terminal that
+  // also covers goal completions / time-outs / forfeits (see plan §2.2).
   GAME_OVER:     'GAME_OVER',     // { score, lines, level }
+
+  // Mode lifecycle (plan_gameplay_1.md §2.2). MODE_START fires when a fresh
+  // run begins (boot or goRestart); MODE_END fires on every terminal —
+  // topout, goal, time-out, forfeit. MODE_GOAL_PROGRESS reports milestone
+  // crossings (lines, time, score) at coarse intervals so HUDs can pulse
+  // without subscribing to every line clear.
+  MODE_START:         'MODE_START',         // { key, seed, initialModeView }
+  MODE_END:           'MODE_END',           // { reason: 'topout'|'goal'|'time'|'forfeit', score, lines, level, timeMs }
+  MODE_GOAL_PROGRESS: 'MODE_GOAL_PROGRESS', // { kind: 'lines'|'time'|'score', value, target }
+
+  // Zen rescue (plan_gameplay_1.md §3.5). Replaces topout in Zen — instead
+  // of ending the run, the bottom N rows are removed and the stack settles
+  // down. Visual layer (vfx/director.js) listens for the restorative
+  // cascade preset; HUD increments shift counter.
+  ZEN_RESCUE:         'ZEN_RESCUE',         // { rowsRemoved }
+
+  // Versus garbage (plan_gameplay_1.md §3.6). GARBAGE_SENT is fired by the
+  // active rules pack's onLinesCleared when the player clears multiple
+  // rows; the opponent (a bot in v1, a remote sim in v2) receives the
+  // signal and grows its incoming queue. GARBAGE_RECEIVED is fired by the
+  // opponent when sending garbage *to* this player; the host queues it
+  // and applies between piece locks.
+  GARBAGE_SENT:       'GARBAGE_SENT',       // { rows: number, target: 'opponent' }
+  GARBAGE_RECEIVED:   'GARBAGE_RECEIVED',   // { rows: number, holeColumn: number, source: 'opponent'|'mode' }
 });

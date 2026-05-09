@@ -42,7 +42,26 @@
       "Bash(curl -sI http://localhost:5180/asset/sounds/bgm_vaporwave.m4a)",
       "Bash(curl -sI http://localhost:5180/asset/sounds/rempage.wav)",
       "Bash(curl -sI http://localhost:5181/asset/sounds/bgm/bgm_01.m4a)",
-      "Bash(curl -s -o /tmp/page.html -w \"HTTP=%{http_code}\\\\n\" http://localhost:5181/tetris.html)"
+      "Bash(curl -s -o /tmp/page.html -w \"HTTP=%{http_code}\\\\n\" http://localhost:5181/tetris.html)",
+      "Bash(grep -n \"^spawnPiece\\\\|spawnPiece\\(\\);\\\\s*$\\\\|MODE_START\" /Users/clintongao/coding/TetrisPlus/project/src/app/main.js)",
+      "Bash(curl -s -o /dev/null -w \"tetris.html=%{http_code}\\\\n\" http://localhost:5182/tetris.html)",
+      "Bash(curl -s http://localhost:5182/src/app/main.js -o /tmp/main-transformed.js)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" http://localhost:5182/src/app/main.js)",
+      "Bash(curl -s -o /dev/null -w \"tetris.html=%{http_code}\\\\n\" http://localhost:5183/tetris.html)",
+      "Bash(curl -s -o /dev/null -w \"marathon.js=%{http_code}\\\\n\" http://localhost:5183/src/gameplay/rules/marathon.js)",
+      "Bash(curl -s -o /dev/null -w \"marathon-badge.js=%{http_code}\\\\n\" http://localhost:5183/src/ui/marathon-badge.js)",
+      "Bash(curl -s -o /dev/null -w \"tetris.html=%{http_code}\\\\n\" http://localhost:5184/tetris.html)",
+      "Bash(curl -s -o /dev/null -w \"sprint.js=%{http_code}\\\\n\"  http://localhost:5184/src/gameplay/rules/sprint.js)",
+      "Bash(curl -s -o /dev/null -w \"ultra.js=%{http_code}\\\\n\"   http://localhost:5184/src/gameplay/rules/ultra.js)",
+      "Bash(curl -s -o /dev/null -w \"zen.js=%{http_code}\\\\n\"     http://localhost:5184/src/gameplay/rules/zen.js)",
+      "Bash(curl -s -o /dev/null -w \"sprint-badge=%{http_code}\\\\n\" http://localhost:5184/src/ui/sprint-badge.js)",
+      "Bash(curl -s -o /dev/null -w \"tetris.html=%{http_code}\\\\n\"  http://localhost:5185/tetris.html)",
+      "Bash(curl -s -o /dev/null -w \"garbage.js=%{http_code}\\\\n\"   http://localhost:5185/src/gameplay/garbage.js)",
+      "Bash(curl -s -o /dev/null -w \"versus.js=%{http_code}\\\\n\"    http://localhost:5185/src/gameplay/rules/versus.js)",
+      "Bash(curl -s -o /dev/null -w \"versus-badge.js=%{http_code}\\\\n\" http://localhost:5185/src/ui/versus-badge.js)",
+      "Bash(curl -s -o /dev/null -w \"tetris.html=%{http_code}\\\\n\" http://localhost:5186/tetris.html)",
+      "Bash(curl -s -o /dev/null -w \"format/mode-stats.js=%{http_code}\\\\n\" http://localhost:5186/src/ui/format/mode-stats.js)",
+      "Bash(curl -s -o /dev/null -w \"settings-panel.js=%{http_code}\\\\n\"   http://localhost:5186/src/ui/settings-panel.js)"
     ]
   }
 }

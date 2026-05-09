@@ -55,8 +55,97 @@ describe('Mode', () => {
     errSpy.mockRestore();
   });
 
-  it('versus is flagged disabled', () => {
-    expect(Mode.disabled.versus).toBe(true);
+  it('no modes are flagged disabled (Phase 6 enabled Versus)', () => {
+    // Pre-Phase-6 had `Mode.disabled.versus = true` because there was no
+    // bot or rules pack. Now Versus ships with an AI bot opponent, so
+    // every mode key is selectable.
+    expect(Mode.disabled.versus).toBeFalsy();
     expect(Mode.disabled.classic).toBeFalsy();
+  });
+});
+
+describe('Mode — config()', () => {
+  beforeEach(() => Mode._resetForTests());
+
+  it('returns the metadata blob for each known key', () => {
+    const c = Mode.config('classic');
+    expect(c.hudKind).toBe('classic');
+    expect(c.goalLabel).toMatch(/Endless/i);
+    expect(typeof c.isOnline).toBe('boolean');
+    expect(typeof c.isExperimental).toBe('boolean');
+  });
+
+  it('falls back to classic for an unknown key', () => {
+    expect(Mode.config('garbage-mode').hudKind).toBe('classic');
+  });
+
+  it('every standard key has a config entry', () => {
+    for (const key of ['classic', 'marathon', 'sprint', 'ultra', 'zen', 'versus']) {
+      const c = Mode.config(key);
+      expect(typeof c.goalLabel).toBe('string');
+      expect(typeof c.hudKind).toBe('string');
+    }
+  });
+});
+
+describe('Mode — start()/stop() lifecycle', () => {
+  beforeEach(() => Mode._resetForTests());
+
+  it('start() returns false until a host wires the lifecycle handler', () => {
+    expect(Mode.start({ key: 'classic' })).toBe(false);
+  });
+
+  it('start() invokes the wired onStart with the resolved key + restart=true default', () => {
+    const onStart = vi.fn();
+    Mode._wireLifecycle({ onStart });
+    Mode.select('marathon');
+    expect(Mode.start()).toBe(true);
+    expect(onStart).toHaveBeenCalledWith({ key: 'marathon', seed: undefined, restart: true });
+  });
+
+  it('start({ key }) selects the key first so listeners stay in sync', () => {
+    const onStart = vi.fn();
+    const seen = vi.fn();
+    Mode._wireLifecycle({ onStart });
+    Mode.onChange(seen);
+    Mode.start({ key: 'sprint' });
+    expect(Mode.current).toBe('sprint');
+    expect(seen).toHaveBeenCalledWith('sprint');
+    expect(onStart).toHaveBeenCalledWith({ key: 'sprint', seed: undefined, restart: true });
+  });
+
+  it('start({ restart: false }) preserves the flag through to the host', () => {
+    const onStart = vi.fn();
+    Mode._wireLifecycle({ onStart });
+    Mode.start({ key: 'classic', restart: false });
+    expect(onStart.mock.calls[0][0].restart).toBe(false);
+  });
+
+  it('start() with an unknown key returns false without invoking the host', () => {
+    const onStart = vi.fn();
+    Mode._wireLifecycle({ onStart });
+    expect(Mode.start({ key: 'garbage' })).toBe(false);
+    expect(onStart).not.toHaveBeenCalled();
+  });
+
+  it('stop() invokes the wired onStop with the reason', () => {
+    const onStop = vi.fn();
+    Mode._wireLifecycle({ onStop });
+    Mode.stop('forfeit');
+    expect(onStop).toHaveBeenCalledWith('forfeit');
+  });
+
+  it('stop() defaults the reason to forfeit', () => {
+    const onStop = vi.fn();
+    Mode._wireLifecycle({ onStop });
+    Mode.stop();
+    expect(onStop).toHaveBeenCalledWith('forfeit');
+  });
+
+  it('_resetForTests clears the lifecycle wiring', () => {
+    Mode._wireLifecycle({ onStart: () => {}, onStop: () => {} });
+    Mode._resetForTests();
+    expect(Mode.start({ key: 'classic' })).toBe(false);
+    expect(Mode.stop('forfeit')).toBe(false);
   });
 });

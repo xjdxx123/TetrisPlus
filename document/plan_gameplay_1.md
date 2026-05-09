@@ -2,44 +2,61 @@
 
 **Document type:** Engineering execution plan
 **Companion to:** [`plan_architecture.md`](./plan_architecture.md) (subsystem boundaries), [`plan_UI_1.md`](./plan_UI_1.md) (settings panel + Mode tab), [`plan_particle_2.md`](./plan_particle_2.md) (VFX roadmap that gameplay events feed)
-**Status:** Pre-implementation. The Mode tab UI exists; the rule packs do not. This document defines them.
+**Status:** Phases 1–6 shipped (six modes playable). Phase 7+ pending.
 **Author:** Senior gameplay engineer, written for the team
 
 ---
 
-## 0. Implementation Status (Grounded)
+## 0. Implementation Status
 
-This section is the truth on the ground as of **2026-05-08**. The gameplay rule pack today is a single classic implementation; everything else is UI surface plus a `Mode` namespace that fires listeners but does not yet alter rules.
+Last refreshed **2026-05-08** after Phase 6 (Versus local v1) landed.
+Six standard modes are playable via the rules engine; the remaining work
+is the Mode tab UX upgrade, the stats renderer, the Game-container
+extraction (§3.7 below — added in this revision), and the speculative
+chapters (§6/§7/§8 in this doc — 3D, online, physics).
 
-### 0.1 What ships today
+### 0.1 Phase completion dashboard
 
-| Layer | Status | Where | What's there |
-|---|---|---|---|
-| Mode registry | ✅ | [`src/gameplay/mode.js`](../project/src/gameplay/mode.js) | 6 keys (`classic`, `marathon`, `sprint`, `ultra`, `zen`, `versus`), labels, descriptions, disabled-set for `versus`, `select()`, `onChange()` |
-| Mode persistence | ✅ | [`src/engine/storage.js`](../project/src/engine/storage.js) | hydrated at boot ([`main.js:92`](../project/src/app/main.js#L92)) |
-| Mode tab UI | ✅ | [`src/ui/settings-panel.js:277-329`](../project/src/ui/settings-panel.js#L277-L329) | 3×2 button grid, "▶ Start with selected mode", v1 honest-status note |
-| Bag randomizer | ✅ | [`src/app/main.js:1714-1725`](../project/src/app/main.js#L1714-L1725) | seven-bag, `Math.random()` (not seeded — see §4.2 of `plan_architecture.md`) |
-| Rotation kicks | ✅ | [`src/gameplay/rotation.js`](../project/src/gameplay/rotation.js) | simplified 5-offset kick (0, ±1, ±2). Not full SRS |
-| Scoring | ✅ | [`src/gameplay/scoring.js`](../project/src/gameplay/scoring.js) | line value × level, soft/hard drop points, level every 10 lines |
-| Gravity curve | ✅ | [`src/app/main.js:1706-1709`](../project/src/app/main.js#L1706-L1709) | `0.85 * 0.85^(level-1) / TWEAKS.gravity`, floor 0.04s |
-| Top-out detection | ✅ | [`src/app/main.js:1738-1741`](../project/src/app/main.js#L1738-L1741) | spawn collision → `triggerGameOver()` |
-| Stats persistence | ✅ | [`src/engine/storage.js`](../project/src/engine/storage.js) | high score, per-mode bests (score-only), totals |
-| **Per-mode rules** | ❌ | — | every mode resolves to classic. The Start button just calls `goRestart`. |
-| **Per-mode end conditions** | ❌ | — | only `triggerGameOver()` (top-out) exists |
-| **Per-mode scoring multipliers** | ❌ | — | `lineClearScore` takes no mode argument |
-| **Per-mode HUD** | ❌ | — | HUD shows `score / lines / level` regardless. No timer, no goal counter |
-| **Mode-aware stats schema** | ⚠ | [`src/engine/storage.js:43-54`](../project/src/engine/storage.js#L43-L54) | `modeBests` exists but only stores `{score, lines, level}`. Sprint needs `time`, Ultra needs `score-at-T`, etc. |
-| Online stack | ❌ | — | no networking layer, no transport, no auth |
-| Physics | ❌ | — | no rapier/cannon/box2d. Gameplay is grid-only |
-| 3D-axis rotation | ❌ | — | board is `Cell[ROWS][COLS]` 2D + rendered with depth slices |
+| Phase | Status | Shipped modules / behavior |
+|---|---|---|
+| 1 — Rules engine plumbing | ✅ | `gameplay/rules.js` (`buildRules` + Classic pack), `gameplay/end-of-run.js` (extracted high-score / per-mode-best writer), `gameplay/mode.js` extended with `start()` / `stop()` / `config()` / `_wireLifecycle()`, new events `MODE_START` / `MODE_END` / `MODE_GOAL_PROGRESS`, `storage.modeBests` upgraded with `attempts` field |
+| 2 — Marathon | ✅ | `gameplay/rules/marathon.js`, `ui/marathon-badge.js`, end-of-run goal-multiplier branch (1.5×) + `runTimeMs` recording, `modeBests.marathon = { completed, bestTimeMs }` |
+| 3 — Sprint | ✅ | `gameplay/rules/sprint.js` (gravity-locked, `lineScore = 0`), `ui/sprint-badge.js` (`m:ss.mmm` timer), `modeBests.sprint = { completed, bestTimeMs }` |
+| 4 — Ultra | ✅ | `gameplay/rules/ultra.js` (120s, milestones at 30/60/90/110/115/118/119s), `ui/ultra-badge.js` (countdown + warning pulse at ≤10s) |
+| 5 — Zen | ✅ | `gameplay/rules/zen.js` (gentler gravity, `onTopOut` interceptor), new `ZEN_RESCUE` event, `shiftStackDown` helper in main.js, `ui/zen-badge.js` (Lines/Pieces/Shifts + Stop session button), end-of-run `updateBest` hook for `longestSessionMs` + `totalLines` |
+| 6 — Versus (local) | ⚠ v1 with caveats | `gameplay/rules/versus.js` (combo-aware garbage table), `gameplay/garbage.js` (pure helpers), new `GARBAGE_SENT` / `GARBAGE_RECEIVED` events, `ui/versus-badge.js` (dual-color queue + WIN/LOSS finale), AI bot opponent inside main.js (8–12s send cadence, KO at 12 absorbed rows), `modeBests.versus = { wins, losses, draws, eloMmr }`. **Caveat:** the bot is a single-process abstraction; the dual-`Game`-instance architecture the plan calls for in §3.6 #7 is _not_ done — see new §3.7 below. |
+| 7 — Mode tab UX upgrade | ❌ | — (next, ½ day per §9.1) |
+| 8 — Stats schema renderer | ❌ | — |
+| **§3.7 — Game container** (new) | ❌ | — unblocks "real" local Versus, online Versus (§7), and any future second-simulation use (replay viewer, 3D mode). 5–7 days per §3.7 #7. |
+| 9 — 3D Tetris | ❌ | — |
+| 10 — Pure physics | ❌ | — |
+| 11 — Online Versus | ❌ | — depends on §3.7 |
+
+**Test surface:** 367 tests across 33 files at end of Phase 6 (all green).
 
 ### 0.2 What "Mode tab" honestly is today
 
-A persisted preference plus a button. `Mode.select('sprint')` writes `'sprint'` to storage and fires listeners; nothing reads `Mode.current` to alter rules. The note in the panel — *"Modes coming soon — Classic plays now"* — is accurate. This document closes that gap.
+After Phases 1–6: every mode plays its own rules. Marathon ends at 150
+lines with a 1.5× bonus; Sprint locks gravity and counts time; Ultra
+counts down from 2:00; Zen never tops out; Versus runs against the AI
+bot. The "Modes coming soon — Classic plays now" note is gone — the
+six buttons each launch a real mode-specific run.
+
+What's still missing on the tab itself: per-mode goal/duration text,
+per-mode best display, and per-mode option dropdowns (Sprint variants,
+Versus time-out toggle). That's Phase 7. The Stats tab still shows the
+generic `{ score, lines, level }` per mode and needs the per-mode
+formatter from Phase 8.
 
 ### 0.3 Architectural property to preserve
 
-The `gameplay/` core stays Three.js-free, DOM-free, AudioContext-free (`plan_architecture.md` §4, ESLint `no-restricted-imports`). That property is what makes the Sprint timer, Ultra countdown, Marathon goal-line, and Zen no-top-out *implementations* tractable: each is a small additive piece on the simulation side, not a fork of the renderer.
+The `gameplay/` core stays Three.js-free, DOM-free, AudioContext-free
+(`plan_architecture.md` §4, ESLint `no-restricted-imports`). That
+property held cleanly across Phases 1–6 — every rule pack is pure JS
+that runs in Node tests without a Three.js or DOM stub. **The §3.7
+Game-container extraction below is the work that finally cashes in this
+property: a `gameplay/Game` class that two simulations + the future
+network layer can instantiate side-by-side.**
 
 ---
 
@@ -178,7 +195,7 @@ Each mode answers a fixed template:
 
 ---
 
-### 3.1 Classic — Endless ✅ Default
+### 3.1 Classic — Endless ✅ Default · **Shipped Phase 1**
 
 #### 1. Goal
 Survive forever. Every line cleared adds to score. Speed escalates via the level curve. Run ends only on topout.
@@ -225,7 +242,7 @@ Lowest risk. The `classic` rules pack is the *baseline test* for the rules engin
 
 ---
 
-### 3.2 Marathon — 150 Lines, Score Multiplier
+### 3.2 Marathon — 150 Lines, Score Multiplier · ✅ **Shipped Phase 2**
 
 #### 1. Goal
 Clear 150 lines. Final score is multiplied; topouts before 150 record an incomplete attempt.
@@ -274,7 +291,7 @@ Standard during the run. At `MODE_END { reason: 'goal' }`, `score = round(score 
 
 ---
 
-### 3.3 Sprint — 40 Lines for Time
+### 3.3 Sprint — 40 Lines for Time · ✅ **Shipped Phase 3**
 
 #### 1. Goal
 Clear 40 lines as fast as possible. No score in the leaderboard sense — `bestTimeMs` is the only metric.
@@ -329,7 +346,7 @@ Zero. The score field on the HUD shows `—` (a grey em-dash) when `kind === 'sp
 
 ---
 
-### 3.4 Ultra — 2 Minutes, Maximize Score
+### 3.4 Ultra — 2 Minutes, Maximize Score · ✅ **Shipped Phase 4**
 
 #### 1. Goal
 Score as much as possible in 2 minutes. Time-attack inverse of Sprint.
@@ -378,7 +395,7 @@ Stock. `bestScore` is the only meaningful metric; `bestLines` is informational. 
 
 ---
 
-### 3.5 Zen — No Topout, Endless
+### 3.5 Zen — No Topout, Endless · ✅ **Shipped Phase 5**
 
 #### 1. Goal
 Practice mode. Topouts shift the stack down instead of ending the run. Not competitive — pure flow.
@@ -432,7 +449,7 @@ Existed for color: still counts internally, never written to high score. Stat pa
 
 ---
 
-### 3.6 Versus — Local for now, Online in §7
+### 3.6 Versus — Local for now, Online in §7 · ⚠ **Shipped Phase 6 (v1 with caveats)**
 
 #### 1. Goal
 Beat your opponent: be the last player standing. Cleared lines (≥2) send "garbage" to the opponent's stack.
@@ -499,6 +516,230 @@ Files (v1):
 
 #### 10. Effort
 **3 days** for v1 local. Online is its own ~5-7 day chapter (§7).
+
+#### 11. Phase-6 v1 caveats (what shipped vs. what the plan called for)
+
+The 3-day estimate above assumed the §10.1 Phase-1 `gameplay/state.js`
+extraction had landed. It hadn't — Phase 1 deliberately deferred state
+extraction since Sprint/Ultra/Zen each only needed the read-only
+`_modeStateSnapshot()`. Phase 6 then needed the dual-`Game`-instance
+architecture the plan calls for in #7 above, but couldn't ship it
+inside one focused turn without that extraction.
+
+**What v1 actually shipped:**
+- All the engine pieces (rules pack, garbage table, events, badge,
+  storage) are real and tested.
+- The "opponent" is a single-process abstract bot inside `app/main.js`:
+  it tracks an opaque `stackHeight` counter, sends 1 row every 8–12 s,
+  and KOs at 12 absorbed rows.
+- One simulation. One board. One HUD. The bot never has a visible
+  field; the player only ever sees their own playfield.
+
+**What v1 deliberately did NOT ship:**
+- Two `Game` instances side by side.
+- Player-2 keymap (WASD + RShift).
+- Dual-board world layout.
+- Round-of-N flow with a post-round panel.
+- Seeded RNG (anti-cheat replay validation is online-Versus territory).
+- ELO updates (the field is initialized at 1200 but never written).
+
+**The next step is §3.7 below** — the Game-container extraction that
+makes "real" local Versus a thin wiring PR rather than a 3-day rewrite.
+
+---
+
+## 3.7 Game Container — Player 2 / AI Standalone Simulation
+
+**Status:** ❌ Not started — added to the plan in this revision.
+**Effort:** 5–7 days actual.
+**Unblocks:** real local Versus (§3.6 #11 caveats), online Versus (§7),
+3D Tetris's natural fit as a separate `Game`, future replay viewer.
+
+### 3.7.1 Goal
+Extract the gameplay simulation from `app/main.js` into a reusable
+`Game` class that can be **instantiated multiple times** — Player 1,
+Player 2, AI opponent, replay viewer, future 3D variant. Each
+instance owns its own board, score, rules pack, and timing state. The
+host wires bridges between instances (e.g., player's `GARBAGE_SENT`
+becomes opponent's `applyGarbage`). The current single-sim main.js
+becomes one consumer of this class instead of the only path.
+
+### 3.7.2 Why this is its own task (and not a sub-bullet under §3.6)
+- Phase 6 shipped a real, playable Versus mode without it. The
+  container is the *architectural* unblocker, not a Versus prereq.
+- The extraction is the largest single refactor remaining in the
+  project — touches every line of main.js's gameplay block.
+- Three downstream chapters (§7 online, §6 3D, §3.6 v2 dual-board) all
+  benefit. Pulling the work out of any one of them and naming it
+  separately makes it easier to schedule, parallelize, and gate on
+  determinism tests.
+- The plan_architecture.md §1.1 (Gameplay Core) and §4 (Gameplay
+  Isolation) already specify this class. §3.7 is the *commitment*
+  to do that extraction now that Phase 6 has shown what stops
+  working without it.
+
+### 3.7.3 Public surface
+
+```ts
+class Game {
+  constructor(opts: {
+    rules: Rules;          // from buildRules(modeKey, ...)
+    seed?: number;         // seeded RNG; defaults to Date.now()
+    bus?: EventBus;        // per-game bus (preferred) or shared
+    side?: 'player'|'opponent'|string;  // opaque tag for HUD routing
+    cols?: number; rows?: number; depth?: number;  // dimensions; default 10/20/3
+  });
+
+  tick(dtMs: number, input: InputFrame): void;  // advance one gameplay step
+  applyGarbage(rows: number, holeColumn?: number): void;  // queued; drained at lock
+  hold(): void;                                   // attempt hold-piece swap
+  forceTopOut(reason?: string): void;            // for forfeit / external KO
+
+  snapshot(): GameSnapshot;                       // read-only — for HUD + view sync
+  events: EventStream;                            // subscribe to MODE_*, LINE_CLEAR, etc.
+  serialize(): GameSaveBlob;                      // for replays / online sync
+  restore(blob: GameSaveBlob): void;
+  dispose(): void;
+}
+
+type InputFrame = {
+  left:  boolean; right: boolean;
+  softDrop: boolean; hardDrop: boolean;
+  rotateCW: boolean; rotateCCW: boolean;
+  hold: boolean; pause: boolean;
+};
+
+type GameSnapshot = Readonly<{
+  side: string;
+  board: ReadonlyArray<ReadonlyArray<number|null>>;
+  active: { key, col, row, rot, color } | null;
+  next: ReadonlyArray<string>;
+  hold: string | null;
+  score: number; lines: number; level: number;
+  modeView: ModeView;       // { kind: 'sprint', linesRemaining, timeMs, ... }
+  gameOver: boolean; paused: boolean;
+}>;
+```
+
+**Per-game `bus` is the cleanest** — each Game has its own bus, the
+host wires bridges (`Game1.events.on('GARBAGE_SENT') →
+Game2.applyGarbage(...)`). Single-sim hosts pass the existing global
+bus and continue working unchanged.
+
+### 3.7.4 State to extract from main.js
+
+The module-level state that becomes Game internals:
+
+| Current global | Becomes |
+|---|---|
+| `board` | `Game._board` |
+| `activePiece`, `holdPiece`, `nextQueue`, `canHold` | `Game._piece*` |
+| `score`, `lines`, `level`, `gameOver`, `paused` | `Game._stats` / flags |
+| `_modeTimeMs`, `_piecesThisSession`, `_linesThisSession` | `Game._counters` |
+| `fallTimer` | `Game._fallTimer` |
+| `_garbageQueue`, `_garbageBlocked` | `Game._garbage` |
+| `activeRules`, `_modeStateSnapshot()` | `Game._rules`, `Game.snapshot()` |
+| `triggerGameOver`, `endRun`, `_handleTopOutWithRescue` | `Game._endRun` private |
+
+The render-side caches (`cellMeshes`, `stackGroup`, mesh animations)
+move to a new `world/board-view.js` (§3.7.6).
+
+### 3.7.5 What stays in main.js (the host)
+
+- Render context, scene graph, camera, lights, post-processing.
+- Audio bus, voices, BGM playlist.
+- Settings panel, mode badges, playlist panel, effects panel.
+- Input event listeners (DOM keydown/keyup) — they produce
+  `InputFrame` objects via the new `input/intents.js`.
+- The existing `Mode._wireLifecycle({ onStart, onStop })` — the host's
+  onStart constructs a fresh `Game` instance (or two for Versus).
+- Bridges between Games (Versus garbage routing).
+
+### 3.7.6 Render isolation: BoardView
+
+Today main.js mutates `cellMeshes`, calls `stackGroup.add/remove`, runs
+`animateCubeTo`. These are render-side. They move to a new
+`world/board-view.js` that consumes `Game.snapshot()` and reconciles
+meshes:
+
+```js
+const game = new Game({ rules, bus });
+const view = new BoardView({ game, scene, side: 'left' });
+
+// Per frame:
+game.tick(dt, input);
+view.sync();   // reads game.snapshot(), updates meshes lazily
+```
+
+A second view at `side: 'right'` simply uses a different X offset — no
+duplicate rendering pipeline.
+
+### 3.7.7 Implementation plan (sub-phased)
+
+Each sub-phase is independently shippable; the game stays playable
+through every PR.
+
+**Sub-phase 7a — Game class scaffold + snapshot tests (2 days)**
+- New `src/gameplay/game.js`. Public API per §3.7.3.
+- Move board / piece / score / lines / level / gameOver / paused into
+  `Game._*`. The existing main.js becomes the sole consumer:
+  `const game = new Game({ rules, bus })` — every read/write goes
+  through it.
+- **Snapshot test**: capture the current main.js's event trace for a
+  fixed input sequence (10 pieces, mixed soft/hard drops). After
+  extraction, `new Game({ ... }).tick(...)` against the same inputs
+  must produce an identical event trace. This is the §11 risk-table
+  "Rules engine refactor regresses Classic" mitigation, applied to a
+  larger surface.
+
+**Sub-phase 7b — BoardView extraction (1 day)**
+- New `src/world/board-view.js`. Consumes `game.snapshot()`, owns
+  `cellMeshes` + `stackGroup` + `animateCubeTo`.
+- Removes mesh-state from main.js entirely.
+
+**Sub-phase 7c — Input intents (½ day)**
+- `src/input/intents.js` — keyboard handler produces `InputFrame`
+  objects. Configurable keymap per Game side (P1: arrows + Space,
+  P2: WASD + RShift). Conflicts with browser shortcuts surface a
+  per-key warning.
+
+**Sub-phase 7d — Bot v2 (½ day)**
+- `src/gameplay/bot-controller.js` — reads `game.snapshot()`, picks
+  moves, returns `InputFrame`. Replaces the abstract bot in main.js.
+- Two strengths shipped: `casual` (current cadence) and `mirror`.
+
+**Sub-phase 7e — Local Versus dual board (1.5 days)**
+- `src/app/versus.js` — composition root. Builds two `Game`s, two
+  `BoardView`s, two HUD clusters; routes inputs.
+- `src/world/dual-board.js` — side-by-side scene layout, per-side HUD
+  positioning (left negative-X, right positive-X).
+- Wires `Game1.events.on(GARBAGE_SENT) → Game2.applyGarbage(...)` in
+  both directions. Replaces the current single-sim Versus.
+
+**Sub-phase 7f — Determinism + replay (½ day)**
+- `Game.serialize()` + `restore()` round-trip tests.
+- Seeded RNG (`shared/random/seeded.js`) — `Math.random` removed from
+  `gameplay/**`. ESLint `no-restricted-globals` rule blocks it from
+  re-entering.
+- Foundation for online Versus (§7).
+
+### 3.7.8 Risks
+
+| Risk | Likelihood | Impact | Mitigation |
+|---|---|---|---|
+| Refactor regresses Classic | High | High | Snapshot tests locked in *before* extraction. Compare event traces frame-for-frame. |
+| Two-bus design surprises listeners that subscribed to the global bus | Medium | Medium | Document the per-game bus model in `gameplay/game.js` header; main.js passes the global bus for solo modes (no behavior change). |
+| Render path breaks during BoardView extraction | Medium | High | Sub-phase 7b ships before 7e — extract once, validate against single-sim, then run dual. |
+| Determinism gap (a `setTimeout` leaks into rules) | Medium | Medium | ESLint `no-restricted-globals` blocking `setTimeout`/`performance.now()`/`Math.random` from `gameplay/**`. |
+| Schedule slippage | High | Medium | Sub-phase 7a alone is 2 days and gates the rest. If 7a runs over, defer 7e to a separate session and ship 7a–d as the milestone. |
+
+### 3.7.9 Out of scope for §3.7
+
+- Full keyboard customization UI (P2 keymap is shipped as a fixed preset).
+- Network transport (online Versus is §7, depends on §3.7's
+  determinism property landing first).
+- Replay viewer UI (the `serialize`/`restore` API ships; consumers are
+  later work).
 
 ---
 
@@ -881,30 +1122,34 @@ A "complete row" no longer exists in the grid sense. Replacement rule:
 
 Each item is independently shippable; the game stays playable through every PR.
 
-1. **Rules engine plumbing** — `gameplay/rules.js`, `MODE_START` / `MODE_END` events, `Mode.start()` / `Mode.stop()`. Classic still works; nothing visible changes. *(1 day)*
-2. **Marathon** — first real rule pack on the new engine; validates the engine's seams. *(1 day)*
-3. **Sprint** — adds the `state.timeMs` HUD plumbing. *(1 day)*
-4. **Ultra** — countdown HUD + late-second milestones. *(1 day)*
-5. **Zen** — topout interceptor + shift-down board op. *(1.5 days)*
-6. **Versus (local)** — first multi-player chapter, no networking. *(3 days)*
-7. **Mode tab UX upgrade** — per-mode goal/description/options/best display. *(0.5 day)*
-8. **Stats schema renderer** — per-mode formatters. *(0.5 day)*
+1. ✅ **Rules engine plumbing** — `gameplay/rules.js`, `MODE_START` / `MODE_END` events, `Mode.start()` / `Mode.stop()`. *(shipped — 1 day)*
+2. ✅ **Marathon** — first real rule pack on the new engine; validated the engine's seams. *(shipped — 1 day)*
+3. ✅ **Sprint** — `state.timeMs` HUD plumbing. *(shipped — 1 day)*
+4. ✅ **Ultra** — countdown HUD + late-second milestones. *(shipped — 1 day)*
+5. ✅ **Zen** — topout interceptor + shift-down board op. *(shipped — 1.5 days)*
+6. ⚠ **Versus (local) v1** — engine pieces + AI bot opponent in a single sim. *(shipped — 1 day actual, with caveats; the planned dual-`Game` work is now §3.7)*
+7. ❌ **Mode tab UX upgrade** — per-mode goal/description/options/best display. *(0.5 day, next)*
+8. ❌ **Stats schema renderer** — per-mode formatters. *(0.5 day)*
+9. ❌ **§3.7 Game container extraction** — `gameplay/game.js`, `world/board-view.js`, `input/intents.js`, `app/versus.js` real dual-sim. *(5–7 days)*
+10. ❌ **Versus v2 — real local dual-board** — finishes the §3.6 spec on top of §3.7. *(1.5 days, included in §3.7's sub-phase 7e)*
 
-**Total core modes: ~9.5 days.** This is the "ship six modes" plan.
+**Total core modes + container: ~10.5 days remaining.**
 
 After core modes:
 
-9. **3D Tetris (experimental)** — flat tetrominoes first, tetracubes later. *(8 days, see §6.12)*
-10. **Pure physics (experimental)** — *(5 days, see §8.12)*
-11. **Online Versus** — *(16 days, see §7.12)*
+11. ❌ **3D Tetris (experimental)** — flat tetrominoes first, tetracubes later. *(8 days, see §6.12)*
+12. ❌ **Pure physics (experimental)** — *(5 days, see §8.12)*
+13. ❌ **Online Versus** — *(16 days, see §7.12; depends on §3.7)*
 
 ### 9.2 Parallelization notes
-- Item 1 (rules engine) is a hard prerequisite for 2–6.
-- Items 2–5 can run in parallel after 1 lands, since each touches its own rules pack file.
-- 6 (Versus local) needs 1 but is independent of 2–5.
-- 9 (3D) requires generalizing `board.js` — coordinate with whoever ships 1.
-- 10 (physics) is fully independent; can land any time after 1.
-- 11 (online) requires 6 (Versus local) plus a determinism audit; can begin its determinism work in parallel with 2–5.
+- ✅ Item 1 (rules engine) was a hard prerequisite for 2–6 — done.
+- ✅ Items 2–5 ran sequentially in this implementation; could have parallelized once 1 landed.
+- ⚠ 6 (Versus v1) shipped as a single-sim AI; v2 depends on §3.7.
+- 7 + 8 (Mode tab UX, stats renderer) are tiny and can land in either order, in parallel with §3.7's sub-phase 7a.
+- 9 (§3.7 container) is the prereq for 10 (Versus v2), 13 (online), and the cleanest path for 11 (3D).
+- 11 (3D) doesn't strictly require §3.7 but a 3D `Game` instance is cleaner than a forked main.js.
+- 12 (physics) is fully independent of §3.7; can land any time.
+- 13 (online) requires §3.7 (its sub-phase 7f delivers the determinism property online needs).
 
 ### 9.3 Test strategy
 
@@ -936,46 +1181,68 @@ Today the listener is unused. Mark the hook as future-only.
 
 Concrete files that change for each phase, mapped to the architecture in `plan_architecture.md` and the existing tree.
 
-### 10.1 Phase 1 — Rules engine
+### 10.1 Phase 1 — Rules engine ✅ Shipped
+
+| File | Status | Change |
+|---|---|---|
+| `gameplay/rules.js` | ✅ | **new** — `buildRules(modeKey, opts)` and the `Rules` typedef |
+| ~~`gameplay/state.js`~~ | deferred → §3.7 | originally planned in Phase 1; the read-only `_modeStateSnapshot()` in main.js was sufficient through Phases 2–6. The full extraction lands in §3.7 |
+| `gameplay/end-of-run.js` | ✅ | **new** — high-score / stats write extracted; later extended with `goalMultiplier` + `updateBest` hooks |
+| `gameplay/events.js` | ✅ | added `MODE_START`, `MODE_END`, `MODE_GOAL_PROGRESS`, `ZEN_RESCUE`, `GARBAGE_SENT`, `GARBAGE_RECEIVED` |
+| `gameplay/mode.js` | ✅ | added `Mode.start()`, `Mode.stop()`, `Mode.config()`, `Mode._wireLifecycle()`. `Mode.disabled.versus` flipped to false in Phase 6 |
+| `app/main.js` | ✅ | `triggerGameOver` → `endRun({reason:'topout'})`. Fall interval reads from `rules.fallIntervalSec`. Bus passed to `buildRules`. `_modeStateSnapshot()` exposes `{score, lines, level, linesCleared, timeMs}` |
+| `engine/storage.js` | ✅ | `STATS_DEFAULTS.modeBests` extended per-mode (Marathon `completed`/`bestTimeMs`, Sprint same, Ultra default, Zen `longestSessionMs`/`totalLines`, Versus `wins`/`losses`/`draws`/`eloMmr`) |
+
+### 10.2 Phase 2-5 — One mode each ✅ Shipped
+
+| File | Status | Change |
+|---|---|---|
+| `gameplay/rules/marathon.js` + `.test.js` | ✅ | 1.5× multiplier, 10-line milestones |
+| `gameplay/rules/sprint.js` + `.test.js`     | ✅ | gravity-locked, `lineScore: () => 0`, 5-line milestones |
+| `gameplay/rules/ultra.js` + `.test.js`      | ✅ | 120s, milestones at 30/60/90/110/115/118/119s |
+| `gameplay/rules/zen.js` + `.test.js`        | ✅ | gentler gravity, `onTopOut: { end:false, shift:4 }`, custom `updateBest` |
+| `ui/marathon-badge.js` | ✅ | lines-remaining + multiplier; goal finale |
+| `ui/sprint-badge.js`   | ✅ | `m:ss.mmm` timer + lines remaining |
+| `ui/ultra-badge.js`    | ✅ | countdown, red+pulse at ≤10s |
+| `ui/zen-badge.js`      | ✅ | Lines/Pieces/Shifts + Stop session button |
+| `app/main.js` | ✅ | rules-aware fall interval, soft/hard drop, line score, `onLinesCleared`/`onTick`/`endCondition` hooks. `shiftStackDown` helper for Zen rescue. PIECE_SPAWN now actually emitted |
+| `ui/format/mode-stats.js` | ❌ deferred to Phase 8 | per-mode stats formatters not yet built — Stats tab still shows generic `{score, lines, level}` |
+
+### 10.3 Phase 6 — Versus (local v1) ⚠ Partial
+
+| File | Status | Change |
+|---|---|---|
+| `gameplay/rules/versus.js` + `.test.js` | ✅ | combo-aware garbage table, `onLinesCleared` emits `GARBAGE_SENT` |
+| `gameplay/garbage.js` + `.test.js`      | ✅ | pure helpers (`garbageForLineCount`, `pickHoleColumn`, `applyGarbageToBoard`) |
+| `ui/versus-badge.js`                    | ✅ | dual-color queue (pink incoming / cyan opponent stack), WIN/LOSS finale |
+| `app/main.js`                           | ✅ | `_garbageQueue`, `_drainInboundGarbage` (between lockPiece's clearLines and spawnPiece), `_applyGarbageToBoardAndMeshes`, `versusBot` IIFE (8–12s send cadence, KO at 12 rows), `endRun` accepts `winner` field |
+| ~~`app/versus.js`~~                     | ❌ deferred to §3.7 | composition root for two `Game`s — requires container extraction |
+| ~~`world/dual-board.js`~~               | ❌ deferred to §3.7 | side-by-side layout — requires container extraction |
+| ~~`input/intents.js`~~                  | ❌ deferred to §3.7 | P2 keymap — requires container extraction |
+
+### 10.4 §3.7 — Game container (the new task)
 
 | File | Change |
 |---|---|
-| `gameplay/rules.js` | **new** — `buildRules(modeKey, opts)` and the `Rules` typedef |
-| `gameplay/state.js` | **new** — extracted from inline `main.js` state; adds `timeMs`, `modeView` |
-| `gameplay/end-of-run.js` | **new** — the high-score / stats write moves here |
-| `gameplay/events.js` | adds `MODE_START`, `MODE_END`, `MODE_GOAL_PROGRESS`, `GARBAGE_RECEIVED`, `GARBAGE_SENT` |
-| `gameplay/mode.js` | adds `Mode.start()`, `Mode.stop()`, `Mode.config()` |
-| `app/main.js` | shrinks: `triggerGameOver` becomes `endRun({reason:'topout'})` calling `gameplay/end-of-run.js`. Fall interval reads from `rules.fallIntervalSec` |
-| `engine/storage.js` | `STATS_DEFAULTS.modeBests` extended for the new per-mode shapes |
+| `gameplay/game.js` | **new** — `Game` class per §3.7.3 public surface |
+| `gameplay/game.test.js` | **new** — snapshot tests (event traces locked in pre-extraction); determinism tests (same seed + inputs → identical state) |
+| `world/board-view.js` | **new** — consumes `Game.snapshot()`, owns `cellMeshes` + `stackGroup` + `animateCubeTo` |
+| `input/intents.js` | **new** — keyboard handler → `InputFrame`; per-side keymap config (P1 arrows + Space, P2 WASD + RShift) |
+| `gameplay/bot-controller.js` | **new** — Bot v2 reads snapshot, returns `InputFrame`. Replaces the single-sim abstract bot |
+| `app/versus.js` | **new** — composition root: two `Game`s, two `BoardView`s, two HUD clusters; routes inputs; wires `GARBAGE_SENT` bridges in both directions |
+| `world/dual-board.js` | **new** — side-by-side scene layout; per-side HUD positioning |
+| `shared/random/seeded.js` | **new** — seeded RNG; replaces `Math.random` calls in `gameplay/**` |
+| `eslint.config.js` | extend the `gameplay/**` `no-restricted-imports` set with `Math`, `setTimeout`, `performance.now` to enforce determinism |
+| `app/main.js` | shrinks: gameplay state moves to `Game`; mesh state moves to `BoardView`; main.js becomes the render+audio+UI host |
 
-### 10.2 Phase 2-5 — One mode each
-
-For each mode `M`:
-| File | Change |
-|---|---|
-| `gameplay/rules/${M}.js` | **new** — the rules pack |
-| `gameplay/rules/${M}.test.js` | **new** — Vitest suite for the rules pack |
-| `ui/HUD/${M}Badge.jsx` | **new** — mode-specific HUD slot |
-| `ui/format/mode-stats.js` | extend with the mode's format function |
-
-### 10.3 Phase 6 — Versus (local)
-
-| File | Change |
-|---|---|
-| `gameplay/rules/versus.js` | **new** |
-| `gameplay/garbage.js` | **new** — pure functions for the garbage table |
-| `app/versus.js` | **new** — composition root for two `Game`s |
-| `world/dual-board.js` | **new** — side-by-side layout |
-| `input/intents.js` | secondary keymap for player 2 |
-
-### 10.4 Phase 7 — Mode tab UX
+### 10.5 Phase 7 — Mode tab UX
 
 | File | Change |
 |---|---|
 | `ui/settings-panel.js:277-329` | extends mode tab with per-mode options + best display |
 | `gameplay/mode.js` | `Mode.config(key)` returns the new metadata |
 
-### 10.5 Phase 9 — 3D Tetris
+### 10.6 Phase 9 — 3D Tetris
 
 | File | Change |
 |---|---|
@@ -984,18 +1251,18 @@ For each mode `M`:
 | `gameplay/board.js` | generalized to optional 3rd dimension |
 | `shared/math.js` | `rotate3d(shape, axis, dir)` |
 | `camera/3d-mode.js` | **new** — camera rig variant |
-| `world/board-view.js` | conditional 3D-grid path |
+| `world/board-view.js` | conditional 3D-grid path (extends the §3.7-introduced module) |
 
-### 10.6 Phase 10 — Physics
+### 10.7 Phase 10 — Physics
 
 | File | Change |
 |---|---|
 | `gameplay/experimental/physics/rules.js` | **new** |
 | `physics/world.js` | **new** — Rapier wrapper |
 | `physics/body-lifecycle.js` | **new** — grid → body conversion |
-| `gameplay/board.js` | hooks at lock-time delegate to physics rules pack |
+| `gameplay/game.js` | hooks at lock-time delegate to physics rules pack (the container's `_lockPiece` private) |
 
-### 10.7 Phase 11 — Online Versus
+### 10.8 Phase 11 — Online Versus
 
 | File | Change |
 |---|---|
@@ -1012,25 +1279,34 @@ For each mode `M`:
 
 | Risk | Likelihood | Impact | Mitigation |
 |---|---|---|---|
-| Rules engine refactor regresses Classic | Medium | High | Vitest snapshot of Classic behavior locked in *before* refactor; PR-1 must produce identical event traces. |
-| Sprint gravity-lock decision (§3.3) is community-wrong | Low | Medium | Surface as an option (Sprint variant: gravity locked / classic / hardmode). |
+| ✅ Rules engine refactor regresses Classic | (resolved) | — | Phase 1 shipped without observable regression. 367 tests cover the seams. |
+| Sprint gravity-lock decision (§3.3) is community-wrong | Low | Medium | Surface as an option (Sprint variant: gravity locked / classic / hardmode). Not in v1. |
 | Marathon multiplier (1.5×) makes Classic feel underweight | Low | Low | Per-mode bests separate already; not a balance crisis. Tune in `config/mode-balance.js`. |
-| Zen rescue animation looks worse than topout | Medium | Medium | Ship placeholder; iterate on VFX. Don't block Zen on perfect VFX. |
-| Versus local layout breaks with current HUD positions | High | Medium | The `Side: 'left'/'right'` prop refactor is a known cost; add to phase 6 budget. |
+| Zen rescue animation looks worse than topout | Medium | Medium | Shipped as placeholder (clear bottom 4 + cube settle animation). Refine in a polish pass. |
+| ⚠ Versus v1 caveats persist (single-sim, abstract bot) | (acknowledged) | Medium | Caveats documented in §3.6 #11. §3.7 is the resolution. |
+| **§3.7 Game container refactor regresses gameplay** | High | High | **Snapshot tests locked in pre-extraction (§3.7.7 sub-phase 7a) — event trace must match frame-for-frame.** Sub-phases ship one at a time; game stays playable through every PR. |
+| **§3.7 sub-phase 7e (dual-board) layout breaks HUD positioning** | Medium | Medium | The `Side: 'left'/'right'` prop refactor is a known cost; budgeted into §3.7.7 sub-phase 7e (1.5 days). |
+| **§3.7 determinism gap (a `setTimeout` leaks into rules)** | Medium | Medium | ESLint `no-restricted-globals` blocks `Math.random`/`setTimeout`/`performance.now` from `gameplay/**` — landed alongside seeded RNG in sub-phase 7f. |
 | 3D rotation control is incomprehensible to most players | High | Medium | Beginner toggle (flat tetrominoes, single rotation axis); X-ray + slice-view defaults on. |
 | Online ELO inflation via smurfs | Low (at scale) | Low | Out of scope for v1; phone-verification at 1000+ DAU. |
 | Physics mode breaks determinism for Versus | n/a | n/a | Physics is single-player only; Versus disallows physics rules pack. Documented in `gameplay/rules/versus.js` header. |
-| Schedule slippage as 3D + online + physics overlap | High | Medium | Stage-gate: all six standard modes ship before any speculative mode begins. |
+| Schedule slippage as 3D + online + physics overlap | High | Medium | Stage-gate: §3.7 container lands before any speculative mode promotion. Online specifically *requires* it. |
 
 ---
 
 ## 12. Final Word
 
-The single most useful property of this plan is that **every mode is small once the rules engine exists**. Marathon is 30 lines of rules + 50 lines of HUD + 30 lines of test. The hard work is the engine plumbing in phase 1 — and that work *also* unlocks the deterministic simulation that online Versus needs.
+The single most useful property of this plan is that **every mode is small once the rules engine exists**. Marathon is 30 lines of rules + 50 lines of HUD + 30 lines of test. **That property held**: Phases 1–6 each shipped in roughly the budgeted shape, the rules engine is now real, and Classic plays identically before/after the refactor (367 tests prove it).
 
-The speculative modes (3D, online, physics) live behind the experimental wall on day one. They prove out under the same 30-day promote-or-delete policy that's already in the project's culture (`plan_particle_2.md` §10). If the 3D mode delights, it gets promoted and gains its own polish budget. If it doesn't, it's deleted without ceremony.
+What Phase 6 also revealed: the plan's original "two `Game`s side-by-side" Versus design assumed an extracted simulation that Phase 1 deliberately deferred. The **§3.7 Game container** task added in this revision is the work that closes that gap — the largest single refactor remaining in the project, and the prerequisite for both online Versus (§7) and any future "second simulation" use (replay viewer, Player 2, 3D Tetris as its own `Game`).
 
-Build the engine straight. Ship the six standard modes one rule pack at a time. Decide about 3D, physics, and online based on how the first six feel.
+The speculative modes (3D, online, physics) still live behind the experimental wall. They prove out under the same 30-day promote-or-delete policy that's already in the project's culture (`plan_particle_2.md` §10). If the 3D mode delights, it gets promoted and gains its own polish budget. If it doesn't, it's deleted without ceremony.
+
+**Recommended next moves** (post-Phase 6, in priority order):
+1. Phase 7 (Mode tab UX) — half a day, makes the modes you've already built feel like a real feature.
+2. Phase 8 (Stats renderer) — half a day, same.
+3. **§3.7 Game container** — 5–7 days, the architectural unblocker.
+4. Phase 11 / 12 / 13 (3D / physics / online) — each based on how the first eight feel.
 
 ---
 
