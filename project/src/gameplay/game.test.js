@@ -1961,6 +1961,55 @@ describe('Game — 3D lock + layer detection (plan v2 §2.1 Phase B)', () => {
     }
     expect(game._collectFullRows()).toEqual([]);
   });
+
+  it('full Y-slab clear fires LINE_CLEAR with rows + colors (Phase G — director-compatible payload)', () => {
+    const { game, bus } = make3DGame();
+    // Pre-fill the entire row 0 slab (10×10=100 cells), then drop a
+    // piece that's already at the same row so the lock triggers
+    // _collectFullRows + clearLines.
+    for (let d = 0; d < game.depth; d++) {
+      for (let c = 0; c < game.cols; c++) {
+        game.boardLayers[d][0][c] = 0xff0000;
+      }
+    }
+    let captured = null;
+    bus.on(EVENTS.LINE_CLEAR, (e) => { captured = e; });
+    // Spawn + force-lock a piece — its cells aren't part of the cleared
+    // layer (row 0), but the layer's already full so clearLines fires
+    // immediately on lock.
+    game.spawnPiece('I');
+    game.lockPiece();
+    expect(captured).not.toBeNull();
+    expect(captured.rows).toEqual([0]);
+    expect(captured.simultaneous).toBe(1);
+    // colors[0] is the avg color of the full Y-slab — every cell was
+    // 0xff0000 so the avg should be exactly that.
+    expect(captured.colors).toHaveLength(1);
+    expect(captured.colors[0]).toBe(0xff0000);
+    // overallColor is meanColor([colors]) — for one row, identical.
+    expect(captured.overallColor).toBe(0xff0000);
+  });
+
+  it('multi-layer 3D clear (Tetris) — 4 simultaneous full Y-slabs', () => {
+    const { game, bus } = make3DGame();
+    // Pre-fill rows 0..3 entirely.
+    for (let r = 0; r < 4; r++) {
+      for (let d = 0; d < game.depth; d++) {
+        for (let c = 0; c < game.cols; c++) {
+          game.boardLayers[d][r][c] = 0xff0000;
+        }
+      }
+    }
+    let captured = null;
+    bus.on(EVENTS.LINE_CLEAR, (e) => { captured = e; });
+    game.spawnPiece('I');
+    game.lockPiece();
+    expect(captured).not.toBeNull();
+    expect(captured.simultaneous).toBe(4);
+    expect(captured.rows.sort()).toEqual([0, 1, 2, 3]);
+    // 4-layer clear scores 8000 × level (per LAYER_CLEAR_SCORE table).
+    expect(captured.scoreDelta).toBeGreaterThanOrEqual(8000);
+  });
 });
 
 describe('Game — 3D tryRotate (plan v2 §2.1 Phase D)', () => {

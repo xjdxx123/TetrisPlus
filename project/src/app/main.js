@@ -3016,6 +3016,13 @@ Mode._wireLifecycle({
         syncFromGame();
       }
     }
+    // Tag <body> with the active mode so CSS / HUD panels can target
+    // mode-specific layouts. 3D mode (plan v2 §2.1 Phase E) uses
+    // `[data-mode='3d']` to swap the side-panel chrome for a top-bar
+    // variant; the 10×10 footprint is too wide for the 2D side layout.
+    if (typeof document !== 'undefined' && document.body) {
+      document.body.dataset.mode = key;
+    }
     bus.emit(EVENTS.MODE_START, {
       key,
       seed: typeof seed === 'number' ? seed : null,

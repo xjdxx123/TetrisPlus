@@ -104,6 +104,16 @@
     font-weight: 600;
   }
 
+  /* 3D Tetris (plan v2 §2.1 Phase E) — mode-specific help section.
+     The .help-3d block is hidden by default; it appears only when
+     `<body data-mode="3d">` (set by main.js's Mode.start hook). The
+     2D-specific section (.help-2d) is the inverse — visible always
+     except in 3D mode. Both classes coexist in the same .help panel
+     so the help-toggle button's open/close behavior stays unchanged. */
+  .help-3d                                { display: none; }
+  body[data-mode="3d"] .help-3d           { display: block; }
+  body[data-mode="3d"] .help-2d           { display: none; }
+
   /* Panel jitter — scoped to .panel-inner so it never touches the
      outer element's transform (CSS3DRenderer rewrites that every frame).
      --p is the intensity 0..1, set inline by JS based on score delta. */
@@ -332,9 +342,16 @@
     <div class="row"><span>Move</span><span><kbd>←</kbd> <kbd>→</kbd></span></div>
     <div class="row"><span>Soft drop</span><span><kbd>↓</kbd></span></div>
     <div class="row"><span>Hard drop</span><span><kbd>Space</kbd></span></div>
-    <div class="row"><span>Rotate</span><span><kbd>↑</kbd> / <kbd>X</kbd></span></div>
-    <div class="row"><span>Hold</span><span><kbd>C</kbd> / <kbd>Shift</kbd></span></div>
+    <div class="row help-2d"><span>Rotate</span><span><kbd>↑</kbd> / <kbd>X</kbd></span></div>
+    <div class="row help-2d"><span>Hold</span><span><kbd>C</kbd> / <kbd>Shift</kbd></span></div>
     <div class="row"><span>Pause</span><span><kbd>P</kbd></span></div>
+    <div class="help-3d">
+      <h4 style="margin-top:10px;">3D Rotation</h4>
+      <div class="row"><span>Yaw (Z axis)</span><span><kbd>↑</kbd> / <kbd>X</kbd> / <kbd>Z</kbd></span></div>
+      <div class="row"><span>Pitch (X axis)</span><span><kbd>W</kbd> / <kbd>S</kbd></span></div>
+      <div class="row"><span>Roll (Y axis)</span><span><kbd>A</kbd> / <kbd>D</kbd></span></div>
+      <div class="row"><span>Depth nudge</span><span><kbd>Q</kbd> / <kbd>E</kbd></span></div>
+    </div>
     <h4 style="margin-top:10px;">Camera</h4>
     <div class="row"><span>Orbit</span><span>Drag empty space</span></div>
     <div class="row"><span>Pan</span><span>Right-drag</span></div>
