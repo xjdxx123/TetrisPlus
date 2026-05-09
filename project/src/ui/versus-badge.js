@@ -1,13 +1,21 @@
-// Versus HUD badge — opponent state + incoming garbage queue
-// (plan_gameplay_1.md §3.6 #4).
+// Versus HUD badge — opponent state + per-side garbage queues
+// (plan_gameplay_1.md §3.6 #4 + §3.7 dual-board + §13 polish).
 //
 // Visible only when the active mode is Versus. Surfaces:
 //  - opponent score (the bot's cosmetic counter in v1; remote score in v2)
-//  - opponent's accumulated player→bot garbage (visualizes the player's
-//    pressure on the bot)
-//  - inbound garbage queue (what's about to land on the player)
-//  - "BLOCKED" indicator when the queue has hit the cap
-//  - latency placeholder (always 0 in local; reserved for online v2)
+//  - **TO YOU** queue — pink pips for inbound garbage about to land on
+//    the player. Each pip's opacity reflects M5 spawn-delay readiness:
+//    dim while pending (readyAt > modeTime), bright when ready, pulsing
+//    when imminent (≤200ms to ready).
+//  - **TO BOT** queue — cyan pips for outbound garbage queued on the
+//    opponent's well (what the player has SENT and is waiting for the
+//    bot to absorb). Same readiness scheme, mirrored layout.
+//  - "BLOCKED" indicator when either queue has hit the cap.
+//  - latency placeholder (always 0 in local; reserved for online v2).
+//
+// The two columns sit directly under their respective score, so each
+// player can read "what's about to hit me" and "what's pressuring my
+// opponent" at a glance — symmetric, color-coded, side-labeled.
 //
 // On MODE_END, swaps to a "WIN" / "LOSS" / "DRAW" finale based on the
 // winner field.
@@ -76,13 +84,13 @@ function installBadgeStyles() {
       display: grid;
       grid-template-columns: 1fr auto 1fr;
       gap: 10px;
-      align-items: center;
+      align-items: start;
     }
     .tp-versus-badge__side {
       display: flex;
       flex-direction: column;
       align-items: center;
-      gap: 2px;
+      gap: 4px;
     }
     .tp-versus-badge__side-label {
       font-family: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
@@ -104,43 +112,95 @@ function installBadgeStyles() {
       font-size: 11px;
       color: var(--muted, #8b93ad);
       opacity: 0.6;
+      align-self: center;
     }
+
+    /* ─── Per-side garbage queue (split-column layout) ─── */
     .tp-versus-badge__queue {
       display: flex;
       gap: 3px;
-      justify-content: center;
       flex-wrap: wrap;
-      padding: 4px 0 0;
-      min-height: 18px;
+      justify-content: center;
+      padding: 2px 4px;
+      border-radius: 4px;
+      min-height: 12px;
+      max-width: 130px;
+      transition: background 0.2s ease-out, border-color 0.2s ease-out;
+      border: 1px solid transparent;
     }
-    .tp-versus-badge__pip {
-      display: inline-block;
-      width: 14px;
-      height: 6px;
-      border-radius: 2px;
-      background: rgba(255, 92, 138, 0.55);
-      box-shadow: 0 0 6px rgba(255, 92, 138, 0.40);
+    .tp-versus-badge__queue-caption {
+      font-family: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      font-size: 8.5px;
+      color: var(--muted, #8b93ad);
+      opacity: 0.65;
     }
-    .tp-versus-badge__pip--bot {
-      background: rgba(108, 240, 255, 0.45);
-      box-shadow: 0 0 6px rgba(108, 240, 255, 0.30);
+    .tp-versus-badge__queue-total {
+      font-family: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+      font-variant-numeric: tabular-nums;
+      font-size: 9px;
+      letter-spacing: 0.10em;
+      color: var(--muted, #8b93ad);
+      opacity: 0.7;
     }
     .tp-versus-badge__queue-empty {
       font-family: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
       font-size: 9px;
       letter-spacing: 0.14em;
       color: var(--muted, #8b93ad);
-      opacity: 0.4;
+      opacity: 0.35;
     }
+
+    /* Pip — base shape; per-side color overridden below. The width slot
+       is fixed so a wrap row stays grid-like. */
+    .tp-versus-badge__pip {
+      display: inline-block;
+      width: 14px;
+      height: 6px;
+      border-radius: 2px;
+      transition: opacity 0.18s ease-out, transform 0.2s ease-out;
+    }
+    /* Inbound (TO YOU) → red/pink, the threat color. */
+    .tp-versus-badge__pip--inbound {
+      background: rgba(255, 92, 138, 0.85);
+      box-shadow: 0 0 6px rgba(255, 92, 138, 0.55);
+    }
+    /* Outbound (TO BOT) → cyan, the same accent the §3.7 versus polish
+       uses for opponent shockwaves so the player learns the visual
+       language: cyan = "I sent that". */
+    .tp-versus-badge__pip--outbound {
+      background: rgba(108, 240, 255, 0.85);
+      box-shadow: 0 0 6px rgba(108, 240, 255, 0.50);
+    }
+    /* Readiness modifier states (M5 spawn-delay window):
+       - pending  : readyAt > modeTime + 200ms — dim, waiting in queue.
+       - imminent : within 200ms of ready — pulse so the player knows
+                    "lock soon to cancel, or eat it next piece".
+       - ready    : default (no class) — full opacity, will apply on
+                    the next no-clear lock. */
+    .tp-versus-badge__pip--pending {
+      opacity: 0.32;
+    }
+    .tp-versus-badge__pip--imminent {
+      animation: tp-versus-badge-pip-pulse 480ms ease-in-out infinite alternate;
+    }
+    @keyframes tp-versus-badge-pip-pulse {
+      from { opacity: 0.55; transform: scaleY(1.0); }
+      to   { opacity: 1.00; transform: scaleY(1.4); }
+    }
+
+    /* Pulse on garbage events. */
     .tp-versus-badge.is-pulsing {
       box-shadow: 0 0 0 6px rgba(255, 92, 138, 0.45),
                   0 10px 40px rgba(0, 0, 0, 0.45),
                   inset 0 0 60px rgba(255, 92, 138, 0.20);
     }
-    .tp-versus-badge.is-blocked .tp-versus-badge__queue {
+    /* When EITHER queue is at the cap, the badge marks the blocked state.
+       The blocked column itself draws a dashed red border. */
+    .tp-versus-badge__queue.is-blocked {
       background: rgba(255, 92, 138, 0.10);
       border: 1px dashed rgba(255, 92, 138, 0.55);
-      border-radius: 4px;
     }
     /* Finale states. */
     .tp-versus-badge.is-finale {
@@ -169,15 +229,39 @@ function installBadgeStyles() {
   document.head.appendChild(style);
 }
 
-const QUEUE_PIP_CAP = 12;        // keep the row from wrapping to a third line
+const QUEUE_PIP_CAP = 12;        // keep each column from wrapping past 2 lines
+// Spawn-delay readiness threshold (matches Game._garbageDelayMs default
+// of 800ms — this is the "imminent" window in the last fifth or so).
+const IMMINENT_MS = 200;
+
+/**
+ * @typedef {Object} GarbageQueueState
+ * @property {number} rows       Total queued rows (sum of entries.rows).
+ * @property {boolean} blocked   True when the queue has hit its cap.
+ * @property {Array<{rows:number, readyAt:number}>} [entries]
+ *   Per-entry queue contents in FIFO order (front = oldest = next to
+ *   apply). Optional — when missing, the badge renders all pips as
+ *   "ready" (matches the pre-§13 behaviour).
+ * @property {number} [modeTimeMs]
+ *   The Game's pause-aware time at the moment of read. Used together
+ *   with `entries[*].readyAt` to compute readiness state. Optional;
+ *   defaults to "everything ready" when omitted.
+ */
 
 /**
  * @typedef {Object} VersusBadgeOpts
  * @property {{on:(t:string,fn:Function,o?:any)=>Function}} bus
- * @property {{ MODE_START:string, MODE_END:string, GARBAGE_SENT:string, GARBAGE_RECEIVED:string, PIECE_LOCK:string }} events
+ * @property {{ MODE_START:string, MODE_END:string, GARBAGE_SENT:string,
+ *              GARBAGE_OUTGOING:string, GARBAGE_RECEIVED:string,
+ *              GARBAGE_CANCELLED:string, PIECE_LOCK:string }} events
  * @property {() => string} getActiveModeKey
  * @property {() => { score:number, stackHeight:number, deathThreshold:number, alive:boolean }} getOpponentSnapshot
- * @property {() => { rows:number, blocked:boolean }} getInboundGarbage
+ * @property {() => GarbageQueueState} getInboundGarbage
+ *   The PLAYER's inbound queue (about to land on YOU).
+ * @property {() => GarbageQueueState} [getOutboundGarbage]
+ *   The OPPONENT's inbound queue (what the player has sent and is
+ *   waiting for the opponent to absorb). When omitted (Phase-6 single-
+ *   sim with abstract bot), the bot column renders empty.
  * @property {number} [latencyMs]      Always 0 in local; reserved for online.
  */
 
@@ -190,6 +274,7 @@ export function createVersusBadge(opts) {
     getActiveModeKey,
     getOpponentSnapshot,
     getInboundGarbage,
+    getOutboundGarbage = () => ({ rows: 0, blocked: false }),
     latencyMs = 0,
   } = opts || {};
   if (!bus || !events
@@ -220,7 +305,12 @@ export function createVersusBadge(opts) {
 
   const bodyEl = document.createElement('div');
   bodyEl.className = 'tp-versus-badge__body';
-  function makeSide(labelText) {
+  /**
+   * Build a "side" column: SIDE LABEL → SCORE → caption ("TO YOU" /
+   * "TO BOT") → queue pip strip → row total. Each column is a single
+   * vertical stack so the player can read each side independently.
+   */
+  function makeSide(labelText, captionText, pipKindClass) {
     const wrap = document.createElement('div');
     wrap.className = 'tp-versus-badge__side';
     const lbl = document.createElement('span');
@@ -229,23 +319,30 @@ export function createVersusBadge(opts) {
     const num = document.createElement('span');
     num.className = 'tp-versus-badge__score';
     num.textContent = '0';
+    const caption = document.createElement('span');
+    caption.className = 'tp-versus-badge__queue-caption';
+    caption.textContent = captionText;
+    const queue = document.createElement('div');
+    queue.className = 'tp-versus-badge__queue';
+    const total = document.createElement('span');
+    total.className = 'tp-versus-badge__queue-total';
+    total.textContent = '';
     wrap.appendChild(lbl);
     wrap.appendChild(num);
-    return { wrap, num };
+    wrap.appendChild(caption);
+    wrap.appendChild(queue);
+    wrap.appendChild(total);
+    return { wrap, num, queue, total, pipKindClass };
   }
-  const youSide = makeSide('YOU');
-  const vs = document.createElement('span');
+  const youSide = makeSide('YOU', 'INCOMING TO YOU',  'tp-versus-badge__pip--inbound');
+  const vs      = document.createElement('span');
   vs.className = 'tp-versus-badge__vs';
   vs.textContent = 'vs';
-  const oppSide = makeSide('BOT');
+  const oppSide = makeSide('BOT', 'INCOMING TO BOT',  'tp-versus-badge__pip--outbound');
   bodyEl.appendChild(youSide.wrap);
   bodyEl.appendChild(vs);
   bodyEl.appendChild(oppSide.wrap);
   root.appendChild(bodyEl);
-
-  const queueEl = document.createElement('div');
-  queueEl.className = 'tp-versus-badge__queue';
-  root.appendChild(queueEl);
 
   document.body.appendChild(root);
 
@@ -262,50 +359,77 @@ export function createVersusBadge(opts) {
     }, 380);
   }
 
-  // Render the queue strip — pink pips for inbound garbage that's about to
-  // land on the player; dim cyan pips for the bot's accumulated stack
-  // (visual proxy for "how close are we to KO'ing the bot"). Hidden when
-  // both are zero to avoid empty-row noise.
-  function renderQueue() {
-    const inb = getInboundGarbage() || { rows: 0, blocked: false };
-    const opp = getOpponentSnapshot() || {};
-    queueEl.innerHTML = '';
-    const inboundCount = Math.min(QUEUE_PIP_CAP, inb.rows | 0);
-    const oppCount     = Math.min(QUEUE_PIP_CAP, opp.stackHeight | 0);
+  /**
+   * Render one side's queue column. Replaces the prior single-row
+   * mixed-color strip — each side now gets its own pip stack with
+   * readiness states (M5 spawn-delay window) and an explicit row total
+   * count below.
+   *
+   * @param {ReturnType<makeSide>} side
+   * @param {GarbageQueueState} state
+   */
+  function renderSideQueue(side, state) {
+    const { queue, total, pipKindClass } = side;
+    const totalRows = Math.max(0, state.rows | 0);
+    const blocked   = !!state.blocked;
+    queue.innerHTML = '';
+    queue.classList.toggle('is-blocked', blocked);
 
-    if (inboundCount === 0 && oppCount === 0 && !inb.blocked) {
+    if (totalRows === 0 && !blocked) {
       const empty = document.createElement('span');
       empty.className = 'tp-versus-badge__queue-empty';
-      empty.textContent = '— no garbage in flight —';
-      queueEl.appendChild(empty);
-    } else {
-      for (let i = 0; i < inboundCount; i++) {
+      empty.textContent = '— clear —';
+      queue.appendChild(empty);
+      total.textContent = '';
+      return;
+    }
+
+    // Iterate per-entry so each pip can carry its own readiness state.
+    // Falls back to a single synthetic entry when the host doesn't
+    // surface per-entry data (matches the pre-§13 caller contract).
+    const entries = Array.isArray(state.entries) && state.entries.length
+      ? state.entries
+      : [{ rows: totalRows, readyAt: 0 }];
+    const now = state.modeTimeMs | 0;
+
+    let pipCount = 0;
+    for (const entry of entries) {
+      if (pipCount >= QUEUE_PIP_CAP) break;
+      const remaining = (entry.readyAt | 0) - now;
+      const ready    = remaining <= 0;
+      const imminent = !ready && remaining <= IMMINENT_MS;
+      const rows     = entry.rows | 0;
+      for (let i = 0; i < rows && pipCount < QUEUE_PIP_CAP; i++, pipCount++) {
         const pip = document.createElement('span');
-        pip.className = 'tp-versus-badge__pip';
-        queueEl.appendChild(pip);
-      }
-      // Spacer between the two stacks if both have pips.
-      if (inboundCount > 0 && oppCount > 0) {
-        const sep = document.createElement('span');
-        sep.style.cssText = 'width:8px;display:inline-block;';
-        queueEl.appendChild(sep);
-      }
-      for (let i = 0; i < oppCount; i++) {
-        const pip = document.createElement('span');
-        pip.className = 'tp-versus-badge__pip tp-versus-badge__pip--bot';
-        queueEl.appendChild(pip);
-      }
-      if (inb.blocked) {
-        const block = document.createElement('span');
-        block.className = 'tp-versus-badge__queue-empty';
-        block.style.color = '#ff8aa0';
-        block.style.opacity = '0.95';
-        block.textContent = ' · BLOCKED';
-        queueEl.appendChild(block);
+        pip.className = `tp-versus-badge__pip ${pipKindClass}`;
+        if (!ready)   pip.classList.add('tp-versus-badge__pip--pending');
+        if (imminent) pip.classList.add('tp-versus-badge__pip--imminent');
+        queue.appendChild(pip);
       }
     }
 
-    root.classList.toggle('is-blocked', !!inb.blocked);
+    // Row-count footer. Shows total queued rows (incl. ones beyond the
+    // visible cap), plus a BLOCKED tag when capped.
+    if (blocked) {
+      total.textContent = `${totalRows} ROWS · BLOCKED`;
+      total.style.color = '#ff8aa0';
+    } else {
+      total.textContent = `${totalRows} ROW${totalRows === 1 ? '' : 'S'}`;
+      total.style.color = '';
+    }
+  }
+
+  /**
+   * Render both queues + the badge-level "is-blocked" composite flag.
+   * Driven by `tick()` (every render frame) and by garbage-event
+   * subscribers below for snappier reactions.
+   */
+  function renderQueue() {
+    const inb = getInboundGarbage()  || { rows: 0, blocked: false };
+    const out = getOutboundGarbage() || { rows: 0, blocked: false };
+    renderSideQueue(youSide, inb);
+    renderSideQueue(oppSide, out);
+    root.classList.toggle('is-blocked', !!inb.blocked || !!out.blocked);
   }
 
   function refresh() {
@@ -348,17 +472,36 @@ export function createVersusBadge(opts) {
     refresh();
   }));
 
-  // Pulse on every garbage event — both directions — so the chrome
-  // "thumps" with pressure. Cheap.
+  // Pulse + re-render on every garbage event — both directions — so the
+  // chrome "thumps" with pressure. Cheap.
   offs.push(bus.on(events.GARBAGE_SENT, () => {
     if (!isVisible()) return;
     pulse();
+    renderQueue(); // bot's queue grew
   }));
   offs.push(bus.on(events.GARBAGE_RECEIVED, () => {
     if (!isVisible()) return;
     pulse();
-    renderQueue();
+    renderQueue(); // your queue grew
   }));
+  // §12 M5: outgoing emitted by versus.onLinesCleared (raw, pre-cancel).
+  // Re-render so the bot column updates the moment a clear lands, not
+  // waiting for the next tick.
+  if (events.GARBAGE_OUTGOING) {
+    offs.push(bus.on(events.GARBAGE_OUTGOING, () => {
+      if (!isVisible()) return;
+      renderQueue();
+    }));
+  }
+  // §12 M5: cancellation eats from the queue front-first. Re-render
+  // immediately so the player sees the pip count drop on the cancellation,
+  // not lagging by a frame.
+  if (events.GARBAGE_CANCELLED) {
+    offs.push(bus.on(events.GARBAGE_CANCELLED, () => {
+      if (!isVisible()) return;
+      renderQueue();
+    }));
+  }
 
   // PIECE_LOCK fires *before* drainInboundGarbage in main.js, so our
   // post-lock render still shows the queue contents. Subscribing here

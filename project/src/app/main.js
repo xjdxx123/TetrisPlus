@@ -4853,10 +4853,42 @@ const versusBadge = createVersusBadge({
       alive:          versusBot.alive,
     };
   },
-  getInboundGarbage: () => ({
-    rows:    _queuedGarbageRowCount(),
-    blocked: game ? game.garbageBlocked : false,
-  }),
+  // Inbound queue (about to land on YOU). The badge reads `entries`
+  // and `modeTimeMs` together to compute the M5 readiness state of
+  // each pip (dim while pending, pulsing when imminent, bright when
+  // ready). Falling back to the old `{rows, blocked}`-only shape would
+  // still work — entries is documented as optional on the badge side.
+  getInboundGarbage: () => {
+    if (!game) return { rows: 0, blocked: false };
+    return {
+      rows:       game.queuedGarbageRows,
+      blocked:    game.garbageBlocked,
+      entries:    game.garbageQueue.map(e => ({ rows: e.rows | 0, readyAt: e.readyAt | 0 })),
+      modeTimeMs: game.modeTimeMs | 0,
+    };
+  },
+  // Outbound queue (about to land on the BOT — this is whatever the
+  // player has already SENT and is waiting for the bot to absorb).
+  // - Dual-sim path (VersusSession): the bot's inbound queue lives on
+  //   `versusSession.gameP2`; read it directly so the per-entry
+  //   readyAt info is available for readiness visualization.
+  // - Single-sim path (Phase-6 abstract bot, no real Game): there is
+  //   no queue — the bot's "stack height" was the Phase-6 proxy. We
+  //   return a zero-length queue here; the bot column shows "— clear —"
+  //   in that mode. Player's pressure on the bot is communicated by
+  //   the bot's stack-height reaching the death threshold instead.
+  getOutboundGarbage: () => {
+    if (versusSession) {
+      const op = versusSession.gameP2;
+      return {
+        rows:       op.queuedGarbageRows,
+        blocked:    op.garbageBlocked,
+        entries:    op.garbageQueue.map(e => ({ rows: e.rows | 0, readyAt: e.readyAt | 0 })),
+        modeTimeMs: op.modeTimeMs | 0,
+      };
+    }
+    return { rows: 0, blocked: false };
+  },
 });
 // Modern-rules callouts (plan §13 #1). Pure subscriber to the §12 events;
 // renders transient text overlays for T-spins / B2B / Perfect Clear /
