@@ -63,6 +63,7 @@ import { recordEndOfRun } from '../gameplay/end-of-run.js';
 import { pickHoleColumn } from '../gameplay/garbage.js';
 import { Game } from '../gameplay/game.js';
 import { BoardView } from '../world/board-view.js';
+import { BoardView3D } from '../world/board-view-3d.js';
 import { PhysicsBoardView } from '../world/physics-board-view.js';
 import { PhysicsSession } from './physics-session.js';
 import { VersusSession } from './versus.js';
@@ -142,11 +143,17 @@ import { CSS3DRenderer, CSS3DObject } from 'three/addons/renderers/CSS3DRenderer
 // =============================================================
 const COLS = 10;
 const ROWS = 20;
-const DEPTH = 3;          // thicker than 2D — pieces fill all 3 depth slices
+const DEPTH = 3;          // 2D-mode visual thickness — every cell gets DEPTH cubes stacked along Z so the playfield reads as a chunky slab. Force-Physics + 3D Tetris use a different depth (see DEPTH_3D below).
 const CELL = 1.0;         // cube size in world units
 const PLAY_W = COLS * CELL;
 const PLAY_H = ROWS * CELL;
 const PLAY_D = DEPTH * CELL;
+// 3D Tetris (plan v2 §2.1) — 10×10×20 well. The depth axis is real;
+// each tetracube cell gets ONE cube (no `_depth`-slice fattening like
+// 2D). cellToWorld3D maps physics-z (0..9) into scene z spanning
+// PLAY_D_3D so a back-of-well cube sits at scene z = +(PLAY_D_3D/2 - 0.5).
+const DEPTH_3D = 10;
+const PLAY_D_3D = DEPTH_3D * CELL;
 
 // Tetromino colors — saturated poster hues so each piece reads as one
 // unambiguous color even when stacked deep.
@@ -1694,6 +1701,17 @@ function cellToWorld(c, r, d) {
   );
 }
 
+// 3D Tetris coordinate map — same X/Y as 2D, but Z spans the real
+// 10-cell depth axis (PLAY_D_3D) instead of the 2D's 3-slice
+// thickness. Used by BoardView3D + the 3D mode-start branch.
+function cellToWorld3D(c, r, d) {
+  return new THREE.Vector3(
+    -PLAY_W / 2 + (c + 0.5) * CELL,
+    -PLAY_H / 2 + (r + 0.5) * CELL,
+    -PLAY_D_3D / 2 + (d + 0.5) * CELL,
+  );
+}
+
 // =============================================================
 // Game State
 // =============================================================
@@ -1867,29 +1885,34 @@ function isPhysicsMode() {
   return !!(physicsSession && physicsSession.isStarted);
 }
 
-function tryMove(dCol, dRow) {
+function tryMove(dCol, dRow, dDepth = 0) {
   if (isPhysicsMode()) {
     // Vertical (dRow) is physics-driven via gravity + soft/hard drop;
     // only the lateral axis maps to a force here. Returning true keeps
     // callers that branch on `if (tryMove(...))` from triggering the
     // grid-mode wall-bonk visual (which would compete with the body's
-    // own physical bounce).
+    // own physical bounce). dDepth ignored — Force-Physics is 2D.
     if (dCol !== 0) physicsSession.applyMove(dCol > 0 ? 1 : -1);
     return true;
   }
   if (!game) return false;
-  const moved = game.tryMove(dCol, dRow);
+  // 3D mode forwards dDepth; 2D path's tryMove ignores its third arg
+  // (Game.tryMove defaults dDepth to 0 internally for 2D pieces).
+  const moved = game.tryMove(dCol, dRow, dDepth);
   syncFromGame();
   return moved;
 }
 
-function tryRotate(dir) {
+function tryRotate(dir, axis = 'z') {
   if (isPhysicsMode()) {
-    physicsSession.applyRotate(dir);
+    // Force-Physics rotation is Z-only at this layer; the `axis` arg
+    // reaches us only from 3D-mode hotkeys (KeyW/A/S/D), which don't
+    // apply to physics gameplay.
+    if (axis === 'z') physicsSession.applyRotate(dir);
     return;
   }
   if (!game) return;
-  game.tryRotate(dir);
+  game.tryRotate(dir, axis);
   syncFromGame();
 }
 
@@ -2930,6 +2953,39 @@ Mode._wireLifecycle({
       }).catch(err => {
         console.warn('[physics] start failed:', err);
       });
+    } else if (key === '3d') {
+      // 3D Tetris (plan v2 §2.1). Game reads `rules.dimensions`
+      // (10×20×10) + `pieceSet: 'tetracubes'` automatically — we just
+      // construct it. BoardView3D parallels BoardView's contract but
+      // operates on a `[depth][rows][cols]` mesh registry, with one
+      // cube mesh per cell (no 2D-style depth-3 visual fattening
+      // because the depth axis is real here).
+      game = new Game({
+        rules,
+        bus,
+        side: 'player',
+        onEndRun: ({ reason, winner }) => endRun({ reason, winner }),
+      });
+      boardView = new BoardView3D({
+        game, bus,
+        parent: caseGroup,
+        side: 'player',
+        cols: COLS, rows: ROWS, depth: DEPTH_3D,
+        cellToWorld: cellToWorld3D,
+        makeCube, shatter, animateCubeTo, startLockAnim,
+        playSfx,
+      });
+      if (typeof versusBot !== 'undefined') versusBot.reset();
+      _detachOpponentChrome();
+      playerLabelObj.visible   = false;
+      opponentLabelObj.visible = false;
+      exitVersusCamera();
+      if (restart) {
+        resetRunState();
+      } else {
+        game.spawnPiece();
+        syncFromGame();
+      }
     } else {
       // Solo modes — single Game + single BoardView, mounted directly
       // under caseGroup at origin (the legacy layout).
@@ -3171,11 +3227,38 @@ window.addEventListener('keydown', (e) => {
       break;
     case 'ArrowUp':
     case 'KeyX':
-      tryRotate(1);
+      tryRotate(1);            // 2D + 3D: CCW around Z (screen-perpendicular)
       e.preventDefault();
       break;
     case 'KeyZ':
-      tryRotate(-1);
+      tryRotate(-1);           // 2D + 3D: CW around Z
+      e.preventDefault();
+      break;
+    case 'KeyW':
+      // 3D pitch (rotate around X axis). 2D mode: tryRotate ignores
+      // the axis arg, so KeyW is a no-op for 2D — safe to leave bound
+      // unconditionally.
+      tryRotate(1, 'x');
+      e.preventDefault();
+      break;
+    case 'KeyS':
+      tryRotate(-1, 'x');
+      e.preventDefault();
+      break;
+    case 'KeyA':
+      tryRotate(1, 'y');       // 3D yaw (rotate around Y)
+      e.preventDefault();
+      break;
+    case 'KeyD':
+      tryRotate(-1, 'y');
+      e.preventDefault();
+      break;
+    case 'KeyQ':
+      tryMove(0, 0, -1);       // 3D depth nudge — pull piece toward viewer (z-1)
+      e.preventDefault();
+      break;
+    case 'KeyE':
+      tryMove(0, 0, 1);        // 3D depth nudge — push piece away (z+1)
       e.preventDefault();
       break;
     case 'Space':

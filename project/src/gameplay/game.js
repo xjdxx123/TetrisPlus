@@ -581,15 +581,25 @@ export class Game {
    * Sets `_lastAction = 'move'` on success so T-spin detection (M2) can
    * tell that the last successful action was not a rotation.
    */
-  tryMove(dCol, dRow) {
+  tryMove(dCol, dRow, dDepth = 0) {
     if (!this._activePiece || this._gameOver || this._paused) return false;
     const nc = this._activePiece.col + dCol;
     const nr = this._activePiece.row + dRow;
-    if (this.collides(this._activePiece, nc, nr, this._activePiece.rot)) return false;
+    // Depth movement is meaningful only in 3D mode. For 2D pieces
+    // dDepth is ignored (piece.depth stays undefined → defaults to 0
+    // in collides / getPieceCells).
+    const ndOriginal = (this._activePiece.depth | 0);
+    const nd = ndOriginal + (dDepth | 0);
+    // Probe collision with the candidate pose. We pass a shallow clone
+    // so collides reads the test depth; the live piece is only mutated
+    // after the probe succeeds.
+    const candidate = { ...this._activePiece, depth: nd };
+    if (this.collides(candidate, nc, nr, this._activePiece.rot)) return false;
     this._activePiece.col = nc;
     this._activePiece.row = nr;
+    if (dDepth !== 0) this._activePiece.depth = nd;
     this._lastAction = 'move';
-    this._bus.emit(EVENTS.PIECE_MOVE, { dCol, dRow, side: this._side });
+    this._bus.emit(EVENTS.PIECE_MOVE, { dCol, dRow, dDepth, side: this._side });
     return true;
   }
 
