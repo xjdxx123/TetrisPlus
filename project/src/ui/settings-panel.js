@@ -363,6 +363,52 @@ export function createSettingsPanel(cfg) {
   startBtn.type = 'button';
   startBtn.className = 'tp-button tp-button--primary';
 
+  // Versus-only options block — visible only when mode === 'versus'.
+  // Currently hosts the bot-strength dropdown (§3.7 sub-phase 7e
+  // polish); future per-mode options (Sprint variants, Versus time-out
+  // toggle) can pile in here following the same show/hide pattern.
+  const versusOptions = document.createElement('div');
+  versusOptions.style.cssText = 'display:none; flex-direction:column; gap:6px; ' +
+    'padding: 8px 10px; margin: 6px 4px 0; border-left: 2px solid var(--accent, #6cf0ff); ' +
+    'background: rgba(108, 240, 255, 0.04); border-radius: 0 4px 4px 0;';
+  const versusOptionsLabel = document.createElement('div');
+  versusOptionsLabel.style.cssText = 'font-size:11px; color:var(--accent, #6cf0ff); ' +
+    'letter-spacing:0.12em; text-transform:uppercase; opacity:0.85;';
+  versusOptionsLabel.textContent = 'Versus';
+  versusOptions.appendChild(versusOptionsLabel);
+
+  const botRow = document.createElement('label');
+  botRow.style.cssText = 'display:flex; align-items:center; justify-content:space-between; ' +
+    'gap:10px; font-size:11px; color:var(--ink, #f3f5fb);';
+  const botRowText = document.createElement('span');
+  botRowText.textContent = 'Bot strength';
+  botRowText.style.cssText = 'opacity:0.85;';
+  const botRowSelect = document.createElement('select');
+  botRowSelect.style.cssText = 'background:var(--bg2, rgba(0,0,0,0.4)); color:var(--ink, #f3f5fb); ' +
+    'border:1px solid var(--rule, rgba(108,240,255,0.25)); border-radius:4px; ' +
+    'padding:3px 6px; font-size:11px; cursor:pointer; outline:none;';
+  const BOT_CHOICES = [
+    { value: 'casual', label: 'Casual (heuristic)' },
+    { value: 'random', label: 'Random (tutorial)' },
+    { value: 'mirror', label: 'Mirror (sparring)' },
+  ];
+  const initialStrength = (cfg.versus && cfg.versus.botStrength) || 'casual';
+  for (const c of BOT_CHOICES) {
+    const opt = document.createElement('option');
+    opt.value = c.value;
+    opt.textContent = c.label;
+    if (c.value === initialStrength) opt.selected = true;
+    botRowSelect.appendChild(opt);
+  }
+  botRowSelect.addEventListener('change', () => {
+    if (cfg.versus && typeof cfg.versus.onBotStrengthChange === 'function') {
+      cfg.versus.onBotStrengthChange(botRowSelect.value);
+    }
+  });
+  botRow.appendChild(botRowText);
+  botRow.appendChild(botRowSelect);
+  versusOptions.appendChild(botRow);
+
   function _setModeActive(m) {
     for (const [k, btn] of modeButtons) btn.classList.toggle('is-active', k === m);
     _refreshModeInfo(m);
@@ -370,9 +416,12 @@ export function createSettingsPanel(cfg) {
     // honestly ("Start Marathon" vs "Start with selected mode" vague-speak).
     const label = cfg.mode.labels[m] || m;
     startBtn.textContent = `▶ Start ${label}`;
+    // Versus-only options surface only when versus is the active mode.
+    versusOptions.style.display = (m === 'versus') ? 'flex' : 'none';
   }
   _setModeActive(cfg.mode.current);
   modePane.appendChild(modeGrid);
+  modePane.appendChild(versusOptions);
 
   // External mode-change subscription so console-side `__mode.select(...)`
   // syncs the dropdown.

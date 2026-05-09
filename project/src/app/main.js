@@ -1739,6 +1739,15 @@ const VERSUS_CAM_TARGET    = new THREE.Vector3(7, 0, 0);
 // produce real new lights at the cloned positions. Cheap to add.
 let opponentChromeClone = null;
 
+// Bot strength preference for versus mode. Persisted in
+// SETTINGS_DEFAULTS.versus.botStrength; the settings panel exposes
+// it as a select on the Mode tab. Read at Mode.start({key:'versus'})
+// and forwarded to VersusSession's BotController.
+let _versusBotStrength = (
+  (_persistedSettings.versus && _persistedSettings.versus.botStrength)
+  || 'casual'
+);
+
 let activePiece = null;
 let nextQueue = [];
 let holdPiece = null;
@@ -2272,6 +2281,109 @@ holdObj.position.set(-13, -5, 4);
 holdObj.scale.setScalar(0.025);
 cssScene.add(holdObj);
 
+// Per-side identification labels for dual-board versus mode (§3.7
+// sub-phase 7e polish). Both objects are constructed at module load
+// and toggled visible only when versusSession is active — solo modes
+// hide them entirely. Anchored above each well's top via CSS3DObject
+// so they track with camera orbit.
+function _makeSideLabel(text, hex) {
+  const el = document.createElement('div');
+  el.textContent = text;
+  el.style.cssText = `
+    font: 700 22px ui-sans-serif, system-ui, sans-serif;
+    letter-spacing: 0.32em;
+    color: ${hex};
+    text-shadow: 0 0 14px ${hex}80, 0 0 32px ${hex}40;
+    padding: 6px 18px;
+    border: 1px solid ${hex}80;
+    border-radius: 6px;
+    background: rgba(10, 14, 24, 0.55);
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+    white-space: nowrap;
+    user-select: none;
+    pointer-events: none;
+  `;
+  return el;
+}
+const playerLabelEl   = _makeSideLabel('YOU',      '#6cf0ff');
+const opponentLabelEl = _makeSideLabel('OPPONENT', '#ff6c8a');
+const playerLabelObj   = new CSS3DObject(playerLabelEl);
+const opponentLabelObj = new CSS3DObject(opponentLabelEl);
+playerLabelObj.position.set(0, PLAY_H / 2 + 2.0, 0.4);
+opponentLabelObj.position.set(OPPONENT_OFFSET_X, PLAY_H / 2 + 2.0, 0.4);
+playerLabelObj.scale.setScalar(0.025);
+opponentLabelObj.scale.setScalar(0.025);
+playerLabelObj.visible   = false;
+opponentLabelObj.visible = false;
+cssScene.add(playerLabelObj);
+cssScene.add(opponentLabelObj);
+
+// Per-side inbound-garbage indicators (§3.7 sub-phase 7e polish).
+// Shown next to each well in versus mode; hidden when queue is empty
+// or in solo modes. Updated each frame in updateHUD's versus branch.
+// The §12 M5 spawn-delay window will repurpose these into per-row
+// timer bars; for now they're a simple count readout.
+function _makeGarbageIndicator(hex) {
+  const el = document.createElement('div');
+  el.textContent = '';
+  el.style.cssText = `
+    font: 700 16px ui-sans-serif, system-ui, sans-serif;
+    letter-spacing: 0.18em;
+    color: ${hex};
+    text-shadow: 0 0 10px ${hex}80;
+    padding: 4px 10px;
+    border: 1px solid ${hex}80;
+    border-radius: 4px;
+    background: rgba(10, 14, 24, 0.7);
+    white-space: nowrap;
+    user-select: none;
+    pointer-events: none;
+  `;
+  return el;
+}
+const playerGarbageEl   = _makeGarbageIndicator('#ff6c8a'); // pink — DANGER, incoming on you
+const opponentGarbageEl = _makeGarbageIndicator('#6cf0ff'); // cyan — what YOU sent them
+const playerGarbageObj   = new CSS3DObject(playerGarbageEl);
+const opponentGarbageObj = new CSS3DObject(opponentGarbageEl);
+// Anchored to the right of each well (-PLAY_W/2 = -5 left edge,
+// +PLAY_W/2 = +5 right edge; offset further to clear the chrome).
+playerGarbageObj.position.set(PLAY_W / 2 + 1.5, 0, 0.4);
+opponentGarbageObj.position.set(OPPONENT_OFFSET_X + PLAY_W / 2 + 1.5, 0, 0.4);
+playerGarbageObj.scale.setScalar(0.025);
+opponentGarbageObj.scale.setScalar(0.025);
+playerGarbageObj.visible   = false;
+opponentGarbageObj.visible = false;
+cssScene.add(playerGarbageObj);
+cssScene.add(opponentGarbageObj);
+
+/**
+ * Refresh the per-side garbage indicators. Reads the current queues
+ * from `versusSession.gameP1` (incoming on you) and `gameP2` (what
+ * you've sent them that hasn't applied yet). No-op outside versus.
+ */
+function _updateGarbageIndicators() {
+  if (!versusSession) {
+    playerGarbageObj.visible   = false;
+    opponentGarbageObj.visible = false;
+    return;
+  }
+  const playerInbound  = versusSession.gameP1.queuedGarbageRows;
+  const opponentInbound = versusSession.gameP2.queuedGarbageRows;
+  if (playerInbound > 0) {
+    playerGarbageEl.textContent = `+${playerInbound} ▲`;
+    playerGarbageObj.visible = true;
+  } else {
+    playerGarbageObj.visible = false;
+  }
+  if (opponentInbound > 0) {
+    opponentGarbageEl.textContent = `+${opponentInbound} ▲`;
+    opponentGarbageObj.visible = true;
+  } else {
+    opponentGarbageObj.visible = false;
+  }
+}
+
 // Make panels draggable in 3D space (project mouse onto a plane parallel to camera)
 function makeDraggable(el, obj) {
   let dragging = false;
@@ -2402,6 +2514,8 @@ function pulsePanel(el, intensity) {
   inner.classList.add('panel-pulse');
 }
 function updateHUD() {
+  // Per-side garbage indicators (versus only; cheap no-op otherwise).
+  _updateGarbageIndicators();
   const dScore = score - _prevScore;
   const dLines = lines - _prevLines;
   // Big score deltas (line clears) tween from displayed → target over 0.4s
@@ -2494,7 +2608,7 @@ function endRun({ reason = 'topout', winner } = {}) {
     winner = 'opponent';
   }
   if (reason === 'topout') {
-    bus.emit(EVENTS.GAME_OVER, { score, lines, level });
+    bus.emit(EVENTS.GAME_OVER, { score, lines, level, winner });
   }
   // High-score / per-mode best / cumulative totals — extracted helper.
   // Run BEFORE the player can hit "Play Again" so a mid-cascade tab close
@@ -2647,7 +2761,7 @@ Mode._wireLifecycle({
         parent: caseGroup,
         rendererDeps: { cellToWorld, makeCube, shatter, animateCubeTo, startLockAnim, playSfx },
         opponentMode: 'bot',
-        opponentStrength: 'casual',
+        opponentStrength: _versusBotStrength,
         playerInputMode: 'host',
         inputTarget: window,
         busP1: bus,
@@ -2656,10 +2770,16 @@ Mode._wireLifecycle({
           // does stats persistence + MODE_END. The `_endRunInvoked`
           // guard covers the case where both sides signal in one tick
           // (single-shot per run).
+          // Cinematic camera zoom on the loser's well so the moment
+          // reads. The KO side is whichever topped out FIRST: that's
+          // `side` for a real topout, or the opposite side for the
+          // session's force-topout follow-up.
           if (side === 'player') {
+            _focusKOCamera('player');
             const winner = reason === 'topout' ? 'opponent' : undefined;
             endRun({ reason, winner });
           } else if (side === 'opponent') {
+            _focusKOCamera('opponent');
             // Bot KO — player wins.
             endRun({ reason: 'topout', winner: 'player' });
           }
@@ -2674,6 +2794,9 @@ Mode._wireLifecycle({
       versusSession.dualBoard.rightAnchor.position.x = OPPONENT_OFFSET_X;
       _attachOpponentChrome();
       _attachOpponentViz();
+      // Per-side labels visible only in versus.
+      playerLabelObj.visible   = true;
+      opponentLabelObj.visible = true;
       // Alias the player side into the legacy refs so the gameplay
       // function wrappers (tryMove, hardDrop, etc.) keep driving
       // gameP1 unchanged.
@@ -2708,6 +2831,9 @@ Mode._wireLifecycle({
       });
       if (typeof versusBot !== 'undefined') versusBot.reset();
       _detachOpponentChrome();
+      // Hide per-side labels in solo modes.
+      playerLabelObj.visible   = false;
+      opponentLabelObj.visible = false;
       exitVersusCamera();
       if (restart) {
         resetRunState();
@@ -3018,6 +3144,42 @@ function exitVersusCamera() {
 }
 
 /**
+ * Cinematic zoom-in on the loser's well at KO, then settle back to
+ * the versus midpoint after `restoreDelayMs`. Called from versusSession
+ * `onSideEnd` so the user gets a clear "look at where it ended"
+ * moment before the game-over overlay covers everything.
+ *
+ * @param {string} side  'player' | 'opponent'
+ */
+function _focusKOCamera(side) {
+  const wellX = side === 'opponent' ? OPPONENT_OFFSET_X : 0;
+  // Pull the camera in close to the loser's well — angle still matches
+  // the versus default's (camera 14 units right of target, ~30 z), just
+  // tighter.
+  const focusPos    = new THREE.Vector3(wellX + 8, 4, 22);
+  const focusTarget = new THREE.Vector3(wellX, 0, 0);
+  camTween.from       = camera.position.clone();
+  camTween.to         = focusPos;
+  camTween.fromTarget = controls.target.clone();
+  camTween.toTarget   = focusTarget;
+  camTween.t   = 0;
+  camTween.dur = 0.45;
+  camTween.active = true;
+  // After the focus tween + a brief hold, restore to the versus midpoint
+  // shot so the gameOver overlay reads against the full layout.
+  setTimeout(() => {
+    if (!versusSession) return; // user already left versus mode
+    camTween.from       = camera.position.clone();
+    camTween.to         = VERSUS_CAM_POS.clone();
+    camTween.fromTarget = controls.target.clone();
+    camTween.toTarget   = VERSUS_CAM_TARGET.clone();
+    camTween.t   = 0;
+    camTween.dur = 0.7;
+    camTween.active = true;
+  }, 850);
+}
+
+/**
  * Build (or rebuild) the opponent's chrome by cloning chromeGroup
  * and shifting it to OPPONENT_OFFSET_X. Idempotent — calling twice
  * disposes the prior clone first. Called from versus onStart.
@@ -3076,6 +3238,11 @@ function _attachOpponentViz() {
     // rows is sorted top-down — last entry is the bottom-most cleared row.
     const anchorRow = rows[rows.length - 1];
     triggerScorePopup(scoreDelta, anchorRow, overallColor, OPPONENT_OFFSET_X);
+    // Triple/tetris clears get the shockwave ring too, anchored at the
+    // opponent's well. Same threshold (rowCount >= 3) the player gets.
+    if (rows.length >= 3) {
+      triggerLineClearShockwave(rows, overallColor, rows.length, OPPONENT_OFFSET_X);
+    }
   }));
 }
 
@@ -3402,12 +3569,14 @@ function triggerScorePopup(amount, rowIndex, color, worldX = 0) {
 // where the popup text lands. Same pool, same scaling curve as before — we
 // just lift the gate decision out to the orchestrator.
 const _orchShockwavePos = new THREE.Vector3();
-function triggerLineClearShockwave(rows, color, rowCount) {
+function triggerLineClearShockwave(rows, color, rowCount, worldX = 0) {
   // `rows` is sorted top-down by clearLines (largest row index first), so
-  // the last entry is the bottom-most cleared row.
+  // the last entry is the bottom-most cleared row. `worldX` defaults to 0
+  // (player's well center); versus polish passes OPPONENT_OFFSET_X for
+  // the bot's clears so the ring expands from the opponent's well.
   const bottomRow = rows[rows.length - 1];
   const worldY = -PLAY_H / 2 + (bottomRow + 0.5) * CELL;
-  _orchShockwavePos.set(0, worldY, 1.5);
+  _orchShockwavePos.set(worldX, worldY, 1.5);
   // intensity drives ring radius (peakScale = 4 + intensity * 1.4); using
   // rowCount keeps the previous curve (triple→8.2, tetris→9.6).
   triggerShockwave(_orchShockwavePos, color, rowCount);
@@ -3902,10 +4071,25 @@ registerDirector(bus, {
   },
 });
 
-bus.on(EVENTS.GAME_OVER, ({ score, lines, level }) => {
+bus.on(EVENTS.GAME_OVER, ({ score, lines, level, winner }) => {
   document.getElementById('goScore').textContent = score.toLocaleString();
   document.getElementById('goLines').textContent = lines;
   document.getElementById('goLevel').textContent = level;
+  // Versus mode rewrites the overlay text so the player can tell at a
+  // glance whether they won or lost. Solo modes keep the legacy
+  // "Shattered / The stack reached the top" copy.
+  const titleEl    = document.getElementById('goTitle');
+  const subtitleEl = document.getElementById('goSubtitle');
+  if (Mode.current === 'versus' && winner === 'player') {
+    titleEl.textContent    = 'Victory';
+    subtitleEl.textContent = 'Your opponent topped out';
+  } else if (Mode.current === 'versus' && winner === 'opponent') {
+    titleEl.textContent    = 'Defeat';
+    subtitleEl.textContent = 'Your stack reached the top';
+  } else {
+    titleEl.textContent    = 'Shattered';
+    subtitleEl.textContent = 'The stack reached the top';
+  }
   playVoice('manbaout');
 
   // G20: shatter the entire stack as a top-down cascade so the case visibly
@@ -4297,6 +4481,9 @@ function _persistSettingsSnapshot() {
       bgmTrackIndex: bgmPlaylist.index,
     },
     mode: Mode.current,
+    versus: {
+      botStrength: _versusBotStrength,
+    },
     // Snapshot the panel's pose AND its current visibility so a player
     // who hides the panel keeps it hidden on next launch.
     panel: {
@@ -4450,6 +4637,22 @@ const settingsPanel = createSettingsPanel({
       Mode.start({ restart: true });
     },
     onChange: (handler) => Mode.onChange(handler),
+  },
+
+  // Versus-only options (§3.7 sub-phase 7e polish). Bot strength is
+  // surfaced as a Mode-tab select that's only shown when the active
+  // mode is versus. The change callback updates the live preference;
+  // the next Mode.start({key:'versus'}) picks it up — existing rounds
+  // keep their original BotController so a strength flip mid-match
+  // doesn't surprise the player.
+  versus: {
+    botStrength: _versusBotStrength,
+    onBotStrengthChange: (s) => {
+      _versusBotStrength = s;
+      if (!_persistedSettings.versus) _persistedSettings.versus = { botStrength: s };
+      _persistedSettings.versus.botStrength = s;
+      _persistSettingsSnapshot();
+    },
   },
 
   stats: {
