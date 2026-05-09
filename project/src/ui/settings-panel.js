@@ -27,6 +27,7 @@ import { makeDraggableRotatable } from './draggable-rotatable.js';
 import {
   formatModeBestPrimary,
   formatModeBestSecondary,
+  formatModeBestModern,
   formatModeBestSummary,
   formatModeGoalAndDuration,
   formatTimeFriendly,
@@ -486,6 +487,11 @@ export function createSettingsPanel(cfg) {
       const best = (s.modeBests && s.modeBests[m]) || {};
       const primary   = formatModeBestPrimary(m, best);
       const secondary = formatModeBestSecondary(m, best);
+      // Plan v2 §1.1 — modern-rules tertiary line (Best B2B / combo /
+      // perfect clears / T-spin clears / cancelled best). Only renders
+      // when at least one modern field has a non-zero value, so a
+      // fresh-install slot stays at the existing two-line layout.
+      const modern    = formatModeBestModern(m, best);
 
       const row = document.createElement('div');
       row.className = 'tp-stat-row';
@@ -495,15 +501,30 @@ export function createSettingsPanel(cfg) {
       `;
       statsBody.appendChild(row);
 
+      // Sub-row(s) — `secondary` and `modern` are independent. Render
+      // each at the same indent + dim treatment as the existing
+      // Phase-7 sub-row so the visual hierarchy reads "headline,
+      // attempts/lines context, modern-rules milestones".
+      const subStyle = 'padding-top:0; padding-bottom:6px; opacity:0.65; font-size:9.5px;';
       if (secondary) {
         const sub = document.createElement('div');
         sub.className = 'tp-stat-row';
-        sub.style.cssText = 'padding-top:0; padding-bottom:6px; opacity:0.65; font-size:9.5px;';
+        sub.style.cssText = subStyle;
         sub.innerHTML = `
           <span class="tp-stat-row__label" style="font-size:9.5px;"></span>
           <span class="tp-stat-row__value" style="font-size:9.5px;">${secondary}</span>
         `;
         statsBody.appendChild(sub);
+      }
+      if (modern) {
+        const subM = document.createElement('div');
+        subM.className = 'tp-stat-row';
+        subM.style.cssText = subStyle;
+        subM.innerHTML = `
+          <span class="tp-stat-row__label" style="font-size:9.5px;"></span>
+          <span class="tp-stat-row__value" style="font-size:9.5px;">${modern}</span>
+        `;
+        statsBody.appendChild(subM);
       }
     }
 

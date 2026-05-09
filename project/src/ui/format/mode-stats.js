@@ -177,6 +177,66 @@ export function formatModeBestSummary(modeKey, best) {
 }
 
 /**
+ * Modern-rules tertiary line (plan_gameplay_2.md §1.1) — surfaces the
+ * §12 / §13-polish stats persisted by `gameplay/end-of-run.js`:
+ *   - `bestB2bChain`         : highest Back-to-Back chain reached.
+ *   - `bestCombo`            : highest combo step reached.
+ *   - `perfectClears`        : cumulative count across runs.
+ *   - `tspinClears`          : cumulative count across runs.
+ *   - `bestGarbageCancelled` : versus-only — highest single-round eat.
+ *
+ * Each field is gated on `> 0` so a fresh slot returns null (no row).
+ * Sprint's slot only defines `bestCombo` (its lineScore is 0, so the
+ * other modern fields are intentionally absent from its storage
+ * default and silently skipped here).
+ *
+ * Returns `null` when no field has a meaningful value — the settings
+ * panel uses `null` as "skip this row".
+ *
+ * @param {string} modeKey
+ * @param {any}    best
+ * @returns {string|null}
+ */
+export function formatModeBestModern(modeKey, best) {
+  best = best || {};
+  const parts = [];
+  const b2b   = best.bestB2bChain         | 0;
+  const combo = best.bestCombo            | 0;
+  const pc    = best.perfectClears        | 0;
+  const tsc   = best.tspinClears          | 0;
+  const cnx   = best.bestGarbageCancelled | 0;
+
+  switch (modeKey) {
+    case 'sprint': {
+      // Sprint only tracks bestCombo — the other modern fields aren't
+      // in its storage default.
+      if (combo > 0) parts.push(`best combo ×${combo}`);
+      break;
+    }
+    case 'versus': {
+      if (b2b   > 0) parts.push(`best B2B ×${b2b}`);
+      if (combo > 0) parts.push(`best combo ×${combo}`);
+      if (pc    > 0) parts.push(`${formatCount(pc, { zeroIsReal: true })} perfect clear${pc === 1 ? '' : 's'}`);
+      if (tsc   > 0) parts.push(`${formatCount(tsc, { zeroIsReal: true })} T-spin clear${tsc === 1 ? '' : 's'}`);
+      if (cnx   > 0) parts.push(`${formatCount(cnx, { zeroIsReal: true })} cancelled best`);
+      break;
+    }
+    case 'classic':
+    case 'marathon':
+    case 'ultra':
+    case 'zen':
+    default: {
+      if (b2b   > 0) parts.push(`best B2B ×${b2b}`);
+      if (combo > 0) parts.push(`best combo ×${combo}`);
+      if (pc    > 0) parts.push(`${formatCount(pc, { zeroIsReal: true })} perfect clear${pc === 1 ? '' : 's'}`);
+      if (tsc   > 0) parts.push(`${formatCount(tsc, { zeroIsReal: true })} T-spin clear${tsc === 1 ? '' : 's'}`);
+      break;
+    }
+  }
+  return parts.length ? parts.join(' · ') : null;
+}
+
+/**
  * Goal-line text shown above the mode-button grid. Mirrors `Mode.config(key)`
  * but adds runtime tweaks (e.g., reading the live multiplier instead of a
  * baked string). v1: just returns config.goalLabel.

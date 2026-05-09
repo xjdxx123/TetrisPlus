@@ -5,6 +5,7 @@ import {
   formatTimeFriendly,
   formatModeBestPrimary,
   formatModeBestSecondary,
+  formatModeBestModern,
   formatModeBestSummary,
   formatModeGoalAndDuration,
   _DEFAULT_DASH,
@@ -169,6 +170,90 @@ describe('formatModeBestSummary', () => {
   it('returns primary alone when no secondary is meaningful', () => {
     // Marathon with score but no attempts data → primary only.
     expect(formatModeBestSummary('marathon', { score: 1000 })).toBe((1000).toLocaleString());
+  });
+});
+
+describe('formatModeBestModern (plan_gameplay_2.md §1.1)', () => {
+  it('returns null on a fresh slot (all zeros)', () => {
+    expect(formatModeBestModern('classic',  {})).toBeNull();
+    expect(formatModeBestModern('marathon', {})).toBeNull();
+    expect(formatModeBestModern('sprint',   {})).toBeNull();
+    expect(formatModeBestModern('ultra',    {})).toBeNull();
+    expect(formatModeBestModern('zen',      {})).toBeNull();
+    expect(formatModeBestModern('versus',   {})).toBeNull();
+  });
+
+  it('classic: B2B / combo / PC / T-spin clears in declaration order', () => {
+    const s = formatModeBestModern('classic', {
+      bestB2bChain: 4, bestCombo: 9, perfectClears: 12, tspinClears: 47,
+    });
+    expect(s).toBe('best B2B ×4 · best combo ×9 · 12 perfect clears · 47 T-spin clears');
+  });
+
+  it('classic: only renders fields with > 0 values', () => {
+    expect(formatModeBestModern('classic', { bestB2bChain: 3 })).toBe('best B2B ×3');
+    expect(formatModeBestModern('classic', { perfectClears: 2 })).toBe('2 perfect clears');
+    expect(formatModeBestModern('classic', { tspinClears: 1 })).toBe('1 T-spin clear');
+  });
+
+  it('singular vs plural for perfect clears + T-spin clears', () => {
+    const a = formatModeBestModern('classic', { perfectClears: 1, tspinClears: 1 });
+    expect(a).toBe('1 perfect clear · 1 T-spin clear');
+    const b = formatModeBestModern('classic', { perfectClears: 2, tspinClears: 5 });
+    expect(b).toBe('2 perfect clears · 5 T-spin clears');
+  });
+
+  it('sprint: only bestCombo (other modern fields are intentionally absent)', () => {
+    const s = formatModeBestModern('sprint', {
+      bestB2bChain: 4, bestCombo: 8, perfectClears: 12, tspinClears: 47,
+    });
+    expect(s).toBe('best combo ×8');
+  });
+
+  it('sprint with no combo record returns null', () => {
+    expect(formatModeBestModern('sprint', { bestCombo: 0 })).toBeNull();
+  });
+
+  it('versus: includes bestGarbageCancelled in addition to common fields', () => {
+    const s = formatModeBestModern('versus', {
+      bestB2bChain: 5, bestCombo: 7, perfectClears: 3, tspinClears: 14,
+      bestGarbageCancelled: 28,
+    });
+    expect(s).toBe('best B2B ×5 · best combo ×7 · 3 perfect clears · 14 T-spin clears · 28 cancelled best');
+  });
+
+  it('versus: cancelled-best alone surfaces as a single chip', () => {
+    expect(formatModeBestModern('versus', { bestGarbageCancelled: 9 })).toBe('9 cancelled best');
+  });
+
+  it('Marathon / Ultra / Zen share the classic formatter', () => {
+    const stats = { bestB2bChain: 2, perfectClears: 1 };
+    const expected = 'best B2B ×2 · 1 perfect clear';
+    expect(formatModeBestModern('marathon', stats)).toBe(expected);
+    expect(formatModeBestModern('ultra',    stats)).toBe(expected);
+    expect(formatModeBestModern('zen',      stats)).toBe(expected);
+  });
+
+  it('safe against undefined best', () => {
+    expect(formatModeBestModern('classic')).toBeNull();
+    expect(formatModeBestModern('sprint', undefined)).toBeNull();
+  });
+
+  it('uses locale separators on large counts', () => {
+    expect(formatModeBestModern('classic', { tspinClears: 1234 })).toBe('1,234 T-spin clears');
+  });
+
+  it('coerces malformed inputs defensively (NaN→0, neg→filtered, str→int)', () => {
+    // `| 0` rules:
+    //   NaN  → 0          (filtered by > 0 gate)
+    //   -3   → -3         (filtered by > 0 gate)
+    //   '4'  → 4          (string coerced to int — rendered)
+    //   1.7  → 1          (truncated — rendered as "1 T-spin clear")
+    // The function never throws on bad input; bad fields silently
+    // disappear, valid ones still render.
+    expect(formatModeBestModern('classic', {
+      bestB2bChain: NaN, bestCombo: -3, perfectClears: '4', tspinClears: 1.7,
+    })).toBe('4 perfect clears · 1 T-spin clear');
   });
 });
 
