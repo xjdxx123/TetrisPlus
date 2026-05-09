@@ -102,6 +102,12 @@ export function formatModeBestPrimary(modeKey, best) {
       // Falls back to dash when nothing has been scored yet.
       return formatCount(best.score);
     }
+    case '3d': {
+      // 3D Tetris's headline is the single-run high score (1k / 3k /
+      // 5k / 8k × level per layer cleared). Same fallback shape as
+      // physics — dash on a fresh slot.
+      return formatCount(best.score);
+    }
     case 'classic':
     default:
       return formatCount(best.score);
@@ -165,6 +171,19 @@ export function formatModeBestSecondary(modeKey, best) {
       const parts = [];
       if (bestRun > 0) parts.push(`best run ${formatCount(bestRun, { zeroIsReal: true })} layers`);
       if (total > 0)   parts.push(`${formatCount(total, { zeroIsReal: true })} layers total`);
+      return parts.join(' · ');
+    }
+    case '3d': {
+      // 3D shows total layers cleared cumulatively + the best single-
+      // lock clear (1..4 layers; 4 is the 3D "Tetris" — the 8000-pt
+      // payoff). bestLayerCount is "what's the most layers I've ever
+      // popped at once", not "best run length".
+      const total = best.totalLayersCleared || 0;
+      const peak  = best.bestLayerCount || 0;
+      if (total === 0 && peak === 0) return null;
+      const parts = [];
+      if (peak  > 0) parts.push(`best ${peak}-layer clear`);
+      if (total > 0) parts.push(`${formatCount(total, { zeroIsReal: true })} layers total`);
       return parts.join(' · ');
     }
     case 'classic':

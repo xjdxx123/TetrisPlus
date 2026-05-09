@@ -169,9 +169,12 @@ describe('Game — getPieceCells / collides', () => {
     const { game } = makeGame();
     const cells = game.getPieceCells({ key: 'I', col: 3, row: 18, rot: 0 });
     // Shape's row 1 is filled, mapped to board row = 18 + (3-1) = 20.
+    // 2D pieces always report `depth: 0` (plan v2 §2.1 Phase B): the
+    // field is present uniformly so 3D-aware callers don't have to
+    // branch on its presence.
     expect(cells).toEqual([
-      { col: 3, row: 20 }, { col: 4, row: 20 },
-      { col: 5, row: 20 }, { col: 6, row: 20 },
+      { col: 3, row: 20, depth: 0 }, { col: 4, row: 20, depth: 0 },
+      { col: 5, row: 20, depth: 0 }, { col: 6, row: 20, depth: 0 },
     ]);
   });
 
@@ -781,9 +784,14 @@ describe('Game — serialize / restore', () => {
     game.spawnPiece('T');
     game.tryMove(2, 0);
     const blob = game.serialize();
-    expect(blob.v).toBe(1);
+    // v=2 — plan v2 §2.1 Phase B bumped the format when board became
+    // a 3D `[depth][row][col]` array. `restore()` still accepts v1
+    // blobs by loading the 2D `[row][col]` payload into the front
+    // depth-slice.
+    expect(blob.v).toBe(2);
     expect(blob.cols).toBe(10);
     expect(blob.rows).toBe(20);
+    expect(blob.depth).toBe(1);
     expect(blob.activePiece.key).toBe('T');
     expect(blob.activePiece.col).toBe(5); // 3 + 2
     // No undefineds — JSON-roundtrippable.
@@ -1792,5 +1800,198 @@ describe('Game — side tag in event payloads', () => {
         expect(e.payload.side).toBe('opponent');
       }
     }
+  });
+});
+
+// ─── 3D mode (plan v2 §2.1 Phase B) ───────────────────────────────────
+
+/** Build a Game with the 3d rules pack — depth=10, tetracubes piece library. */
+function make3DGame(extra = {}) {
+  const bus = new EventBus({ replayBufferSize: 0, recorderSize: 0 });
+  const rules = buildRules('3d');
+  const game = new Game({ rules, bus, rng: seededRng(1), ...extra });
+  return { game, bus, rules };
+}
+
+describe('Game — 3D construction (plan v2 §2.1 Phase B)', () => {
+  it('reads dimensions from rules.dimensions (10×20×10)', () => {
+    const { game } = make3DGame();
+    expect(game.cols).toBe(10);
+    expect(game.rows).toBe(20);
+    expect(game.depth).toBe(10);
+    expect(game.pieceSet).toBe('tetracubes');
+  });
+
+  it('boardLayers exposes a `_depth × _rows × _cols` 3D array', () => {
+    const { game } = make3DGame();
+    expect(game.boardLayers).toHaveLength(10);
+    for (const layer of game.boardLayers) {
+      expect(layer).toHaveLength(20);
+      expect(layer[0]).toHaveLength(10);
+    }
+  });
+
+  it('the 2D `board` accessor still returns the front depth-slice (legacy compat)', () => {
+    const { game } = make3DGame();
+    expect(game.board).toBe(game.boardLayers[0]);
+    expect(game.board).toHaveLength(20);
+  });
+
+  it('2D modes get depth=1 and a single-element boardLayers (backward compat)', () => {
+    const { game } = makeGame();
+    expect(game.depth).toBe(1);
+    expect(game.boardLayers).toHaveLength(1);
+    expect(game.pieceSet).toBe('tetrominoes');
+  });
+});
+
+describe('Game — 3D piece spawn (plan v2 §2.1 Phase B)', () => {
+  it('spawnPiece picks from the 8-tetracube bag', () => {
+    const { game } = make3DGame();
+    game.spawnPiece();
+    expect(game.activePiece).not.toBeNull();
+    // 3D piece keys: I O T L S B SR SL.
+    expect(['I','O','T','L','S','B','SR','SL']).toContain(game.activePiece.key);
+  });
+
+  it('spawnPiece centers the piece in the 10×10 footprint at depth = (DEPTH-2)/2', () => {
+    const { game } = make3DGame();
+    game.spawnPiece('T');
+    expect(game.activePiece.col).toBe((game.cols - 2) >> 1);
+    expect(game.activePiece.row).toBe(game.rows - 2);
+    expect(game.activePiece.depth).toBe((game.depth - 2) >> 1);
+  });
+
+  it('spawnPiece caches the piece cells at spawn time', () => {
+    const { game } = make3DGame();
+    game.spawnPiece('I');
+    expect(Array.isArray(game.activePiece.cells)).toBe(true);
+    expect(game.activePiece.cells.length).toBeGreaterThan(0);
+  });
+
+  it('spawnPiece colors come from TETRACUBE_COLORS', () => {
+    const { game } = make3DGame();
+    game.spawnPiece('T');
+    expect(game.activePiece.color).toBe(0xb84cff); // T color from TETRACUBE_COLORS
+  });
+});
+
+describe('Game — 3D getPieceCells / collides (plan v2 §2.1 Phase B)', () => {
+  it('getPieceCells returns {col,row,depth} triples for a tetracube', () => {
+    const { game } = make3DGame();
+    game.spawnPiece('I'); // [[0,0,0],[1,0,0],[2,0,0],[3,0,0]] — flat I along X
+    const cells = game.getPieceCells(game.activePiece);
+    expect(cells).toHaveLength(4);
+    for (const cell of cells) {
+      expect(cell).toHaveProperty('col');
+      expect(cell).toHaveProperty('row');
+      expect(cell).toHaveProperty('depth');
+    }
+  });
+
+  it('collides flags out-of-Z bounds (front face / back face of the well)', () => {
+    const { game } = make3DGame();
+    game.spawnPiece('I');
+    const piece = game.activePiece;
+    // Move the piece so its leftmost cell is at depth=0 — should NOT collide.
+    expect(game.collides(piece, piece.col, piece.row, piece.rot)).toBe(false);
+    // Forge a piece with depth=DEPTH-1 (back face); the I-tetracube at base
+    // orientation only spans z=0 so still in-bounds.
+    const back = { ...piece, depth: game.depth - 1 };
+    expect(game.collides(back, back.col, back.row, back.rot)).toBe(false);
+    // Past the back face → collision.
+    const past = { ...piece, depth: game.depth };
+    expect(game.collides(past, past.col, past.row, past.rot)).toBe(true);
+  });
+
+  it('collides flags 2D-style col / row out-of-bounds in 3D too', () => {
+    const { game } = make3DGame();
+    game.spawnPiece('I');
+    const piece = game.activePiece;
+    expect(game.collides(piece, -1, piece.row, piece.rot)).toBe(true);
+    expect(game.collides(piece, piece.col, -1, piece.rot)).toBe(true);
+  });
+});
+
+describe('Game — 3D lock + layer detection (plan v2 §2.1 Phase B)', () => {
+  it('lockPiece writes to the right depth slice (not slice 0)', () => {
+    const { game } = make3DGame();
+    game.spawnPiece('O'); // 2×2 square in XY plane (z=0 in base orientation)
+    const piece = game.activePiece;
+    // O's base orientation is z=0 so its cells should land in
+    // boardLayers[piece.depth] only.
+    game.lockPiece();
+    const myLayer = game.boardLayers[piece.depth];
+    let count = 0;
+    for (const row of myLayer) {
+      for (const cell of row) {
+        if (cell !== null) count++;
+      }
+    }
+    expect(count).toBe(4);
+    // Other depth slices stay untouched.
+    for (let d = 0; d < game.depth; d++) {
+      if (d === piece.depth) continue;
+      for (const row of game.boardLayers[d]) {
+        for (const cell of row) {
+          expect(cell).toBeNull();
+        }
+      }
+    }
+  });
+
+  it('_collectFullRows requires every (col, depth) at row Y to be filled', () => {
+    const { game } = make3DGame();
+    // Fill ALL (col, depth) at row 0 — full 3D layer.
+    for (let d = 0; d < game.depth; d++) {
+      for (let c = 0; c < game.cols; c++) {
+        game.boardLayers[d][0][c] = 0xff0000;
+      }
+    }
+    expect(game._collectFullRows()).toEqual([0]);
+  });
+
+  it('_collectFullRows does NOT report a partial fill (single z-slice full)', () => {
+    const { game } = make3DGame();
+    // Fill ONLY the front slice at row 0 — looks like a "full row" in 2D
+    // but is just a single z-slice in 3D. Should NOT register as a full
+    // layer.
+    for (let c = 0; c < game.cols; c++) {
+      game.boardLayers[0][0][c] = 0xff0000;
+    }
+    expect(game._collectFullRows()).toEqual([]);
+  });
+});
+
+describe('Game — 3D serialize / restore (plan v2 §2.1 Phase B)', () => {
+  it('serialize includes depth + 3D-shaped board', () => {
+    const { game } = make3DGame();
+    game.spawnPiece('T');
+    const blob = game.serialize();
+    expect(blob.v).toBe(2);
+    expect(blob.depth).toBe(10);
+    expect(blob.board).toHaveLength(10);
+    expect(blob.board[0]).toHaveLength(20);
+    expect(blob.board[0][0]).toHaveLength(10);
+  });
+
+  it('restore round-trips the 3D board', () => {
+    const a = make3DGame().game;
+    a.spawnPiece('I');
+    a.lockPiece();
+    const blob = a.serialize();
+
+    const b = make3DGame().game;
+    b.restore(blob);
+    expect(b.depth).toBe(10);
+    // Verify the lock made it through — count non-null cells across
+    // all depth slices.
+    let aCount = 0, bCount = 0;
+    for (let d = 0; d < a.depth; d++) {
+      for (const row of a.boardLayers[d]) for (const cell of row) if (cell !== null) aCount++;
+      for (const row of b.boardLayers[d]) for (const cell of row) if (cell !== null) bCount++;
+    }
+    expect(bCount).toBe(aCount);
+    expect(bCount).toBeGreaterThan(0);
   });
 });

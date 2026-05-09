@@ -23,6 +23,7 @@
 
 import { EVENTS } from './events.js';
 import { PIECES, PIECE_COLORS, PIECE_KEYS } from './pieces.js';
+import { TETRACUBES, TETRACUBE_KEYS, TETRACUBE_COLORS } from './experimental/3d/tetracubes.js';
 import { getKickOffsets, nextRotation } from './rotation.js';
 import { detectTSpin } from './t-spin.js';
 import { perfectClearBonus } from './scoring.js';
@@ -30,6 +31,7 @@ import { createSeededRng } from '../shared/random/seeded.js';
 
 const DEFAULT_COLS = 10;
 const DEFAULT_ROWS = 20;
+const DEFAULT_DEPTH = 1; // 2D modes; 3D mode (rules.dimensions.DEPTH) sets this to 10.
 const GARBAGE_QUEUE_CAP_ROWS = 20;
 const GARBAGE_COLOR = 0x808080;
 // Modern-rules spawn-delay window (plan §12 M5). When a piece of garbage
@@ -83,6 +85,30 @@ function avgRowColor(boardRow) {
           (Math.round(b / n) & 0xff);
 }
 
+/**
+ * Average color across a full Y-slab — every (col, depth) at the
+ * given row. For 2D modes (depth=1) this collapses to `avgRowColor`
+ * on the front slice. For 3D it folds all slices into one mean
+ * color, which is what LINE_CLEAR needs to drive the shockwave hue.
+ */
+function avgLayerColor(board3D, rowIdx, depth) {
+  let r = 0, g = 0, b = 0, n = 0;
+  for (let d = 0; d < depth; d++) {
+    const row = board3D[d][rowIdx];
+    for (const cell of row) {
+      if (cell == null) continue;
+      r += (cell >> 16) & 0xff;
+      g += (cell >> 8)  & 0xff;
+      b += cell & 0xff;
+      n++;
+    }
+  }
+  if (n === 0) return 0xffffff;
+  return ((Math.round(r / n) & 0xff) << 16) |
+         ((Math.round(g / n) & 0xff) << 8)  |
+          (Math.round(b / n) & 0xff);
+}
+
 /** Mean of an array of hex colors. */
 function meanColor(colors) {
   if (!colors.length) return 0xffffff;
@@ -107,8 +133,23 @@ export class Game {
     this._rules    = opts.rules;
     this._bus      = opts.bus;
     this._side     = opts.side || 'player';
-    this._cols     = opts.cols || DEFAULT_COLS;
-    this._rows     = opts.rows || DEFAULT_ROWS;
+    // Dimensions — rules.dimensions takes precedence over opts so the
+    // 3D rules pack (plan v2 §2.1) can declare a 10×20×10 footprint
+    // without the host having to hard-code the numbers per mode. 2D
+    // modes either omit `dimensions` or set DEPTH=1; in either case
+    // _depth=1 keeps `_board[0][r][c]` equivalent to the legacy
+    // `_board[r][c]` shape — backward compatible.
+    const ruleDims = (this._rules && this._rules.dimensions) || null;
+    this._cols     = (ruleDims && ruleDims.COLS  > 0) ? (ruleDims.COLS  | 0) : (opts.cols  || DEFAULT_COLS);
+    this._rows     = (ruleDims && ruleDims.ROWS  > 0) ? (ruleDims.ROWS  | 0) : (opts.rows  || DEFAULT_ROWS);
+    this._depth    = (ruleDims && ruleDims.DEPTH > 0) ? (ruleDims.DEPTH | 0) : (opts.depth || DEFAULT_DEPTH);
+    // Piece library selector — 2D modes use `tetrominoes` (PIECES from
+    // pieces.js); 3D mode uses `tetracubes` (the 8-piece polycube
+    // library from experimental/3d/tetracubes.js). Reads the rules
+    // pack's declaration first; opts.pieceSet is the test-side override.
+    this._pieceSet = (this._rules && this._rules.pieceSet)
+      ? this._rules.pieceSet
+      : (opts.pieceSet || 'tetrominoes');
     // RNG default: seeded by Date.now() so a fresh Game without an
     // explicit `rng` is *reproducible from its seed* for replay/online
     // (§3.7 sub-phase 7f). Hosts that want a specific seed pass
@@ -125,9 +166,18 @@ export class Game {
       ? Math.max(0, opts.garbageDelayMs | 0)
       : GARBAGE_DELAY_MS_DEFAULT;
 
-    // Board: `_rows × _cols`. board[0] is the BOTTOM row; matches main.js's
-    // existing convention. Cell stores piece color (hex int) or null.
-    this._board = Array.from({ length: this._rows }, () => Array(this._cols).fill(null));
+    // Board: `_depth × _rows × _cols`. Outer index is the depth slice
+    // (0 = front, _depth-1 = back); board[d][0] is the BOTTOM row at
+    // that slice; cell stores piece color (hex int) or null. For 2D
+    // modes _depth=1 so the layout collapses to a single 2D plane —
+    // `_board[0][r][c]` is the only data, identical to the legacy
+    // `_board[r][c]` shape from before §2.1. The `board` getter
+    // exposes that 2D plane to existing 2D consumers (main.js,
+    // bot-controller.js); 3D-aware consumers read `boardLayers`
+    // instead.
+    this._board = Array.from({ length: this._depth }, () =>
+      Array.from({ length: this._rows }, () => Array(this._cols).fill(null))
+    );
 
     this._activePiece = null;
     this._nextQueue   = [];
@@ -227,7 +277,21 @@ export class Game {
   get side()              { return this._side; }
   get cols()              { return this._cols; }
   get rows()              { return this._rows; }
-  get board()             { return this._board; }
+  get depth()             { return this._depth; }
+  get pieceSet()          { return this._pieceSet; }
+  /**
+   * 2D-compatible board accessor. Returns the front depth-slice as a
+   * `_rows × _cols` array of cell colors (or `null`). For 2D modes this
+   * is the entire board; for 3D modes it's just the front layer (z=0)
+   * — 3D-aware consumers should use `boardLayers` instead.
+   */
+  get board()             { return this._board[0]; }
+  /**
+   * Full 3D board: `_depth` slices each `_rows × _cols`. Identical
+   * shape across 2D + 3D modes (2D = single-element outer array). The
+   * 3D mode's renderer reads this for a per-z mesh registry.
+   */
+  get boardLayers()       { return this._board; }
   get activePiece()       { return this._activePiece; }
   get nextQueue()         { return this._nextQueue; }
   get holdPiece()         { return this._holdPiece; }
@@ -284,9 +348,17 @@ export class Game {
    * Full frozen snapshot for views/HUDs. Per §3.7.3.
    */
   snapshot() {
+    // 2D-compatible snapshot — exposes the front depth-slice as
+    // `board` for legacy 2D consumers (HUD, replay viewer). 3D-aware
+    // consumers read `boardLayers` for the full `_depth × _rows × _cols`
+    // structure. For 2D modes the two are the same data.
     return Object.freeze({
       side:     this._side,
-      board:    this._board.map(row => Object.freeze([...row])),
+      board:    this._board[0].map(row => Object.freeze([...row])),
+      boardLayers: Object.freeze(
+        this._board.map(layer => Object.freeze(layer.map(row => Object.freeze([...row]))))
+      ),
+      depth:    this._depth,
       active:   this._activePiece ? Object.freeze({ ...this._activePiece }) : null,
       next:     [...this._nextQueue],
       hold:     this._holdPiece,
@@ -302,7 +374,12 @@ export class Game {
   // ─── Bag randomizer ──────────────────────────────────────────────────
 
   refillBag() {
-    const bag = [...PIECE_KEYS];
+    // Bag contents pivot on the active piece library: 7-bag for 2D
+    // tetrominoes, 8-bag for 3D tetracubes. Fisher-Yates shuffle is
+    // identical for both.
+    const bag = (this._pieceSet === 'tetracubes')
+      ? [...TETRACUBE_KEYS]
+      : [...PIECE_KEYS];
     for (let i = bag.length - 1; i > 0; i--) {
       const j = Math.floor(this._rng() * (i + 1));
       [bag[i], bag[j]] = [bag[j], bag[i]];
@@ -318,17 +395,45 @@ export class Game {
   // ─── Piece geometry ──────────────────────────────────────────────────
 
   /**
-   * Cells occupied by `piece` at rotation `rot`. col/row are board-space.
-   * Mirrors main.js's getPieceCells exactly (top-down shape rows, flipped
-   * to bottom-origin board rows).
+   * Cells occupied by `piece` at rotation `rot`. Returns `{col, row, depth}`
+   * triples in board space — `depth` is always 0 in 2D modes (so existing
+   * 2D consumers can ignore the field) and 0..DEPTH-1 in 3D mode.
+   *
+   * 2D path mirrors the legacy main.js geometry: top-down 4×4 shape rows
+   * flipped to bottom-origin board rows.
+   *
+   * 3D path reads sparse `[x,y,z]` cells from the tetracube definition,
+   * applies the piece's rotation (an `orientations[]` index — see
+   * §2.1 Phase D for full kick-table integration), and offsets by
+   * `piece.col / piece.row / piece.depth`.
    */
   getPieceCells(piece, rot = piece.rot) {
+    if (this._pieceSet === 'tetracubes') {
+      // 3D path. piece.key indexes TETRACUBES; piece.cells (cached on
+      // the piece at spawn time, oriented for the current rotation
+      // state) is the per-rotation cell list. For Phase B without the
+      // 3D kick table (Phase D), we just read the base orientation.
+      const tc = TETRACUBES[piece.key];
+      if (!tc) return [];
+      const baseCells = piece.cells || tc.cells;
+      const out = [];
+      for (const [x, y, z] of baseCells) {
+        out.push({
+          col:   piece.col   + x,
+          row:   piece.row   + y,
+          depth: (piece.depth | 0) + z,
+        });
+      }
+      return out;
+    }
+    // 2D path — `depth: 0` so callers that branch on the field don't
+    // have to special-case 2D.
     const shape = PIECES[piece.key][rot];
     const cells = [];
     for (let r = 0; r < 4; r++) {
       for (let c = 0; c < 4; c++) {
         if (shape[r][c]) {
-          cells.push({ col: piece.col + c, row: piece.row + (3 - r) });
+          cells.push({ col: piece.col + c, row: piece.row + (3 - r), depth: 0 });
         }
       }
     }
@@ -345,11 +450,15 @@ export class Game {
     const cells = this.getPieceCells(test, rot);
     const ROWS = this._rows;
     const COLS = this._cols;
-    for (const { col: c, row: r } of cells) {
+    const DEPTH = this._depth;
+    for (const { col: c, row: r, depth: d } of cells) {
       if (c < 0 || c >= COLS) return true;
       if (r < 0) return true;
+      // 3D bounds — out-of-range Z cells are a wall hit. For 2D the
+      // tetromino cells already report depth=0 so this is a no-op.
+      if (d < 0 || d >= DEPTH) return true;
       if (r >= ROWS + 4) continue;
-      if (r < ROWS && this._board[r][c]) return true;
+      if (r < ROWS && this._board[d][r][c]) return true;
     }
     return false;
   }
@@ -364,13 +473,33 @@ export class Game {
    * rescue declines or fails, the run ends via `_onEndRun({reason:'topout'})`.
    */
   spawnPiece(forcedKey) {
-    const p = {
-      key: forcedKey || this.nextPieceKey(),
-      rot: 0,
-      col: 3,
-      row: this._rows - 2,
-    };
-    p.color = PIECE_COLORS[p.key];
+    const is3D = this._pieceSet === 'tetracubes';
+    const key = forcedKey || this.nextPieceKey();
+    // Spawn position — 2D modes drop pieces in the top-center column;
+    // 3D mode drops them in the top-center of the 10×10 footprint and
+    // at depth = floor(DEPTH / 2) so the player has equal slack on
+    // each side of the well to nudge forward / backward (once the
+    // 3D-axis input layer ships in §2.1 Phase D).
+    const p = is3D
+      ? {
+          key,
+          rot:   0,
+          col:   Math.max(0, ((this._cols - 2) >> 1) | 0),
+          row:   this._rows - 2,
+          depth: ((this._depth - 2) >> 1) | 0,
+          // Cache the rotated cell list on the piece so getPieceCells
+          // doesn't need to re-walk the rotation table per call.
+          // Phase B uses the base orientation; Phase D plugs in the
+          // 24-rotation enumerator from experimental/3d/rotation.js.
+          cells: TETRACUBES[key]?.cells || [],
+        }
+      : {
+          key,
+          rot: 0,
+          col: 3,
+          row: this._rows - 2,
+        };
+    p.color = is3D ? TETRACUBE_COLORS[key] : PIECE_COLORS[key];
     if (this.collides(p, p.col, p.row, p.rot)) {
       if (this._handleTopOutWithRescue(p)) return;
       this._signalEndRun({ reason: 'topout' });
@@ -428,9 +557,14 @@ export class Game {
   shiftStackDown(rows) {
     if (!Number.isFinite(rows) || rows <= 0) return;
     const n = Math.min(rows | 0, this._rows);
+    // Apply per depth slice so the 3D mode's same-rescue semantics
+    // shift every (col, depth) at the bottom row out together. For 2D
+    // the outer loop runs once.
     for (let i = 0; i < n; i++) {
-      this._board.splice(0, 1);
-      this._board.push(Array(this._cols).fill(null));
+      for (let d = 0; d < this._depth; d++) {
+        this._board[d].splice(0, 1);
+        this._board[d].push(Array(this._cols).fill(null));
+      }
     }
   }
 
@@ -586,26 +720,29 @@ export class Game {
     // T-spin classification — performed BEFORE the piece's cells are
     // written so the corner check sees the board state at lock time.
     // Returns 'none' / 'tspin' / 'mini'. (See gameplay/t-spin.js.)
+    // T-spin only applies to 2D play (the 3D rules pack opts out via
+    // `goalMultiplier: 1.0` per file header), so we pass the front
+    // depth-slice to keep the 2D detector's expected shape — for 3D
+    // tetracubes the piece key isn't 'T' anyway and detectTSpin returns
+    // 'none' immediately.
     const tspinKind = detectTSpin(
-      this._activePiece, this._board,
+      this._activePiece, this._board[0],
       this._lastAction, this._lastKickIndex,
       this._cols, this._rows,
     );
 
-    for (const { col, row } of cells) {
-      this._board[row][col] = lockColor;
+    for (const { col, row, depth } of cells) {
+      this._board[depth | 0][row][col] = lockColor;
     }
 
-    // Count full rows BEFORE emitting so the host's PIECE_LOCK subscriber
-    // can route to announceLineClear vs noteNoClearLock without waiting
-    // for LINE_CLEAR to (or not to) follow.
-    const fullRows = [];
-    for (let r = 0; r < this._rows; r++) {
-      if (this._board[r].every(c => c !== null)) fullRows.push(r);
-    }
+    // Count full rows / layers BEFORE emitting so the host's PIECE_LOCK
+    // subscriber can route to announceLineClear vs noteNoClearLock
+    // without waiting for LINE_CLEAR to (or not to) follow. 2D = full
+    // row at z=0; 3D = full Y-slab where every (col, depth) is filled.
+    const fullRows = this._collectFullRows();
 
     this._bus.emit(EVENTS.PIECE_LOCK, {
-      cells: cells.map(({ col, row }) => ({ col, row })),
+      cells: cells.map(({ col, row, depth }) => ({ col, row, depth: depth | 0 })),
       color:     lockColor,
       side:      this._side,
       cleared:   fullRows.length,
@@ -663,6 +800,47 @@ export class Game {
   }
 
   /**
+   * Find every row that's "full" — meaning a candidate for line / layer
+   * clear. The condition depends on dimensionality:
+   *
+   *   - 2D (`_depth === 1`): every cell in the row is non-null. This is
+   *     the classic Tetris row-clear condition.
+   *   - 3D (`_depth > 1`): every (col, depth) pair at this row Y is
+   *     non-null. A "full layer" is the 3D analogue of a full row — the
+   *     entire Y-slab must be filled across all depth slices. (This
+   *     matches `experimental/3d/layer-detection.js#detectFullLayers`,
+   *     just inlined against Game's live board state instead of a cell
+   *     snapshot.)
+   *
+   * Returns ascending row indices.
+   *
+   * @returns {number[]}
+   */
+  _collectFullRows() {
+    const rows = [];
+    if (this._depth === 1) {
+      const layer = this._board[0];
+      for (let r = 0; r < this._rows; r++) {
+        if (layer[r].every(c => c !== null)) rows.push(r);
+      }
+      return rows;
+    }
+    // 3D path — a row is full only when every (col, depth) at that Y
+    // is occupied. Short-circuits on the first hole found per row.
+    rowLoop:
+    for (let r = 0; r < this._rows; r++) {
+      for (let d = 0; d < this._depth; d++) {
+        const row = this._board[d][r];
+        for (let c = 0; c < this._cols; c++) {
+          if (row[c] === null) continue rowLoop;
+        }
+      }
+      rows.push(r);
+    }
+    return rows;
+  }
+
+  /**
    * Clear `rows` (board-space row indices), shift remaining stack down,
    * update score/lines/level, emit LINE_CLEAR/LEVEL_UP/SCORE_DELTA.
    * `rows` may arrive in any order — sorted top-down internally.
@@ -705,16 +883,20 @@ export class Game {
     const isB2B = isDifficult && this._b2b > 0;
 
     // Perfect Clear pre-check — before the splice removes the cleared
-    // rows. The board "will be" perfectly clear iff every row is either
-    // (a) one of the rows about to be removed, or (b) already empty.
+    // rows. The board "will be" perfectly clear iff every row at every
+    // depth slice is either (a) one of the rows about to be removed,
+    // or (b) already empty. For 2D modes _depth=1 and the outer loop
+    // is a no-op (single iteration).
     const clearedRowSet = new Set(rows);
     let isPerfectClear = true;
-    for (let r = 0; r < this._rows; r++) {
-      if (clearedRowSet.has(r)) continue;
-      for (const cell of this._board[r]) {
-        if (cell !== null) { isPerfectClear = false; break; }
+    pcCheck:
+    for (let d = 0; d < this._depth; d++) {
+      for (let r = 0; r < this._rows; r++) {
+        if (clearedRowSet.has(r)) continue;
+        for (const cell of this._board[d][r]) {
+          if (cell !== null) { isPerfectClear = false; break pcCheck; }
+        }
       }
-      if (!isPerfectClear) break;
     }
 
     // Score: base + B2B 1.5× + Perfect Clear bonus + combo bonus.
@@ -770,7 +952,9 @@ export class Game {
       this._bus.emit(EVENTS.LEVEL_UP, { level: newLevel, side: this._side });
     }
 
-    const rowColors = rows.map(r => avgRowColor(this._board[r]));
+    // Layer color for the LINE_CLEAR event — 2D averages the row's
+    // cells; 3D averages across all (col, depth) at the cleared Y.
+    const rowColors = rows.map(r => avgLayerColor(this._board, r, this._depth));
     const overallColor = meanColor(rowColors);
     this._bus.emit(EVENTS.LINE_CLEAR, {
       rows: rows.slice(),
@@ -784,9 +968,13 @@ export class Game {
       side: this._side,
     });
 
+    // Splice the cleared rows out of every depth slice + push a fresh
+    // empty row at the top of each. For 2D the outer loop runs once.
     for (const r of rows) {
-      this._board.splice(r, 1);
-      this._board.push(Array(this._cols).fill(null));
+      for (let d = 0; d < this._depth; d++) {
+        this._board[d].splice(r, 1);
+        this._board[d].push(Array(this._cols).fill(null));
+      }
     }
 
     // PERFECT_CLEAR fires AFTER splice — at this point the board is
@@ -906,11 +1094,17 @@ export class Game {
   _applyGarbageToBoard(rows, holeColumn) {
     const COLS = this._cols;
     const safeHole = ((holeColumn % COLS) + COLS) % COLS;
+    // Garbage applies as a full Y-slab — every depth slice gets a new
+    // bottom row with the same hole column, so a 3D player still
+    // navigates one shared hole even though the row spans the full
+    // 10×10 footprint. For 2D the outer loop runs once.
     for (let i = 0; i < rows; i++) {
-      this._board.pop(); // drop the top row
-      const newRow = new Array(COLS).fill(GARBAGE_COLOR);
-      newRow[safeHole] = null;
-      this._board.unshift(newRow);
+      for (let d = 0; d < this._depth; d++) {
+        this._board[d].pop(); // drop the top row
+        const newRow = new Array(COLS).fill(GARBAGE_COLOR);
+        newRow[safeHole] = null;
+        this._board[d].unshift(newRow);
+      }
     }
     // Notify host so the BoardView can mirror the data-side mutation on
     // the mesh side (dispose top mesh row, build cubes for the new bottom
@@ -1009,8 +1203,10 @@ export class Game {
    * disposing it. Spawns the first piece so the host can immediately tick.
    */
   reset() {
-    for (let r = 0; r < this._rows; r++) {
-      for (let c = 0; c < this._cols; c++) this._board[r][c] = null;
+    for (let d = 0; d < this._depth; d++) {
+      for (let r = 0; r < this._rows; r++) {
+        for (let c = 0; c < this._cols; c++) this._board[d][r][c] = null;
+      }
     }
     this._activePiece = null;
     this._holdPiece   = null;
@@ -1066,11 +1262,17 @@ export class Game {
    */
   serialize() {
     return {
-      v: 1,
+      v: 2,
       side: this._side,
-      cols: this._cols,
-      rows: this._rows,
-      board: this._board.map(row => row.slice()),
+      cols:  this._cols,
+      rows:  this._rows,
+      depth: this._depth,
+      // 3D-shaped board: [depth][row][col]. v1 blobs serialized as 2D
+      // [row][col] (the front slice only); restore() detects v1 and
+      // up-converts. Keep saving v2 unconditionally so 2D modes also
+      // round-trip the new shape; for depth=1 the outer array has one
+      // element and the data layout is otherwise identical.
+      board: this._board.map(layer => layer.map(row => row.slice())),
       activePiece: this._activePiece ? { ...this._activePiece } : null,
       nextQueue:   [...this._nextQueue],
       holdPiece:   this._holdPiece,
@@ -1111,13 +1313,29 @@ export class Game {
     if (blob.cols !== this._cols || blob.rows !== this._rows) {
       throw new Error(`Game.restore: dimension mismatch (blob ${blob.cols}×${blob.rows}, game ${this._cols}×${this._rows})`);
     }
-    // In-place row mutation so external `board` references stay valid.
-    for (let r = 0; r < this._rows; r++) {
-      const src = blob.board[r] || [];
-      for (let c = 0; c < this._cols; c++) {
-        this._board[r][c] = (c < src.length) ? src[c] : null;
+    // v1 blobs (pre-§2.1) serialized board as 2D `[row][col]`; v2 stores
+    // 3D `[depth][row][col]`. Detect the shape by peeking at the first
+    // outer entry — v1's row is `Cell[]`, v2's is `Cell[][]`. v1 blobs
+    // are loaded into the front depth-slice; deeper slices stay empty
+    // (they're zero-init from the constructor).
+    const blobIs3D = Array.isArray(blob.board) && Array.isArray(blob.board[0])
+      && Array.isArray(blob.board[0][0]);
+    const blobDepth = blobIs3D ? blob.board.length : 1;
+    if (blobIs3D && blob.depth != null && blob.depth !== this._depth) {
+      throw new Error(`Game.restore: depth mismatch (blob ${blob.depth}, game ${this._depth})`);
+    }
+    // In-place mutation so external `board`/`boardLayers` references stay valid.
+    for (let d = 0; d < this._depth; d++) {
+      for (let r = 0; r < this._rows; r++) {
+        const srcRow = blobIs3D
+          ? ((blob.board[d] && blob.board[d][r]) || [])
+          : (d === 0 ? (blob.board[r] || []) : []);
+        for (let c = 0; c < this._cols; c++) {
+          this._board[d][r][c] = (c < srcRow.length) ? srcRow[c] : null;
+        }
       }
     }
+    void blobDepth; // keep for future 3D-blob diagnostics
     this._activePiece = blob.activePiece ? { ...blob.activePiece } : null;
     this._nextQueue.length = 0;
     if (Array.isArray(blob.nextQueue)) this._nextQueue.push(...blob.nextQueue);

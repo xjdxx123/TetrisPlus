@@ -26,6 +26,10 @@ const AVAILABLE = Object.freeze([
   // flag in CONFIG below is what hosts gate visibility on if they
   // want a "stable modes only" view.
   'physics',
+  // plan v2 §2.1 — 3D Tetris. Same experimental gating as physics.
+  // The rules pack declares dimensions: { COLS:10, ROWS:20, DEPTH:10 }
+  // and pieceSet: 'tetracubes'; Game reads both at construction.
+  '3d',
 ]);
 
 const LABELS = Object.freeze({
@@ -36,6 +40,7 @@ const LABELS = Object.freeze({
   zen:      'Zen',
   versus:   'Versus',
   physics:  'Physics',
+  '3d':     '3D',
 });
 
 // Future-behavior contract — informational; useful when modes ship to
@@ -48,6 +53,7 @@ const DESCRIPTIONS = Object.freeze({
   zen:      'No game-over (top-out shifts the stack down).',
   versus:   'Reserved — needs network or AI. Disabled until then.',
   physics:  'Experimental. Locked pieces become rigid bodies; layer-detection replaces row-clear.',
+  '3d':     'Experimental. 10×10×20 well, 8 tetracubes, layer-clear scoring.',
 });
 
 // Modes the v1 plan ships with disabled-looking. The UI greys these out
@@ -66,6 +72,7 @@ const CONFIG = Object.freeze({
   zen:      Object.freeze({ goalLabel: 'No topout',               hudKind: 'zen',      estimatedDurationMin: null, isOnline: false, isExperimental: false }),
   versus:   Object.freeze({ goalLabel: 'Versus (1v1)',            hudKind: 'versus',   estimatedDurationMin: 5,    isOnline: false, isExperimental: false }),
   physics:  Object.freeze({ goalLabel: 'Pure Physics — chaos lab', hudKind: 'physics', estimatedDurationMin: null, isOnline: false, isExperimental: true  }),
+  '3d':     Object.freeze({ goalLabel: 'Endless (3D)',             hudKind: '3d',       estimatedDurationMin: null, isOnline: false, isExperimental: true  }),
 });
 
 let _current = 'classic';

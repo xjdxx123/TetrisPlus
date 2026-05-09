@@ -112,6 +112,12 @@ const STATS_DEFAULTS = Object.freeze({
     // Physics shares. Modern-rules slots are intentionally absent
     // — physics doesn't recognize T-spin / B2B / PC.
     physics:  { score: 0, lines: 0, level: 1, attempts: 0, bestLayersCleared: 0, totalLayersCleared: 0 },
+    // 3D Tetris (plan v2 §2.1) — exponential per-layer scoring (1k /
+    // 3k / 5k / 8k × level). `bestLayerCount` is the largest single-
+    // lock clear seen this run; `totalLayersCleared` is cumulative
+    // across runs (parallel to physics). Modern-rules slots intent-
+    // ionally absent — 3D opts out of T-spin / B2B / PC.
+    '3d':     { score: 0, lines: 0, level: 1, attempts: 0, bestLayerCount: 0, totalLayersCleared: 0 },
   },
   totals: {
     linesCleared:  0,
