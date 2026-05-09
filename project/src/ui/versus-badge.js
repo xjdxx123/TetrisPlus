@@ -196,6 +196,37 @@ function installBadgeStyles() {
       to   { opacity: 1.00; transform: scaleY(1.4); }
     }
 
+    /* Drain flash (plan_gameplay_2.md §1.3). Plays once whenever a
+       queue applies (GARBAGE_APPLIED) or is eaten by an outgoing
+       clear (GARBAGE_CANCELLED) — communicates "the queue just
+       drained" since the M5 spawn-delay window means real pips
+       appear and disappear quickly during normal play. The pip-by-
+       pip exit animation would need DOM identity tracking; this
+       container-level flash gives the same UX read with a fraction
+       of the complexity. */
+    .tp-versus-badge__queue.is-draining-applied {
+      animation: tp-versus-badge-queue-applied 320ms ease-out;
+    }
+    .tp-versus-badge__queue.is-draining-cancelled {
+      animation: tp-versus-badge-queue-cancelled 320ms ease-out;
+    }
+    @keyframes tp-versus-badge-queue-applied {
+      0%   { background: rgba(255, 92, 138, 0.30);
+             box-shadow: 0 0 14px rgba(255, 92, 138, 0.55);
+             border-color: rgba(255, 92, 138, 0.65); }
+      100% { background: rgba(255, 255, 255, 0.02);
+             box-shadow: none;
+             border-color: rgba(255, 255, 255, 0.06); }
+    }
+    @keyframes tp-versus-badge-queue-cancelled {
+      0%   { background: rgba(108, 240, 255, 0.30);
+             box-shadow: 0 0 14px rgba(108, 240, 255, 0.55);
+             border-color: rgba(108, 240, 255, 0.65); }
+      100% { background: rgba(255, 255, 255, 0.02);
+             box-shadow: none;
+             border-color: rgba(255, 255, 255, 0.06); }
+    }
+
     /* Pulse on garbage events. */
     .tp-versus-badge.is-pulsing {
       box-shadow: 0 0 0 6px rgba(255, 92, 138, 0.45),
@@ -498,6 +529,29 @@ export function createVersusBadge(opts) {
     refresh();
   }));
 
+  /**
+   * Drain flash helper (plan_gameplay_2.md §1.3) — kicks off a one-shot
+   * CSS animation on a queue column. The class swap forces the
+   * animation to restart on rapid back-to-back events (without the
+   * `void offsetWidth` reflow trick, the second flash wouldn't play).
+   *
+   * @param {HTMLElement} queueEl  The `.tp-versus-badge__queue` element.
+   * @param {'applied'|'cancelled'} kind
+   */
+  function flashDrain(queueEl, kind) {
+    if (!queueEl) return;
+    const cls = kind === 'cancelled'
+      ? 'is-draining-cancelled'
+      : 'is-draining-applied';
+    // Remove any in-flight animation so a rapid follow-up event
+    // restarts cleanly.
+    queueEl.classList.remove('is-draining-applied', 'is-draining-cancelled');
+    void queueEl.offsetWidth; // force reflow so animation restarts
+    queueEl.classList.add(cls);
+    // Animation is 320ms; clean up the class after a small buffer.
+    setTimeout(() => queueEl.classList.remove(cls), 360);
+  }
+
   // Pulse + re-render on every garbage event — both directions — so the
   // chrome "thumps" with pressure. Cheap.
   offs.push(bus.on(events.GARBAGE_SENT, () => {
@@ -520,11 +574,28 @@ export function createVersusBadge(opts) {
     }));
   }
   // §12 M5: cancellation eats from the queue front-first. Re-render
-  // immediately so the player sees the pip count drop on the cancellation,
-  // not lagging by a frame.
+  // immediately + flash the column cyan so the player sees a clear
+  // "I just ate that garbage" cue (plan_gameplay_2.md §1.3).
   if (events.GARBAGE_CANCELLED) {
     offs.push(bus.on(events.GARBAGE_CANCELLED, () => {
       if (!isVisible()) return;
+      // Cancellation always reduces the PLAYER's inbound queue
+      // (versus.onLinesCleared composes outgoing → Game cancels
+      // against the player's own inbound). Flash YOU's column.
+      flashDrain(youSide.queue, 'cancelled');
+      renderQueue();
+    }));
+  }
+
+  // §12 M5: GARBAGE_APPLIED fires when a queued entry has actually
+  // landed on the board. Re-render so the column updates AND flash
+  // pink so the player sees "the queue just hit me" cleanly. Without
+  // this flash, the spawn-delay window's 800ms means pips often
+  // appear and disappear faster than the eye registers.
+  if (events.GARBAGE_APPLIED) {
+    offs.push(bus.on(events.GARBAGE_APPLIED, () => {
+      if (!isVisible()) return;
+      flashDrain(youSide.queue, 'applied');
       renderQueue();
     }));
   }
