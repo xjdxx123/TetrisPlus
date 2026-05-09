@@ -57,14 +57,14 @@ describe('versus rules — onLinesCleared garbage emission', () => {
     const bus = makeFakeBus();
     const r = buildVersusRules({ bus });
     r.onLinesCleared(snapshot({ linesCleared: 1 }), 1);
-    expect(bus.calls.filter(c => c.topic === EVENTS.GARBAGE_SENT)).toHaveLength(0);
+    expect(bus.calls.filter(c => c.topic === EVENTS.GARBAGE_OUTGOING)).toHaveLength(0);
   });
 
   it('a 2-line clear sends 1 garbage row', () => {
     const bus = makeFakeBus();
     const r = buildVersusRules({ bus });
     r.onLinesCleared(snapshot({ linesCleared: 2 }), 2);
-    const sent = bus.calls.filter(c => c.topic === EVENTS.GARBAGE_SENT);
+    const sent = bus.calls.filter(c => c.topic === EVENTS.GARBAGE_OUTGOING);
     expect(sent).toHaveLength(1);
     expect(sent[0].payload).toEqual({ rows: 1, target: 'opponent' });
   });
@@ -73,7 +73,7 @@ describe('versus rules — onLinesCleared garbage emission', () => {
     const bus = makeFakeBus();
     const r = buildVersusRules({ bus });
     r.onLinesCleared(snapshot({ linesCleared: 3 }), 3);
-    const sent = bus.calls.filter(c => c.topic === EVENTS.GARBAGE_SENT);
+    const sent = bus.calls.filter(c => c.topic === EVENTS.GARBAGE_OUTGOING);
     expect(sent[0].payload.rows).toBe(2);
   });
 
@@ -81,7 +81,7 @@ describe('versus rules — onLinesCleared garbage emission', () => {
     const bus = makeFakeBus();
     const r = buildVersusRules({ bus });
     r.onLinesCleared(snapshot({ linesCleared: 4 }), 4);
-    const sent = bus.calls.filter(c => c.topic === EVENTS.GARBAGE_SENT);
+    const sent = bus.calls.filter(c => c.topic === EVENTS.GARBAGE_OUTGOING);
     expect(sent[0].payload.rows).toBe(4);
   });
 
@@ -105,7 +105,7 @@ describe('versus rules — combo bonus (M4: combo lives in Game)', () => {
     r.onLinesCleared(snapshot({ linesCleared: 2, combo: 1 }), 2);
     // Second clear: state.combo=2, step=1 → 1 base + 0 = 1
     r.onLinesCleared(snapshot({ linesCleared: 2, combo: 2 }), 2);
-    const sent = bus.calls.filter(c => c.topic === EVENTS.GARBAGE_SENT);
+    const sent = bus.calls.filter(c => c.topic === EVENTS.GARBAGE_OUTGOING);
     expect(sent.map(c => c.payload.rows)).toEqual([1, 1]);
   });
 
@@ -115,7 +115,7 @@ describe('versus rules — combo bonus (M4: combo lives in Game)', () => {
     r.onLinesCleared(snapshot({ linesCleared: 2, combo: 1 }), 2); // 1+0 = 1
     r.onLinesCleared(snapshot({ linesCleared: 2, combo: 2 }), 2); // 1+0 = 1
     r.onLinesCleared(snapshot({ linesCleared: 2, combo: 3 }), 2); // 1+1 = 2
-    const sent = bus.calls.filter(c => c.topic === EVENTS.GARBAGE_SENT);
+    const sent = bus.calls.filter(c => c.topic === EVENTS.GARBAGE_OUTGOING);
     expect(sent.map(c => c.payload.rows)).toEqual([1, 1, 2]);
   });
 
@@ -125,7 +125,7 @@ describe('versus rules — combo bonus (M4: combo lives in Game)', () => {
     for (let combo = 1; combo <= 13; combo++) {
       r.onLinesCleared(snapshot({ linesCleared: 2, combo }), 2);
     }
-    const sent = bus.calls.filter(c => c.topic === EVENTS.GARBAGE_SENT).map(c => c.payload.rows);
+    const sent = bus.calls.filter(c => c.topic === EVENTS.GARBAGE_OUTGOING).map(c => c.payload.rows);
     // base (2-line) = 1; bonus follows COMBO_STEP_GARBAGE [0,0,1,1,2,2,3,3,4,4,4]
     // and 5 plateau for step ≥ 11.
     expect(sent).toEqual([1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 5, 6, 6]);
@@ -141,7 +141,7 @@ describe('versus rules — combo bonus (M4: combo lives in Game)', () => {
     r.onLinesCleared(snapshot({ linesCleared: 1, combo: 3  }), 1); // step 2  → 0+1 = 1
     r.onLinesCleared(snapshot({ linesCleared: 1, combo: 11 }), 1); // step 10 → 0+4 = 4
     r.onLinesCleared(snapshot({ linesCleared: 1, combo: 12 }), 1); // step 11 → 0+5 = 5 (plateau)
-    const sent = bus.calls.filter(c => c.topic === EVENTS.GARBAGE_SENT).map(c => c.payload.rows);
+    const sent = bus.calls.filter(c => c.topic === EVENTS.GARBAGE_OUTGOING).map(c => c.payload.rows);
     expect(sent).toEqual([1, 4, 5]); // only non-zero sends emit
   });
 

@@ -533,7 +533,10 @@ describe('Game — applyGarbage / drain', () => {
     const { game } = makeGame();
     game.applyGarbage(2, 4);
     expect(game.garbageQueue.length).toBe(1);
-    expect(game.garbageQueue[0]).toEqual({ rows: 2, holeColumn: 4 });
+    // M5 added `readyAt` to entries — match the rows+hole and ignore
+    // the timestamp, which is asserted separately below.
+    expect(game.garbageQueue[0]).toMatchObject({ rows: 2, holeColumn: 4 });
+    expect(typeof game.garbageQueue[0].readyAt).toBe('number');
   });
 
   it('applyGarbage uses rng for hole column when omitted', () => {
@@ -558,11 +561,14 @@ describe('Game — applyGarbage / drain', () => {
     const { game, bus } = makeGame();
     bus.emit(EVENTS.GARBAGE_RECEIVED, { rows: 3, holeColumn: 5, source: 'opponent' });
     expect(game.garbageQueue.length).toBe(1);
-    expect(game.garbageQueue[0]).toEqual({ rows: 3, holeColumn: 5 });
+    expect(game.garbageQueue[0]).toMatchObject({ rows: 3, holeColumn: 5 });
   });
 
   it('drains queue at lock time, applies garbage to board with hole, emits GARBAGE_APPLIED', () => {
-    const { game, bus } = makeGame();
+    // M5: opt out of the spawn-delay window so the entry is "ready"
+    // at modeTime=0 — preserves the pre-§12 immediate-drain semantic
+    // for this regression test.
+    const { game, bus } = makeGame({ garbageDelayMs: 0 });
     game.applyGarbage(2, 5);
     game.spawnPiece('T');
     const cap = captureEvents(bus, [EVENTS.GARBAGE_APPLIED]);
@@ -1412,6 +1418,189 @@ describe('Game — combo state (plan §12.5 M4)', () => {
     cap.dispose();
     const rows = cap.events.map(e => e.payload.rows);
     expect(rows).toEqual([1, 1, 2]);
+  });
+});
+
+// ─── M5: Garbage cancellation + spawn-delay window (plan §12.5) ──────
+
+describe('Game — garbage cancellation broker (plan §12.5 M5)', () => {
+  function makeVersusGame(opts = {}) {
+    const bus = new EventBus({ replayBufferSize: 0, recorderSize: 0 });
+    const game = new Game({
+      rules: buildRules('versus', { bus }),
+      bus,
+      rng: seededRng(1),
+      garbageDelayMs: opts.garbageDelayMs ?? 0,
+    });
+    return { game, bus };
+  }
+
+  it('GARBAGE_OUTGOING with empty queue: emits full GARBAGE_SENT, no cancel', () => {
+    const { game, bus } = makeVersusGame();
+    void game;
+    const cap = captureEvents(bus, [EVENTS.GARBAGE_SENT, EVENTS.GARBAGE_CANCELLED]);
+    bus.emit(EVENTS.GARBAGE_OUTGOING, { rows: 4, target: 'opponent' });
+    cap.dispose();
+    const sent = cap.events.find(e => e.topic === EVENTS.GARBAGE_SENT);
+    expect(sent).toBeTruthy();
+    expect(sent.payload.rows).toBe(4);
+    expect(cap.events.find(e => e.topic === EVENTS.GARBAGE_CANCELLED)).toBeFalsy();
+  });
+
+  it('outgoing eats from front of queue when fully covered (no GARBAGE_SENT)', () => {
+    const { game, bus } = makeVersusGame();
+    game.applyGarbage(3, 5); // queue has 3 rows
+    const cap = captureEvents(bus, [EVENTS.GARBAGE_SENT, EVENTS.GARBAGE_CANCELLED]);
+    bus.emit(EVENTS.GARBAGE_OUTGOING, { rows: 2, target: 'opponent' });
+    cap.dispose();
+    // 2 rows cancelled; queue front entry now has 1 row.
+    expect(game.garbageQueue.length).toBe(1);
+    expect(game.garbageQueue[0].rows).toBe(1);
+    expect(cap.events.find(e => e.topic === EVENTS.GARBAGE_CANCELLED).payload.rows).toBe(2);
+    expect(cap.events.find(e => e.topic === EVENTS.GARBAGE_SENT)).toBeFalsy(); // nothing to send
+  });
+
+  it('outgoing larger than queue: cancel partial + send remainder', () => {
+    const { game, bus } = makeVersusGame();
+    game.applyGarbage(2, 5);
+    const cap = captureEvents(bus, [EVENTS.GARBAGE_SENT, EVENTS.GARBAGE_CANCELLED]);
+    bus.emit(EVENTS.GARBAGE_OUTGOING, { rows: 5, target: 'opponent' });
+    cap.dispose();
+    expect(game.garbageQueue.length).toBe(0); // queue drained
+    const cancelled = cap.events.find(e => e.topic === EVENTS.GARBAGE_CANCELLED);
+    const sent      = cap.events.find(e => e.topic === EVENTS.GARBAGE_SENT);
+    expect(cancelled.payload.rows).toBe(2); // ate everything in queue
+    expect(sent.payload.rows).toBe(3);      // 5 - 2 = 3 net to opponent
+  });
+
+  it('eats across multiple queue entries (fully consumes first, partially eats second)', () => {
+    const { game, bus } = makeVersusGame();
+    game.applyGarbage(2, 5);
+    game.applyGarbage(3, 6);
+    const cap = captureEvents(bus, [EVENTS.GARBAGE_SENT, EVENTS.GARBAGE_CANCELLED]);
+    bus.emit(EVENTS.GARBAGE_OUTGOING, { rows: 4, target: 'opponent' });
+    cap.dispose();
+    // First entry (2) fully eaten + 2 rows from second entry (was 3, now 1).
+    expect(game.garbageQueue.length).toBe(1);
+    expect(game.garbageQueue[0]).toMatchObject({ rows: 1, holeColumn: 6 });
+    expect(cap.events.find(e => e.topic === EVENTS.GARBAGE_CANCELLED).payload.rows).toBe(4);
+    expect(cap.events.find(e => e.topic === EVENTS.GARBAGE_SENT)).toBeFalsy();
+  });
+
+  it('Versus with active inbound queue: line clear cancels before sending', () => {
+    const { game, bus } = makeVersusGame();
+    game.applyGarbage(3, 5); // queue has 3 inbound
+    game.spawnPiece('I');
+    fillRow(game, 0); fillRow(game, 1);
+    game.board[15][0] = 0x111111; // suppress PC
+    const cap = captureEvents(bus, [EVENTS.GARBAGE_SENT, EVENTS.GARBAGE_CANCELLED, EVENTS.GARBAGE_OUTGOING]);
+    game.clearLines([0, 1]);
+    cap.dispose();
+    // 2-line clear at combo step 0 = 1 garbage out. 1 cancel from queue (3 → 2 left).
+    expect(cap.events.find(e => e.topic === EVENTS.GARBAGE_OUTGOING).payload.rows).toBe(1);
+    expect(cap.events.find(e => e.topic === EVENTS.GARBAGE_CANCELLED).payload.rows).toBe(1);
+    expect(cap.events.find(e => e.topic === EVENTS.GARBAGE_SENT)).toBeFalsy();
+    expect(game.garbageQueue[0].rows).toBe(2);
+  });
+});
+
+describe('Game — garbage spawn-delay window (plan §12.5 M5)', () => {
+  function makeGameWithDelay(delayMs) {
+    const bus = new EventBus({ replayBufferSize: 0, recorderSize: 0 });
+    const game = new Game({
+      rules: buildRules('classic'),
+      bus,
+      rng: seededRng(1),
+      garbageDelayMs: delayMs,
+    });
+    return { game, bus };
+  }
+
+  it('default delay is 800ms', () => {
+    const bus = new EventBus({ replayBufferSize: 0, recorderSize: 0 });
+    const game = new Game({ rules: buildRules('classic'), bus, rng: seededRng(1) });
+    game.applyGarbage(1, 0);
+    expect(game.garbageQueue[0].readyAt).toBe(800); // modeTimeMs=0 + 800
+  });
+
+  it('readyAt = modeTimeMs + delayMs at the moment of applyGarbage', () => {
+    const { game } = makeGameWithDelay(500);
+    game._modeTimeMs = 1234;
+    game.applyGarbage(1, 0);
+    expect(game.garbageQueue[0].readyAt).toBe(1234 + 500);
+  });
+
+  it('drain skips entries with readyAt > modeTimeMs (still pending)', () => {
+    const { game, bus } = makeGameWithDelay(800);
+    game.applyGarbage(2, 5); // readyAt = 800
+    game.spawnPiece('T');
+    // modeTime is 0; entry isn't ready.
+    const cap = captureEvents(bus, [EVENTS.GARBAGE_APPLIED]);
+    game.hardDrop();
+    game.lockPiece();
+    cap.dispose();
+    // Queue should still have the not-ready entry.
+    expect(game.garbageQueue.length).toBe(1);
+    expect(cap.events.length).toBe(0);
+  });
+
+  it('drain applies entries once readyAt <= modeTimeMs', () => {
+    const { game, bus } = makeGameWithDelay(800);
+    game.applyGarbage(2, 5);
+    // Advance time past the readyAt threshold.
+    game._modeTimeMs = 800;
+    game.spawnPiece('T');
+    const cap = captureEvents(bus, [EVENTS.GARBAGE_APPLIED]);
+    game.hardDrop();
+    game.lockPiece();
+    cap.dispose();
+    expect(game.garbageQueue.length).toBe(0);
+    expect(cap.events.length).toBe(1);
+    expect(cap.events[0].payload.rows).toBe(2);
+  });
+
+  it('drain stops at the first not-ready entry (FIFO ordering preserved)', () => {
+    const { game, bus } = makeGameWithDelay(800);
+    game._modeTimeMs = 0;
+    game.applyGarbage(1, 1); // readyAt 800
+    game._modeTimeMs = 500;
+    game.applyGarbage(1, 2); // readyAt 1300
+    game._modeTimeMs = 900;  // first ready, second not
+    game.spawnPiece('T');
+    const cap = captureEvents(bus, [EVENTS.GARBAGE_APPLIED]);
+    game.hardDrop();
+    game.lockPiece();
+    cap.dispose();
+    // Only the first entry drained.
+    expect(game.garbageQueue.length).toBe(1);
+    expect(game.garbageQueue[0]).toMatchObject({ rows: 1, holeColumn: 2 });
+    expect(cap.events.length).toBe(1);
+  });
+
+  it('garbageDelayMs:0 makes drain immediate (back-compat)', () => {
+    const { game, bus } = makeGameWithDelay(0);
+    game.applyGarbage(1, 5);
+    expect(game.garbageQueue[0].readyAt).toBe(0); // ready at modeTime=0
+    game.spawnPiece('T');
+    const cap = captureEvents(bus, [EVENTS.GARBAGE_APPLIED]);
+    game.hardDrop();
+    game.lockPiece();
+    cap.dispose();
+    expect(game.garbageQueue.length).toBe(0);
+    expect(cap.events.length).toBe(1);
+  });
+
+  it('pause-aware: tick during paused game does NOT advance modeTimeMs (so readyAt does not expire)', () => {
+    const { game } = makeGameWithDelay(800);
+    game.spawnPiece('T');
+    game.applyGarbage(1, 0); // readyAt = 800
+    game.setPaused(true);
+    // Calls to tick while paused are no-ops on _modeTimeMs.
+    game.tick(1000);
+    game.tick(1000);
+    expect(game._modeTimeMs).toBe(0); // didn't advance
+    // Entry still not ready.
+    expect(game.garbageQueue[0].readyAt).toBe(800);
   });
 });
 

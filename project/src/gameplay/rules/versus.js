@@ -74,8 +74,12 @@ export function buildVersusRules(opts = {}) {
       let sent = garbageForLineCount(r, comboStep);
       if (info && info.isB2B)          sent += 1;
       if (info && info.isPerfectClear) sent += 10;
+      // M5 (plan §12.5): emit GARBAGE_OUTGOING — Game intercepts on
+      // the same bus, cancels front-first against the inbound queue,
+      // and re-emits the net portion as GARBAGE_SENT (with a
+      // GARBAGE_CANCELLED side-event for the eaten amount).
       if (sent > 0 && bus) {
-        bus.emit(EVENTS.GARBAGE_SENT, { rows: sent, target: 'opponent' });
+        bus.emit(EVENTS.GARBAGE_OUTGOING, { rows: sent, target: 'opponent' });
       }
     },
 

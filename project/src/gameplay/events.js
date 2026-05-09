@@ -74,13 +74,23 @@ export const EVENTS = Object.freeze({
   // cascade preset; HUD increments shift counter.
   ZEN_RESCUE:         'ZEN_RESCUE',         // { rowsRemoved }
 
-  // Versus garbage (plan_gameplay_1.md §3.6). GARBAGE_SENT is fired by the
-  // active rules pack's onLinesCleared when the player clears multiple
-  // rows; the opponent (a bot in v1, a remote sim in v2) receives the
-  // signal and grows its incoming queue. GARBAGE_RECEIVED is fired by the
-  // opponent when sending garbage *to* this player; the host queues it
-  // and applies between piece locks.
-  GARBAGE_SENT:       'GARBAGE_SENT',       // { rows: number, target: 'opponent' }
+  // Versus garbage (plan_gameplay_1.md §3.6 + §12 M5).
+  //
+  // The M5 spawn-delay window adds a step BETWEEN the rules pack
+  // computing outgoing garbage and the opponent receiving it. Versus's
+  // `onLinesCleared` emits `GARBAGE_OUTGOING` (raw, pre-cancellation);
+  // Game intercepts on the same bus, cancels against the player's own
+  // pending inbound queue (front-first), then emits `GARBAGE_CANCELLED`
+  // for the cancelled portion AND `GARBAGE_SENT` for the net amount
+  // that actually crosses to the opponent.
+  //
+  // Subscribers:
+  //   - HUD versus-badge listens to GARBAGE_SENT for outgoing display.
+  //   - Networking layer (post-§7) sends GARBAGE_SENT over the wire.
+  //   - HUD cancellation flash listens to GARBAGE_CANCELLED.
+  GARBAGE_OUTGOING:   'GARBAGE_OUTGOING',   // { rows: number, target: 'opponent' } — pre-cancellation
+  GARBAGE_SENT:       'GARBAGE_SENT',       // { rows: number, target: 'opponent' } — post-cancellation
+  GARBAGE_CANCELLED:  'GARBAGE_CANCELLED',  // { rows: number, side: string } — amount eaten from inbound queue
   GARBAGE_RECEIVED:   'GARBAGE_RECEIVED',   // { rows: number, holeColumn: number, source: 'opponent'|'mode' }
 
   // Fired by Game once a queued garbage entry has been applied to the

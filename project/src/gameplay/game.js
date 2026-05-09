@@ -32,6 +32,12 @@ const DEFAULT_COLS = 10;
 const DEFAULT_ROWS = 20;
 const GARBAGE_QUEUE_CAP_ROWS = 20;
 const GARBAGE_COLOR = 0x808080;
+// Modern-rules spawn-delay window (plan §12 M5). When a piece of garbage
+// arrives, it doesn't apply immediately — it waits `GARBAGE_DELAY_MS`
+// of game time (pause-aware, via `_modeTimeMs`) before becoming
+// "ready" to drain. During that window the player's outgoing clears
+// can cancel the queued garbage front-first.
+const GARBAGE_DELAY_MS_DEFAULT = 800;
 
 /**
  * @typedef {Object} GameOpts
@@ -111,6 +117,14 @@ export class Game {
     this._rng      = opts.rng || createSeededRng((Date.now() | 0) >>> 0);
     this._onEndRun = opts.onEndRun || null;
 
+    // M5 spawn-delay window (plan §12.5). Tunable via opts so single-
+    // player modes (which don't receive garbage anyway) and existing
+    // tests can keep the legacy "drain immediately" semantic by passing
+    // `garbageDelayMs: 0`. Production Versus uses the 800ms default.
+    this._garbageDelayMs = (typeof opts.garbageDelayMs === 'number')
+      ? Math.max(0, opts.garbageDelayMs | 0)
+      : GARBAGE_DELAY_MS_DEFAULT;
+
     // Board: `_rows × _cols`. board[0] is the BOTTOM row; matches main.js's
     // existing convention. Cell stores piece color (hex int) or null.
     this._board = Array.from({ length: this._rows }, () => Array(this._cols).fill(null));
@@ -133,7 +147,7 @@ export class Game {
     this._piecesThisSession = 0;
     this._linesThisSession  = 0;
 
-    /** @type {Array<{rows:number, holeColumn:number}>} */
+    /** @type {Array<{rows:number, holeColumn:number, readyAt:number}>} */
     this._garbageQueue = [];
     this._garbageBlocked = false;
 
@@ -169,6 +183,15 @@ export class Game {
     this._unsubGarbage = this._bus.on(EVENTS.GARBAGE_RECEIVED, (e) => {
       if (!e || typeof e.rows !== 'number' || e.rows <= 0) return;
       this.applyGarbage(e.rows, e.holeColumn);
+    });
+
+    // M5 cancellation broker. Versus's onLinesCleared emits
+    // GARBAGE_OUTGOING (raw amount, pre-cancellation). Game intercepts
+    // here, cancels front-first against the inbound queue, and
+    // re-emits the net amount as GARBAGE_SENT.
+    this._unsubOutgoing = this._bus.on(EVENTS.GARBAGE_OUTGOING, (e) => {
+      if (!e || typeof e.rows !== 'number' || e.rows <= 0) return;
+      this._processOutgoingGarbage(e.rows | 0, e.target || 'opponent');
     });
   }
 
@@ -750,6 +773,12 @@ export class Game {
    * or directly by the dual-sim host's bridge (sub-phase 7e). Beyond
    * GARBAGE_QUEUE_CAP_ROWS the additional rows are dropped on the floor
    * and the `garbageBlocked` flag flips for the badge.
+   *
+   * M5 (plan §12.5): each entry is stamped with `readyAt` =
+   * `_modeTimeMs + _garbageDelayMs`. `_drainInboundGarbage` skips
+   * entries where `readyAt > _modeTimeMs`, giving the player a
+   * cancellation window. `_modeTimeMs` is pause-aware (Game.tick
+   * doesn't advance it while paused), so the delay window pauses too.
    */
   applyGarbage(rows, holeColumn) {
     const r = (typeof rows === 'number') ? (rows | 0) : 0;
@@ -761,16 +790,63 @@ export class Game {
     const safeHole = (typeof holeColumn === 'number')
       ? holeColumn
       : Math.floor(this._rng() * this._cols) % this._cols;
-    this._garbageQueue.push({ rows: r, holeColumn: safeHole });
+    this._garbageQueue.push({
+      rows:    r,
+      holeColumn: safeHole,
+      readyAt: this._modeTimeMs + this._garbageDelayMs,
+    });
   }
 
+  /**
+   * Drain "ready" entries from the front of the queue (those whose
+   * `readyAt` has passed). Stops at the first not-ready entry — the
+   * queue is FIFO so once we hit a not-ready entry, everything behind
+   * it is also not-ready.
+   */
   _drainInboundGarbage() {
     if (this._garbageQueue.length === 0) return;
     while (this._garbageQueue.length > 0) {
-      const { rows, holeColumn } = this._garbageQueue.shift();
-      this._applyGarbageToBoard(rows, holeColumn);
+      const front = this._garbageQueue[0];
+      if (front.readyAt > this._modeTimeMs) break;
+      this._garbageQueue.shift();
+      this._applyGarbageToBoard(front.rows, front.holeColumn);
     }
-    this._garbageBlocked = false;
+    if (this.queuedGarbageRows < GARBAGE_QUEUE_CAP_ROWS) {
+      this._garbageBlocked = false;
+    }
+  }
+
+  /**
+   * M5 cancellation broker. Eats `requested` rows from the front of the
+   * inbound queue (regardless of readyAt — even still-pending entries
+   * count as cancellable until they drain). Emits `GARBAGE_CANCELLED`
+   * for the eaten amount and `GARBAGE_SENT` for the net remainder.
+   */
+  _processOutgoingGarbage(requested, target) {
+    let toCancel = requested;
+    let cancelled = 0;
+    while (toCancel > 0 && this._garbageQueue.length > 0) {
+      const front = this._garbageQueue[0];
+      if (front.rows <= toCancel) {
+        cancelled += front.rows;
+        toCancel  -= front.rows;
+        this._garbageQueue.shift();
+      } else {
+        front.rows -= toCancel;
+        cancelled  += toCancel;
+        toCancel = 0;
+      }
+    }
+    if (cancelled > 0) {
+      this._bus.emit(EVENTS.GARBAGE_CANCELLED, { rows: cancelled, side: this._side });
+    }
+    const remaining = requested - cancelled;
+    if (remaining > 0) {
+      this._bus.emit(EVENTS.GARBAGE_SENT, { rows: remaining, target });
+    }
+    if (this.queuedGarbageRows < GARBAGE_QUEUE_CAP_ROWS) {
+      this._garbageBlocked = false;
+    }
   }
 
   _applyGarbageToBoard(rows, holeColumn) {
@@ -1024,6 +1100,10 @@ export class Game {
     if (this._unsubGarbage) {
       try { this._unsubGarbage(); } catch { /* ignore */ }
       this._unsubGarbage = null;
+    }
+    if (this._unsubOutgoing) {
+      try { this._unsubOutgoing(); } catch { /* ignore */ }
+      this._unsubOutgoing = null;
     }
   }
 }
