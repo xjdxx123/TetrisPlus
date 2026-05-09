@@ -61,6 +61,7 @@ import { recordEndOfRun } from '../gameplay/end-of-run.js';
 import { pickHoleColumn } from '../gameplay/garbage.js';
 import { Game } from '../gameplay/game.js';
 import { BoardView } from '../world/board-view.js';
+import { VersusSession } from './versus.js';
 
 // =============================================================
 // Tweaks — original three (gravity / mood / shatterPower) are written by
@@ -1694,8 +1695,23 @@ let board = Array.from({ length: ROWS }, () => Array(COLS).fill(null));
 // in BoardView (§3.7 sub-phase 7b). Visual-inertia state (the spring on
 // the active piece) stays in main.js — it animates BoardView's
 // pieceGroup but isn't part of the simulation.
-let game      = null;
-let boardView = null;
+//
+// In versus mode `versusSession` owns a real second simulation (the
+// AI opponent — §3.7 sub-phase 7e). When non-null, `game` and
+// `boardView` are aliased to the player side (`gameP1` / `viewP1`)
+// so the existing legacy gameplay wrappers keep working untouched.
+let game           = null;
+let boardView      = null;
+let versusSession  = null;
+
+// Dual-board layout constants for versus mode. The existing case mesh
+// sits at caseGroup origin; the player's well stays there (so the
+// chrome wraps it as before). The opponent's well is mounted at
+// +OPPONENT_OFFSET_X with no chrome — duplicating the case mesh per
+// side is a polish item, not the §3.7 7e deliverable.
+const OPPONENT_OFFSET_X    = 14;
+const VERSUS_CAM_POS       = new THREE.Vector3(21, 4, 34);
+const VERSUS_CAM_TARGET    = new THREE.Vector3(7, 0, 0);
 
 let activePiece = null;
 let nextQueue = [];
@@ -1773,6 +1789,20 @@ const GARBAGE_COLOR = 0x808080; // neutral gray; reads as "not mine"
 
 function _queuedGarbageRowCount() {
   return game ? game.queuedGarbageRows : 0;
+}
+
+/**
+ * Highest non-empty row in a board, 1-indexed (0 = empty board, ROWS =
+ * stack reaches the top). Used by versus-badge to render the
+ * opponent's stack-height meter.
+ */
+function _highestFilledRow(board) {
+  if (!Array.isArray(board)) return 0;
+  for (let r = board.length - 1; r >= 0; r--) {
+    const row = board[r];
+    if (row && row.some(c => c != null)) return r + 1;
+  }
+  return 0;
 }
 
 // =============================================================
@@ -2568,38 +2598,92 @@ Mode._wireLifecycle({
     // gravityScalar thunk keeps the live TWEAKS slider working across
     // mode swaps without having to plumb it through Game.
     const rules = buildRules(key, { gravityScalar: () => TWEAKS.gravity, bus });
-    // Tear down any prior Game + BoardView (mode swap or restart).
-    // dispose() unhooks Game's GARBAGE_RECEIVED subscription and
-    // BoardView's mesh-side subscribers so a stale pair doesn't
-    // double-emit or double-render against the new instance.
-    if (boardView) boardView.dispose();
-    if (game)      game.dispose();
-    game = new Game({
-      rules,
-      bus,
-      side: 'player',
-      onEndRun: ({ reason, winner }) => endRun({ reason, winner }),
-    });
-    boardView = new BoardView({
-      game, bus,
-      parent: caseGroup,
-      side: 'player',
-      cols: COLS, rows: ROWS, depth: DEPTH,
-      cellToWorld, makeCube, shatter, animateCubeTo, startLockAnim,
-      playSfx,
-    });
-    if (restart) {
-      resetRunState();
+    // Tear down any prior simulation. dispose() chains down through
+    // VersusSession → both games + both boardViews. Solo state is
+    // disposed redundantly (game/boardView may alias session.gameP1/
+    // viewP1 from a prior versus run); BoardView/Game.dispose are
+    // idempotent so the double-call is safe.
+    if (versusSession) versusSession.dispose();
+    if (boardView)     boardView.dispose();
+    if (game)          game.dispose();
+    versusSession = null;
+    _endRunInvoked = false; // reset host-side end-run guard
+
+    if (key === 'versus') {
+      // Real dual-sim — VersusSession owns both Games + BoardViews +
+      // the cross-bus garbage bridge. main.js drives the player side
+      // via its existing keyboard handlers (`playerInputMode: 'host'`);
+      // VersusSession's tickOpponent() drives the bot. Player events
+      // ride the global bus so HUD / cinematic FX / audio fire as
+      // usual; opponent events stay on a private bus (no leak).
+      versusSession = new VersusSession({
+        parent: caseGroup,
+        rendererDeps: { cellToWorld, makeCube, shatter, animateCubeTo, startLockAnim, playSfx },
+        opponentMode: 'bot',
+        opponentStrength: 'casual',
+        playerInputMode: 'host',
+        inputTarget: window,
+        busP1: bus,
+        onSideEnd: (reason, side) => {
+          // Player KO or session-forced opponent_topout → host's endRun
+          // does stats persistence + MODE_END. The `_endRunInvoked`
+          // guard covers the case where both sides signal in one tick
+          // (single-shot per run).
+          if (side === 'player') {
+            const winner = reason === 'topout' ? 'opponent' : undefined;
+            endRun({ reason, winner });
+          } else if (side === 'opponent') {
+            // Bot KO — player wins.
+            endRun({ reason: 'topout', winner: 'player' });
+          }
+        },
+      });
+      // Layout: player's well at the case origin (existing chrome
+      // wraps it); opponent's well off to the right (no chrome — see
+      // OPPONENT_OFFSET_X comment above for the rationale).
+      versusSession.dualBoard.leftAnchor.position.x  = 0;
+      versusSession.dualBoard.rightAnchor.position.x = OPPONENT_OFFSET_X;
+      // Alias the player side into the legacy refs so the gameplay
+      // function wrappers (tryMove, hardDrop, etc.) keep driving
+      // gameP1 unchanged.
+      game      = versusSession.gameP1;
+      boardView = versusSession.viewP1;
+      // Disable the Phase-6 abstract bot — VersusSession's BotController
+      // owns the opponent now. Without this, both bots emit garbage.
+      if (typeof versusBot !== 'undefined') {
+        versusBot.reset();
+        versusBot.setEnabled(false);
+      }
+      enterVersusCamera();
+      versusSession.start();
+      if (restart) resetRunState();
+      else         syncFromGame();
     } else {
-      // Fresh game (boot path) — Game has no active piece yet. Seed
-      // the first one; PIECE_SPAWN fires synchronously and BoardView's
-      // subscriber rebuilds the piece + ghost mesh.
-      game.spawnPiece();
-      syncFromGame();
+      // Solo modes — single Game + single BoardView, mounted directly
+      // under caseGroup at origin (the legacy layout).
+      game = new Game({
+        rules,
+        bus,
+        side: 'player',
+        onEndRun: ({ reason, winner }) => endRun({ reason, winner }),
+      });
+      boardView = new BoardView({
+        game, bus,
+        parent: caseGroup,
+        side: 'player',
+        cols: COLS, rows: ROWS, depth: DEPTH,
+        cellToWorld, makeCube, shatter, animateCubeTo, startLockAnim,
+        playSfx,
+      });
+      if (typeof versusBot !== 'undefined') versusBot.reset();
+      exitVersusCamera();
+      if (restart) {
+        resetRunState();
+      } else {
+        game.spawnPiece();
+        syncFromGame();
+      }
     }
-    // Bot still lives in main.js (host concern). Reset is idempotent for
-    // non-versus modes.
-    if (typeof versusBot !== 'undefined') versusBot.reset();
     bus.emit(EVENTS.MODE_START, {
       key,
       seed: typeof seed === 'number' ? seed : null,
@@ -2747,6 +2831,17 @@ const versusBot = (() => {
   return {
     reset,
     tick,
+    /**
+     * Force-disable the abstract bot. Called by `Mode._wireLifecycle.
+     * onStart` when versusSession owns the opponent — the abstract bot
+     * shouldn't ALSO emit garbage or absorb the player's clears.
+     * Setting active+alive to false makes both `tick()` and the
+     * GARBAGE_SENT subscriber early-return.
+     */
+    setEnabled(b) {
+      alive  = b && (Mode.current === 'versus');
+      active = b && (Mode.current === 'versus');
+    },
     get alive()       { return alive; },
     get active()      { return active; },
     get score()       { return Math.round(score); },
@@ -2860,6 +2955,35 @@ function resetCamera() {
 }
 
 const camTween = { active: false, t: 0, dur: 0.7, from:null, to:null, fromTarget:null, toTarget:null };
+
+/**
+ * Slide the camera to the dual-board midpoint so both wells fit in
+ * the frame. Called on entering versus mode; `exitVersusCamera`
+ * restores the default for solo modes.
+ */
+function enterVersusCamera() {
+  camTween.from = camera.position.clone();
+  camTween.to   = VERSUS_CAM_POS.clone();
+  camTween.fromTarget = controls.target.clone();
+  camTween.toTarget   = VERSUS_CAM_TARGET.clone();
+  camTween.t = 0;
+  camTween.dur = 0.9;
+  camTween.active = true;
+}
+
+function exitVersusCamera() {
+  // Only tween if we're not already at default — avoids a 0.9s
+  // no-op on every solo Mode.start.
+  if (camera.position.distanceToSquared(DEFAULT_CAM_POS) < 1e-3 &&
+      controls.target.distanceToSquared(DEFAULT_CAM_TARGET) < 1e-3) return;
+  camTween.from = camera.position.clone();
+  camTween.to   = DEFAULT_CAM_POS.clone();
+  camTween.fromTarget = controls.target.clone();
+  camTween.toTarget   = DEFAULT_CAM_TARGET.clone();
+  camTween.t = 0;
+  camTween.dur = 0.9;
+  camTween.active = true;
+}
 
 // =============================================================
 // Punch-zoom for multi-line clears
@@ -3306,8 +3430,15 @@ function animate(dt, envTime) {
     // rules pack's onTick + endCondition polling. Soft-drop input is
     // signalled via the InputFrame so Game accelerates fallTimer 12×
     // (matches the legacy down-arrow-held behavior).
+    //
+    // In versus mode, VersusSession.tickOpponent advances gameP2 (bot
+    // intents → tryMove/Rotate/hardDrop on gameP2 + gameP2.tick).
+    // The abstract Phase-6 versusBot is disabled in versusSession
+    // mode (alive=false from setEnabled(false)), so its tick is a
+    // safe no-op even though we still call it.
     const dtMs = dtGame * 1000;
-    versusBot.tick(dtMs); // host-owned bot — versus only, no-op otherwise
+    versusBot.tick(dtMs);
+    if (versusSession) versusSession.tickOpponent(dtMs);
     const tickResult = game ? game.tick(dtMs, { softDrop: !!keyState.down }) : null;
     syncFromGame();
     if (tickResult && tickResult.reason) {
@@ -4401,12 +4532,26 @@ const versusBadge = createVersusBadge({
   bus,
   events: EVENTS,
   getActiveModeKey: () => Mode.current,
-  getOpponentSnapshot: () => ({
-    score:           versusBot.score,
-    stackHeight:     versusBot.stackHeight,
-    deathThreshold:  versusBot.deathThreshold,
-    alive:           versusBot.alive,
-  }),
+  // Opponent snapshot routes to whichever bot is active: the §3.7 7e
+  // VersusSession (real second sim with a visible board) when present,
+  // or the Phase-6 abstract bot (no visible board) as fallback.
+  getOpponentSnapshot: () => {
+    if (versusSession) {
+      const op = versusSession.gameP2;
+      return {
+        score:          op.score,
+        stackHeight:    _highestFilledRow(op.board),
+        deathThreshold: ROWS - 1,
+        alive:          !op.gameOver,
+      };
+    }
+    return {
+      score:          versusBot.score,
+      stackHeight:    versusBot.stackHeight,
+      deathThreshold: versusBot.deathThreshold,
+      alive:          versusBot.alive,
+    };
+  },
   getInboundGarbage: () => ({
     rows:    _queuedGarbageRowCount(),
     blocked: game ? game.garbageBlocked : false,

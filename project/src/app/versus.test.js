@@ -21,6 +21,8 @@ vi.mock('three', () => {
 });
 
 import { VersusSession } from './versus.js';
+import { EventBus } from '../engine/events/bus.js';
+import { EVENTS } from '../gameplay/events.js';
 
 class FakeGroup {
   constructor() { this.children = []; this.parent = null; this.position = { x: 0 }; }
@@ -220,5 +222,113 @@ describe('VersusSession — dispose', () => {
     v.dispose();
     // After dispose, parent should no longer hold the dualBoard's anchors.
     expect(parent.children.length).toBe(0);
+  });
+});
+
+// ─── Host-driven mode (sub-phase 7e integration) ─────────────────────
+
+describe('VersusSession — playerInputMode: \'host\'', () => {
+  it('skips routerP1 so the host owns player keyboard handling', () => {
+    const v = new VersusSession({
+      parent: new FakeGroup(),
+      rendererDeps: fakeRendererDeps(),
+      inputTarget: makeFakeInputTarget(),
+      playerInputMode: 'host',
+    });
+    expect(v.routerP1).toBeNull();
+    expect(v.bot).toBeTruthy();
+    v.dispose();
+  });
+
+  it('tick() in host mode does NOT advance gameP1 (host does that)', async () => {
+    const v = new VersusSession({
+      parent: new FakeGroup(),
+      rendererDeps: fakeRendererDeps(),
+      inputTarget: makeFakeInputTarget(),
+      playerInputMode: 'host',
+    });
+    v.start();
+    // Snapshot gameP1's state before + after tick — modeTimeMs only
+    // advances if Game.tick was called.
+    const before = v.gameP1.modeTimeMs;
+    for (let i = 0; i < 10; i++) v.tick(50);
+    expect(v.gameP1.modeTimeMs).toBe(before); // unchanged: host didn't call game.tick
+    v.dispose();
+  });
+
+  it('tickOpponent advances ONLY the opponent side', () => {
+    const v = new VersusSession({
+      parent: new FakeGroup(),
+      rendererDeps: fakeRendererDeps(),
+      inputTarget: makeFakeInputTarget(),
+      playerInputMode: 'host',
+    });
+    v.start();
+    const beforeP1 = v.gameP1.modeTimeMs;
+    for (let i = 0; i < 10; i++) v.tickOpponent(50);
+    expect(v.gameP1.modeTimeMs).toBe(beforeP1); // P1 unchanged
+    expect(v.gameP2.modeTimeMs).toBeGreaterThan(0); // P2 advanced
+    v.dispose();
+  });
+});
+
+describe('VersusSession — host-supplied busP1', () => {
+  it('routes player events on the host bus so global subscribers fire', () => {
+    const hostBus = new EventBus({ replayBufferSize: 0, recorderSize: 0 });
+    const playerLocks = [];
+    hostBus.on(EVENTS.PIECE_LOCK, (e) => { if (e.side === 'player') playerLocks.push(e); });
+
+    const v = new VersusSession({
+      parent: new FakeGroup(),
+      rendererDeps: fakeRendererDeps(),
+      inputTarget: makeFakeInputTarget(),
+      playerInputMode: 'host',
+      busP1: hostBus,
+    });
+    v.start();
+    // Force a player lock — emits PIECE_LOCK on whichever bus gameP1 owns.
+    v.gameP1.hardDrop();
+    v.gameP1.lockPiece();
+    expect(playerLocks.length).toBe(1);
+    expect(playerLocks[0].side).toBe('player');
+    v.dispose();
+  });
+
+  it('opponent events stay on the private opponent bus (no leak to host)', () => {
+    const hostBus = new EventBus({ replayBufferSize: 0, recorderSize: 0 });
+    const opponentLocks = [];
+    hostBus.on(EVENTS.PIECE_LOCK, (e) => { if (e.side === 'opponent') opponentLocks.push(e); });
+
+    const v = new VersusSession({
+      parent: new FakeGroup(),
+      rendererDeps: fakeRendererDeps(),
+      inputTarget: makeFakeInputTarget(),
+      playerInputMode: 'host',
+      busP1: hostBus,
+    });
+    v.start();
+    v.gameP2.hardDrop();
+    v.gameP2.lockPiece();
+    // Opponent bus is private — no leak to hostBus.
+    expect(opponentLocks.length).toBe(0);
+    v.dispose();
+  });
+
+  it('cross-bus garbage bridge still works with host-supplied busP1', () => {
+    const hostBus = new EventBus({ replayBufferSize: 0, recorderSize: 0 });
+    const v = new VersusSession({
+      parent: new FakeGroup(),
+      rendererDeps: fakeRendererDeps(),
+      inputTarget: makeFakeInputTarget(),
+      playerInputMode: 'host',
+      busP1: hostBus,
+    });
+    v.start();
+    // Player clears 2 lines → bridge sends 1 garbage to opponent.
+    for (let c = 0; c < v.gameP1.cols; c++) v.gameP1.board[0][c] = 0xff0000;
+    for (let c = 0; c < v.gameP1.cols; c++) v.gameP1.board[1][c] = 0xff0000;
+    v.gameP1.clearLines([0, 1]);
+    expect(v.gameP2.queuedGarbageRows).toBeGreaterThanOrEqual(1);
+    v.dispose();
   });
 });
