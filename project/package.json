@@ -12,6 +12,7 @@
     "test": "vitest"
   },
   "dependencies": {
+    "@dimforge/rapier3d-compat": "^0.19.3",
     "three": "0.160.0",
     "web-audio-beat-detector": "^8.2.36"
   },

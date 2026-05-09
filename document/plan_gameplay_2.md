@@ -1,6 +1,6 @@
 # Tetris+ Gameplay Plan v2 — Post-§12 Forward Roadmap
 
-**Date:** 2026-05-09 · **Test surface:** 754 tests across 45 files (all green) ·
+**Date:** 2026-05-09 · **Test surface:** 775 tests across 46 files (all green) ·
 **Predecessor:** `document/archived/plan_gameplay_1.md` (preserved for the
 full design rationale, mode-by-mode specs, and shipped-implementation
 notes). v2 picks up where v1 left off.
@@ -37,6 +37,7 @@ specified them; v2 won't redesign these, only build on top.
 | **§1 polish — Garbage drain flash** | v2 §1.3 (`7553c72`) | One-shot CSS animation on the queue container — pink on GARBAGE_APPLIED, cyan on GARBAGE_CANCELLED. |
 | **§1 polish — In-run chips** | v2 §1.4 (`c123529`) | `ui/modern-chips.js` — persistent top-left readout of "B2B ×N" + "Combo ×N" while streaks active; complements transient callouts. |
 | **§2.3 Pure Physics — Phase A** | v2 §2.3 | `gameplay/experimental/physics/` scaffolding + rules pack (`buildPhysicsRules`, registered) + pure connected-component layer-detection algorithm. No Rapier dependency yet — phase A is the JS-only foundation that phases B–F will build on. 38 new tests. |
+| **§2.3 Pure Physics — Phase B** | v2 §2.3 | `physics/world.js` Rapier-backed wrapper + `@dimforge/rapier3d-compat` runtime dep. Lazy `loadRapier()` factory, `createPhysicsWorld()` async constructor, `PhysicsWorld` class with addBody / step / getPositions / removeBody[s] / highestY / awakeCount / wakeAll / dispose. Default geometry: floor + side walls. Tested against real Rapier (no mocks). 20 new tests; all green. |
 
 ### 0.2 Architectural property to preserve
 
@@ -271,11 +272,11 @@ bonus possible).
 | Phase | Scope | Status | Effort |
 |---|---|---|---|
 | **A — Pure logic + scaffolding** | rules pack, layer-detection algorithm, registry entry, experimental/ README | ✅ shipped | ½ day |
-| B — Rapier integration | `physics/world.js` wrapping Rapier, lazy-import on Mode.start({key:'physics'}) | open | 1 day |
-| C — Body lifecycle | grid→bodies on lock; cleanup on layer-clear; sleep heuristics | open | 1 day |
-| D — Layer detection wiring | per-frame body-position snapshot → `detectLayers` → emit clear events | open | ½ day |
-| E — Mode integration + HUD | `ui/physics-badge.js`, Mode tab visibility, settings opt-in | open | ½ day |
-| F — VFX integration | dust on collision, layer-clear shatter adapts to body positions | open | 1 day |
+| **B — Rapier integration** | `physics/world.js` wrapping Rapier, lazy-import factory, body lifecycle primitives | ✅ shipped | 1 day |
+| C — Host bridge | `Mode.start({key:'physics'})` lazy-loads + boots PhysicsWorld; `Game.lockPiece` cell→body conversion; per-frame step + getPositions | open | 1 day |
+| D — Layer detection wiring | host calls detectLayers on snapshots, emits LINE_CLEAR with body IDs, removes via PhysicsWorld | open | ½ day |
+| E — Mode integration + HUD | `ui/physics-badge.js` (settled / awake count), Mode tab visibility, settings opt-in | open | ½ day |
+| F — VFX integration | dust on collision, layer-clear shatter adapts to body positions; render bodies via existing cube mesh path | open | 1 day |
 
 **Phase A — what shipped (`<TBD-sha>`):**
 - `gameplay/experimental/physics/rules.js` — `buildPhysicsRules()` with
@@ -296,16 +297,57 @@ bonus possible).
   bundle stays out of `main`'s build until phase B explicitly opts
   in via lazy-import.
 
-**Phase B prep notes:**
-- `npm install @dimforge/rapier3d-compat` (the sync-init variant
-  is friendlier than the wasm-fetching default; bundle hit ~600KB
-  per archived §8.3).
-- Lazy-load via dynamic `await import()` inside the host's
-  `Mode.start` handler so non-physics modes don't pay the wasm cost.
-- A `physics/world.js` wrapper exposes the host-facing API:
-  `addBody(x, y, z) → bodyId`, `step(dt)`, `getPositions() →
-  CubePosition[]`, `removeBodies(ids)`. The rules pack stays unaware
-  of Rapier — it consumes the layer-detection result via the host.
+**Phase B — what shipped:**
+- `@dimforge/rapier3d-compat` ^0.19.3 added as a runtime dep. Sync-init
+  wasm variant works in vitest's Node environment without extra
+  setup. Bundle hit ~600KB; isolated to physics-mode by the lazy
+  loader (next bullet).
+- `physics/world.js` (new top-level subsystem, mirroring `camera/`,
+  `vfx/` etc.) — exposes `loadRapier()` (idempotent async loader)
+  + `createPhysicsWorld(opts)` factory + `PhysicsWorld` class.
+- The wrapper's host-facing API:
+  - `addBody(x, y, z, opts?)` → numeric `bodyId` (stable for body
+    lifetime; decoupled from Rapier's internal handle scheme).
+  - `step()` — fixed 1/60s timestep for determinism.
+  - `getPositions()` → `[{bodyId, x, y, z}, ...]` snapshot of all
+    live dynamic bodies. Output ordering is insertion order; the
+    `bodyId` lets the host map `detectLayers`' `cubeIndices` back
+    to IDs for removal.
+  - `removeBody(id)` / `removeBodies(ids)` — idempotent on unknown
+    IDs; returns count actually removed.
+  - `highestY` accessor — feeds the rules pack's
+    `endCondition(state)` via `state.physicsHighestY > 22`.
+  - `awakeCount` — for the HUD's "settled" indicator.
+  - `wakeAll()` — re-activates settled bodies after a clear.
+  - `dispose()` — frees the Rapier wasm world (idempotent).
+- Default world geometry: floor at y=-0.5 (cuboid, full playfield
+  width + 1 cell margin); side walls at x=-1 and x=cols (cuboid,
+  height = rows + 4 to prevent over-the-top wedge escape). Both
+  configurable via opts.
+- Per-cube material per archived §8.4: friction 0.6, restitution
+  0.1, linear damping 0.05, angular damping 0.10. Continuous
+  collision detection enabled so a hard-dropped piece can't tunnel
+  through the floor. Auto-sleep enabled so settled bodies don't
+  burn CPU.
+- 20 tests covering boot, body lifecycle, gravity / step, sleep /
+  wake, highestY accessor, dispose. All against real Rapier (no
+  mocks); tests use `toBeCloseTo` for position assertions to
+  accommodate Rapier's semi-implicit Euler integration.
+
+**Phase C prep notes:**
+- The host's `Mode.start({key:'physics'})` handler in `app/main.js`
+  does `await createPhysicsWorld()` (lazy-imports Rapier). Stash
+  the world reference for the lifetime of the run; call `dispose()`
+  on Mode.stop.
+- `Game.lockPiece` doesn't change — the rules engine stays grid-
+  aware. The host bridge intercepts PIECE_LOCK events: for each
+  cell in the locked piece, call `world.addBody(cell.col, cell.row, 0)`
+  and remember the resulting bodyId in a side-table indexed by
+  `(col, row)` so render-side mesh updates can find the right body.
+- Per-frame: in the gameplay tick, call `world.step()`; in render,
+  call `getPositions()` and update the cube-mesh transforms from
+  the snapshot. Update `state.physicsHighestY = world.highestY` so
+  the rules pack's `endCondition` sees the live value.
 
 ---
 
