@@ -1963,6 +1963,88 @@ describe('Game — 3D lock + layer detection (plan v2 §2.1 Phase B)', () => {
   });
 });
 
+describe('Game — 3D tryRotate (plan v2 §2.1 Phase D)', () => {
+  it('rotates around Z by default — flat I along X becomes I along Y', () => {
+    const { game } = make3DGame();
+    game.spawnPiece('I'); // base cells: [[0,0,0],[1,0,0],[2,0,0],[3,0,0]] — along X
+    const before = game.activePiece.cells.map(c => [...c]);
+    const r = game.tryRotate(1); // CCW around Z by default
+    expect(r.rotated).toBe(true);
+    // After Z-rotation, cells should differ from the base.
+    expect(game.activePiece.cells).not.toEqual(before);
+    // Bounding box after normalize: since it's a 4-long line rotated
+    // 90° in the XY plane, it now spans Y instead of X.
+    const xs = game.activePiece.cells.map(c => c[0]);
+    const ys = game.activePiece.cells.map(c => c[1]);
+    expect(Math.max(...xs) - Math.min(...xs)).toBe(0); // collapsed in X
+    expect(Math.max(...ys) - Math.min(...ys)).toBe(3); // expanded in Y
+  });
+
+  it('rotates around X (pitch) — Z and Y swap on a piece that has Z extent', () => {
+    // The I-tetracube along X is rotation-symmetric about its own
+    // axis, so X-rotation is a no-op for I — pick BRANCH (the only
+    // mandatory piece with both Y and Z extent) and verify the
+    // post-rotation cell set differs from the input.
+    const { game } = make3DGame();
+    game.spawnPiece('B'); // BRANCH base: [[0,0,0],[1,0,0],[2,0,0],[1,0,1]]
+    const before = game.activePiece.cells.map(c => c.join(',')).sort();
+    const r = game.tryRotate(1, 'x');
+    expect(r.rotated).toBe(true);
+    const after = game.activePiece.cells.map(c => c.join(',')).sort();
+    // BRANCH has a cube above the midpoint (z=1); X-rotation swaps Y
+    // and Z so the lifted cube ends up in front instead of above.
+    expect(after).not.toEqual(before);
+  });
+
+  it('rotates around Y (yaw) — flat I along X tips into Z', () => {
+    const { game } = make3DGame();
+    game.spawnPiece('I');
+    const r = game.tryRotate(1, 'y');
+    expect(r.rotated).toBe(true);
+    const cells = game.activePiece.cells;
+    // Y-rotation maps (x,y,z) → (z,y,-x); the I now spans Z.
+    const zs = cells.map(c => c[2]);
+    expect(Math.max(...zs) - Math.min(...zs)).toBe(3);
+  });
+
+  it('CW vs CCW — opposite directions cancel out', () => {
+    const { game } = make3DGame();
+    game.spawnPiece('T');
+    const before = game.activePiece.cells.map(c => [...c]).sort();
+    game.tryRotate(1,  'z');
+    game.tryRotate(-1, 'z');
+    const after = game.activePiece.cells.map(c => [...c]).sort();
+    expect(after).toEqual(before);
+  });
+
+  it('emits PIECE_ROTATE with the axis on the payload', () => {
+    const { game, bus } = make3DGame();
+    let captured = null;
+    bus.on(EVENTS.PIECE_ROTATE, (e) => { captured = e; });
+    game.spawnPiece('T');
+    game.tryRotate(1, 'x');
+    expect(captured).not.toBeNull();
+    expect(captured.axis).toBe('x');
+    expect(captured.dir).toBe(1);
+  });
+
+  it('rejects rotation that would collide (no kick table for Phase D MVP)', () => {
+    const { game } = make3DGame();
+    // Build a board state where the piece can't rotate. Spawn I at the
+    // floor level (row=0) and fill the cells where its CCW-Z rotation
+    // would land.
+    game.spawnPiece('I');
+    game.activePiece.row = 0;
+    game.activePiece.col = 0;
+    game.activePiece.depth = 0;
+    // I along Y after CCW-Z rotation occupies (0,0..3,0) at depth=0;
+    // pre-fill (0,1,0) so the rotation collides.
+    game.boardLayers[0][1][0] = 0xff0000;
+    const r = game.tryRotate(1, 'z');
+    expect(r.rotated).toBe(false);
+  });
+});
+
 describe('Game — 3D serialize / restore (plan v2 §2.1 Phase B)', () => {
   it('serialize includes depth + 3D-shaped board', () => {
     const { game } = make3DGame();

@@ -24,6 +24,7 @@
 import { EVENTS } from './events.js';
 import { PIECES, PIECE_COLORS, PIECE_KEYS } from './pieces.js';
 import { TETRACUBES, TETRACUBE_KEYS, TETRACUBE_COLORS } from './experimental/3d/tetracubes.js';
+import { rotateX as rotate3DX, rotateY as rotate3DY, rotateZ as rotate3DZ, normalize as normalize3D } from './experimental/3d/rotation.js';
 import { getKickOffsets, nextRotation } from './rotation.js';
 import { detectTSpin } from './t-spin.js';
 import { perfectClearBonus } from './scoring.js';
@@ -593,17 +594,34 @@ export class Game {
   }
 
   /**
-   * Rotate the active piece. `dir` is +1 (CW) or -1 (CCW). Tries each
-   * SRS kick offset for the (fromRot, toRot) pair in order; first
-   * non-colliding offset wins. Returns `{ rotated, kicked, kickIndex }`
-   * — `kickIndex` is 0..4 (the SRS test index that fit; 0 = no kick),
-   * `kicked` is preserved as the kick index for back-compat (legacy
-   * tests checked it as truthy/falsy). On success, emits PIECE_ROTATE
-   * and updates `_lastAction = 'rotation'` and `_lastKickIndex`.
+   * Rotate the active piece.
+   *
+   * 2D mode (`pieceSet === 'tetrominoes'`): `dir` is +1 (CW) or -1 (CCW)
+   * around the screen-perpendicular Z axis. Tries each SRS kick offset
+   * for the (fromRot, toRot) pair in order; first non-colliding offset
+   * wins. Returns `{ rotated, kicked, kickIndex }` — `kickIndex` is 0..4
+   * (the SRS test index that fit; 0 = no kick).
+   *
+   * 3D mode (`pieceSet === 'tetracubes'`): `axis` selects the rotation
+   * axis ('x' / 'y' / 'z'); `dir` is +1 / -1 (right-handed CCW around
+   * +axis). Cells are rotated via `experimental/3d/rotation.js` and
+   * re-normalized so the piece's bounding box stays origin-anchored.
+   * No kick table for Phase D — a colliding rotation simply fails
+   * (legacy "tap rotate" feel). The 6-face + 12-edge kick table from
+   * archived §6.4 is a Phase D-2 follow-up.
+   *
+   * On success, emits PIECE_ROTATE and updates `_lastAction = 'rotation'`
+   * + `_lastKickIndex`.
+   *
+   * @param {number} dir   ±1
+   * @param {'x'|'y'|'z'} [axis='z']  3D mode only; ignored in 2D
    */
-  tryRotate(dir) {
+  tryRotate(dir, axis = 'z') {
     if (!this._activePiece || this._gameOver || this._paused) {
       return { rotated: false, kicked: 0, kickIndex: -1 };
+    }
+    if (this._pieceSet === 'tetracubes') {
+      return this._tryRotate3D(dir, axis);
     }
     const fromRot = this._activePiece.rot;
     const nrot    = nextRotation(fromRot, dir);
@@ -631,6 +649,55 @@ export class Game {
       }
     }
     return { rotated: false, kicked: 0, kickIndex: -1 };
+  }
+
+  /**
+   * 3D rotation (plan v2 §2.1 Phase D). Applies one 90° rotation around
+   * the requested axis to the active piece's cached cells, normalizes
+   * the result so the bounding box re-anchors to the origin, and tests
+   * collision against the live board state. No kick table for Phase D —
+   * the rotation either fits or it doesn't. Phase D-2 will plug in the
+   * archived §6.4 kick offsets.
+   *
+   * @param {number} dir   ±1 (right-handed: positive = CCW around +axis)
+   * @param {'x'|'y'|'z'} axis
+   */
+  _tryRotate3D(dir, axis) {
+    const piece = this._activePiece;
+    const cells = piece.cells || (TETRACUBES[piece.key] && TETRACUBES[piece.key].cells) || [];
+    if (cells.length === 0) return { rotated: false, kicked: 0, kickIndex: -1 };
+
+    // Choose rotation primitive. The `rotate3D*` family does a single
+    // CCW 90° turn; for `dir = -1` we compose three CCW turns (== one
+    // CW). Cheap enough — 4 cells × at most 3 calls.
+    const rotOnce = axis === 'x' ? rotate3DX
+                  : axis === 'y' ? rotate3DY
+                  : rotate3DZ;
+    let rotated = cells;
+    const turns = (dir > 0) ? 1 : 3;
+    for (let i = 0; i < turns; i++) rotated = rotOnce(rotated);
+    rotated = normalize3D(rotated);
+
+    // Probe the rotated piece against the live board. We pass a
+    // shallow clone with the candidate cells so getPieceCells uses
+    // them (the 3D path reads `piece.cells` first).
+    const candidate = { ...piece, cells: rotated };
+    if (this.collides(candidate, piece.col, piece.row, piece.rot)) {
+      return { rotated: false, kicked: 0, kickIndex: -1 };
+    }
+
+    piece.cells = rotated;
+    this._lastAction    = 'rotation';
+    this._lastKickIndex = 0;
+    this._bus.emit(EVENTS.PIECE_ROTATE, {
+      rotation: piece.rot, // 2D rot index unused in 3D — reported for shape parity
+      dir,
+      axis,
+      kicked:    false,
+      kickIndex: 0,
+      side: this._side,
+    });
+    return { rotated: true, kicked: 0, kickIndex: 0 };
   }
 
   // ─── Drops ───────────────────────────────────────────────────────────
