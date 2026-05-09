@@ -891,10 +891,41 @@ export class Game {
       }
     }
 
+    // 3D stack-overflow topout (plan v2 §2.1). 2D modes catch topout
+    // via spawnPiece's collision check at (col=3, row=18) — the spawn
+    // necessarily intersects any tall stack. 3D mode spawns at the
+    // well's center depth, so an asymmetric tower built only at the
+    // front (or back) face never reaches the spawn position; the
+    // player would otherwise stack indefinitely. Run AFTER any clear
+    // so a layer that fills + clears in the same lock doesn't false-
+    // positive.
+    if (this._depth > 1 && this._stackOverflowed()) {
+      this._signalEndRun({ reason: 'topout' });
+      return;
+    }
+
     // Garbage application — between piece locks, after any clears resolve.
     this._drainInboundGarbage();
 
     this.spawnPiece();
+  }
+
+  /**
+   * 3D stack-overflow predicate — `true` when ANY (col, depth) at the
+   * topmost playable row contains a cube. Used by `lockPiece` for the
+   * 3D topout that the per-piece spawn-collision check can miss
+   * (asymmetric stacks that don't reach the spawn's center depth).
+   * 2D modes don't call this — the spawn check is sufficient there.
+   */
+  _stackOverflowed() {
+    const topRow = this._rows - 1;
+    for (let d = 0; d < this._depth; d++) {
+      const row = this._board[d][topRow];
+      for (let c = 0; c < this._cols; c++) {
+        if (row[c] !== null) return true;
+      }
+    }
+    return false;
   }
 
   /**

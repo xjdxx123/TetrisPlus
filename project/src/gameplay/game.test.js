@@ -2149,6 +2149,81 @@ describe('Game — 3D tryRotate (plan v2 §2.1 Phase D)', () => {
   });
 });
 
+describe('Game — 3D topout (plan v2 §2.1)', () => {
+  it('asymmetric stack at the front face triggers topout (spawn-collision check would miss it)', () => {
+    // The user complaint behind this fix: pieces spawn at the well's
+    // center depth (=4 for DEPTH=10), so a tall tower built only at
+    // depth=0 (the front face) would otherwise let the player keep
+    // playing forever — the spawn position never collides with the
+    // front tower. The post-lock `_stackOverflowed` check catches
+    // this by inspecting every (col, depth) at the top row.
+    const { game } = make3DGame();
+    // Pre-fill an entire column-4 tower at depth=0 reaching row 19 —
+    // a visually overflowing front-face stack the spawn check can't
+    // see (since depth=4 at col=4 is still clear).
+    for (let r = 0; r <= 19; r++) {
+      game.boardLayers[0][r][4] = 0xff0000;
+    }
+    // Spawn somewhere safe + drop + lock. The piece falls into the
+    // empty middle depth, locks at low rows, and the post-lock
+    // overflow check fires because of the pre-existing front tower.
+    game.spawnPiece('I');
+    game.hardDrop();
+    game.lockPiece();
+    expect(game.gameOver).toBe(true);
+  });
+
+  it('normal play (lock at the bottom of an empty well) does NOT topout', () => {
+    // Hard-drop a piece into a fresh well — it lands at row 0,
+    // nothing reaches the top, no overflow.
+    const { game } = make3DGame();
+    game.spawnPiece('I');
+    game.hardDrop();
+    game.lockPiece();
+    expect(game.gameOver).toBe(false);
+    // Top row stays empty across every depth slice.
+    for (let d = 0; d < game.depth; d++) {
+      for (let c = 0; c < game.cols; c++) {
+        expect(game.boardLayers[d][game.rows - 1][c]).toBeNull();
+      }
+    }
+  });
+
+  it('overflow check runs AFTER clearLines — a top-row layer that fills + clears does NOT topout', () => {
+    // Pre-fill row 19 at all (col, depth) EXCEPT one cube that the
+    // just-spawned piece will plug. With the projection rule, that
+    // last cube triggers a layer clear; clearLines splices row 19
+    // out; row 19 is then empty so the overflow check passes.
+    const { game } = make3DGame();
+    // Fill row 19 at depth=0 columns 0..8 (one column open). Avoid
+    // touching the spawn area (col 4..5 at depth 4) so spawn fits.
+    for (let c = 0; c < game.cols - 1; c++) {
+      game.boardLayers[0][19][c] = 0xff0000;
+    }
+    // Plug the missing column 9 manually so the projection at row
+    // 19 reads as full when _collectFullRows runs in lockPiece. We
+    // can't rely on the piece doing it (the spawn area is empty so
+    // the piece falls to row 0).
+    game.boardLayers[0][19][9] = 0xff0000;
+    game.spawnPiece('I');
+    game.hardDrop();
+    game.lockPiece();
+    expect(game.gameOver).toBe(false);
+  });
+
+  it('2D modes are unchanged by the new 3D-only overflow branch', () => {
+    // Regression — the `_depth > 1` gate keeps 2D modes on the
+    // legacy spawn-collision-only topout path.
+    const { game } = makeGame();
+    expect(game._depth).toBe(1);
+    // Drop a normal piece in an empty 2D well — no topout.
+    game.spawnPiece('T');
+    game.hardDrop();
+    game.lockPiece();
+    expect(game.gameOver).toBe(false);
+  });
+});
+
 describe('Game — 3D serialize / restore (plan v2 §2.1 Phase B)', () => {
   it('serialize includes depth + 3D-shaped board', () => {
     const { game } = make3DGame();
