@@ -99,4 +99,15 @@ describe('rules — fallback / unknown keys', () => {
     expect(buildRules('zen').fallIntervalSec(1)).toBeCloseTo(1.0, 5);
     expect(c.fallIntervalSec(1)).toBeCloseTo(0.85, 5);
   });
+
+  it('experimental "physics" key is registered (plan v2 §2.3)', () => {
+    const r = buildRules('physics');
+    expect(r.key).toBe('physics');
+    // Physics doesn't use level multipliers — 1 layer × 100, no scaling.
+    expect(r.lineScore(1, 1)).toBe(100);
+    expect(r.lineScore(1, 99)).toBe(100);
+    // physicsTopoutY is the body-Y threshold; surfaced for HUD use.
+    expect(typeof r.physicsTopoutY).toBe('number');
+    expect(r.initialModeView.kind).toBe('physics');
+  });
 });

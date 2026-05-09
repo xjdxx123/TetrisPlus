@@ -1,6 +1,6 @@
 # Tetris+ Gameplay Plan v2 — Post-§12 Forward Roadmap
 
-**Date:** 2026-05-09 · **Test surface:** 717 tests across 43 files (all green) ·
+**Date:** 2026-05-09 · **Test surface:** 754 tests across 45 files (all green) ·
 **Predecessor:** `document/archived/plan_gameplay_1.md` (preserved for the
 full design rationale, mode-by-mode specs, and shipped-implementation
 notes). v2 picks up where v1 left off.
@@ -36,6 +36,7 @@ specified them; v2 won't redesign these, only build on top.
 | **§1 polish — VFX celebration recipes** | v2 §1.2 (`d1a4104`) | LINE_CLEAR shockwave/envReaction recolor on §12 flags (PC gold > T-spin violet > Mini dim violet > B2B cyan); SFX cues for T_SPIN / B2B_CHAIN / PERFECT_CLEAR; camera shake on B2B chain ≥ 2 + PC. |
 | **§1 polish — Garbage drain flash** | v2 §1.3 (`7553c72`) | One-shot CSS animation on the queue container — pink on GARBAGE_APPLIED, cyan on GARBAGE_CANCELLED. |
 | **§1 polish — In-run chips** | v2 §1.4 (`c123529`) | `ui/modern-chips.js` — persistent top-left readout of "B2B ×N" + "Combo ×N" while streaks active; complements transient callouts. |
+| **§2.3 Pure Physics — Phase A** | v2 §2.3 | `gameplay/experimental/physics/` scaffolding + rules pack (`buildPhysicsRules`, registered) + pure connected-component layer-detection algorithm. No Rapier dependency yet — phase A is the JS-only foundation that phases B–F will build on. 38 new tests. |
 
 ### 0.2 Architectural property to preserve
 
@@ -252,17 +253,59 @@ online; otherwise the over-the-wire feed includes events the
 client doesn't yet visualize, which leaves remote opponents'
 T-spins / Perfect Clears feeling under-celebrated.
 
-### 2.3 Pure Physics (§8) — ~5 days
+### 2.3 Pure Physics (§8) — ~5 days · **Phase A shipped**
 
-**Status.** Spec is in v1 §8. Not started. Independent of
-everything else; lands when there's bandwidth.
+**Status.** Spec is in v1 §8. **Phase A ✅ shipped** as a foundation;
+phases B–F (Rapier integration through VFX polish) remain.
 **v2 update.** Physics mode by design breaks determinism —
 recorded in v1 §11 and `gameplay/rules/versus.js` header. The §12
 modern rules' `_b2b` / `_combo` / T-spin detection all assume the
 board is a discrete grid; physics has continuous bodies. The
-physics rules pack should set `goalMultiplier = 1.0` and skip
-the modern-rules score paths (use a `clearType: 'physics'` branch
-in `lineClearScore` or just override `lineScore` directly).
+physics rules pack sets `goalMultiplier = 1.0` and ignores the
+clearType arg in its `lineScore` so §12 paths can't promote the
+score (a Tetris in physics mode is just 4 layers × 100, no T-spin
+bonus possible).
+
+**Phase plan (revised in v2):**
+
+| Phase | Scope | Status | Effort |
+|---|---|---|---|
+| **A — Pure logic + scaffolding** | rules pack, layer-detection algorithm, registry entry, experimental/ README | ✅ shipped | ½ day |
+| B — Rapier integration | `physics/world.js` wrapping Rapier, lazy-import on Mode.start({key:'physics'}) | open | 1 day |
+| C — Body lifecycle | grid→bodies on lock; cleanup on layer-clear; sleep heuristics | open | 1 day |
+| D — Layer detection wiring | per-frame body-position snapshot → `detectLayers` → emit clear events | open | ½ day |
+| E — Mode integration + HUD | `ui/physics-badge.js`, Mode tab visibility, settings opt-in | open | ½ day |
+| F — VFX integration | dust on collision, layer-clear shatter adapts to body positions | open | 1 day |
+
+**Phase A — what shipped (`<TBD-sha>`):**
+- `gameplay/experimental/physics/rules.js` — `buildPhysicsRules()` with
+  flat per-layer score (×100, no level multiplier), `physicsHighestY`-
+  aware topout via `endCondition`, `clearType` ignored on `lineScore`.
+  Registered in `rules.js#BUILDERS` so `buildRules('physics')` works.
+- `gameplay/experimental/physics/layer-detection.js` — pure
+  connected-component algorithm. Inputs `[{x,y,z}, ...]`, outputs
+  `Layer[]` with `cubeIndices` + Y center. Honors the §8.5 spec: ≥10
+  face-touching cubes within a 0.8 Y-band qualify; staircase
+  diagonals are correctly rejected. O(n²); fine for the ~500-body
+  budget the spec calls out.
+- `gameplay/experimental/README.md` — sets the scaffolding pattern
+  for future experimental modes (3D, etc.) + 30-day promote-or-delete
+  policy reminder.
+- 38 new tests (16 rules + 21 layer-detection + 1 registry
+  integration). Pure JS — no Rapier dependency yet, so the wasm
+  bundle stays out of `main`'s build until phase B explicitly opts
+  in via lazy-import.
+
+**Phase B prep notes:**
+- `npm install @dimforge/rapier3d-compat` (the sync-init variant
+  is friendlier than the wasm-fetching default; bundle hit ~600KB
+  per archived §8.3).
+- Lazy-load via dynamic `await import()` inside the host's
+  `Mode.start` handler so non-physics modes don't pay the wasm cost.
+- A `physics/world.js` wrapper exposes the host-facing API:
+  `addBody(x, y, z) → bodyId`, `step(dt)`, `getPositions() →
+  CubePosition[]`, `removeBodies(ids)`. The rules pack stays unaware
+  of Rapier — it consumes the layer-detection result via the host.
 
 ---
 

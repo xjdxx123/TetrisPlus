@@ -18,6 +18,11 @@ import { buildSprintRules }   from './rules/sprint.js';
 import { buildUltraRules }    from './rules/ultra.js';
 import { buildZenRules }      from './rules/zen.js';
 import { buildVersusRules }   from './rules/versus.js';
+// Speculative — Pure Physics (plan v2 §2.3). Rules pack ships first;
+// the Rapier-backed body lifecycle + layer-detection wiring lands in
+// follow-up phases. The pack is pure JS and ships without the wasm
+// dependency, so importing it here doesn't bloat the core bundle.
+import { buildPhysicsRules }  from './experimental/physics/rules.js';
 
 /**
  * @typedef {Object} EndResult
@@ -127,8 +132,9 @@ function buildClassicRules(opts = {}) {
   });
 }
 
-// Registry of mode-key → builder. Future modes (Sprint, Ultra, Zen, Versus)
-// register their builders here as their files land. Unknown keys fall back
+// Registry of mode-key → builder. Phases 1–6 modes (Classic / Marathon /
+// Sprint / Ultra / Zen / Versus) plus the speculative `physics` mode
+// (plan v2 §2.3, behind the experimental wall). Unknown keys fall back
 // to classic so a stale persisted mode-key doesn't crash the boot path.
 const BUILDERS = Object.freeze({
   classic:  buildClassicRules,
@@ -137,6 +143,7 @@ const BUILDERS = Object.freeze({
   ultra:    buildUltraRules,
   zen:      buildZenRules,
   versus:   buildVersusRules,
+  physics:  buildPhysicsRules,
 });
 
 /**
