@@ -14,6 +14,7 @@ import { createSprintBadge }   from '../ui/sprint-badge.js';
 import { createUltraBadge }    from '../ui/ultra-badge.js';
 import { createZenBadge }      from '../ui/zen-badge.js';
 import { createVersusBadge }   from '../ui/versus-badge.js';
+import { createModernCallouts } from '../ui/modern-callouts.js';
 import { createStarfield } from '../world/starfield.js';
 import { createNebulaSky } from '../world/nebula-sky.js';
 import { createMoon } from '../world/moon.js';
@@ -4857,6 +4858,15 @@ const versusBadge = createVersusBadge({
     blocked: game ? game.garbageBlocked : false,
   }),
 });
+// Modern-rules callouts (plan §13 #1). Pure subscriber to the §12 events;
+// renders transient text overlays for T-spins / B2B / Perfect Clear /
+// garbage cancellation. No mode gating — the callouts only fire when
+// the underlying events fire, which is itself mode-aware via the rules
+// pack (e.g. Sprint's 0-score lineScore still emits T_SPIN events for
+// HUD reasons; the callout fires regardless and the score field is 0).
+const modernCallouts = createModernCallouts({ bus, events: EVENTS });
+void modernCallouts; // module-scope ref keeps the listener alive for the session
+
 // Re-render whenever the player swaps modes via the settings panel — the
 // badges' refresh() reads `Mode.current` (via getActiveModeKey) and toggles
 // their own visibility, so a mode change without a restart still settles
