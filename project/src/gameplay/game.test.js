@@ -2028,18 +2028,45 @@ describe('Game — 3D tryRotate (plan v2 §2.1 Phase D)', () => {
     expect(captured.dir).toBe(1);
   });
 
-  it('rejects rotation that would collide (no kick table for Phase D MVP)', () => {
+  it('uses the kick table to recover a near-miss rotation (Phase D-2)', () => {
+    // Set up I-piece at (col=0, row=0, depth=0). After CCW-Z rotation
+    // it would occupy (0, 0..3, 0); pre-fill (0, 1, 0) so the identity
+    // kick collides. The Z-axis kick table should find an in-plane
+    // shift (e.g. +X face) that fits.
     const { game } = make3DGame();
-    // Build a board state where the piece can't rotate. Spawn I at the
-    // floor level (row=0) and fill the cells where its CCW-Z rotation
-    // would land.
     game.spawnPiece('I');
     game.activePiece.row = 0;
     game.activePiece.col = 0;
     game.activePiece.depth = 0;
-    // I along Y after CCW-Z rotation occupies (0,0..3,0) at depth=0;
-    // pre-fill (0,1,0) so the rotation collides.
     game.boardLayers[0][1][0] = 0xff0000;
+    const r = game.tryRotate(1, 'z');
+    expect(r.rotated).toBe(true);
+    expect(r.kickIndex).toBeGreaterThan(0); // identity kick failed; a non-zero kick won
+  });
+
+  it('rejects rotation when EVERY kick test collides', () => {
+    // Setup: I-piece at the bottom-front-left corner (col=0, row=0,
+    // depth=0). Negative kicks step out of bounds; positive kicks
+    // need to find empty cells. Fill every in-bounds cell within the
+    // kick neighborhood so each non-OOB kick collides on a fill,
+    // each OOB kick collides on bounds — leaving no valid offset.
+    const { game } = make3DGame();
+    game.spawnPiece('I');
+    game.activePiece.col   = 0;
+    game.activePiece.row   = 0;
+    game.activePiece.depth = 0;
+    // Fill the in-bounds cells the rotated I + every kick would
+    // touch — the rotated piece spans (col, row..row+3, depth);
+    // kicks shift it by ±1 in each axis. Filling cells (0..2, 0..4,
+    // 0..1) covers identity + every +X / +Y / +Z face kick + every
+    // in-plane edge kick. -X / -Y / -Z kicks fail on bounds.
+    for (let d = 0; d <= 1; d++) {
+      for (let r = 0; r <= 4; r++) {
+        for (let c = 0; c <= 2; c++) {
+          game.boardLayers[d][r][c] = 0xff0000;
+        }
+      }
+    }
     const r = game.tryRotate(1, 'z');
     expect(r.rotated).toBe(false);
   });

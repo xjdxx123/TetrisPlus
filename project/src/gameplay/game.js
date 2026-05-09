@@ -25,6 +25,7 @@ import { EVENTS } from './events.js';
 import { PIECES, PIECE_COLORS, PIECE_KEYS } from './pieces.js';
 import { TETRACUBES, TETRACUBE_KEYS, TETRACUBE_COLORS } from './experimental/3d/tetracubes.js';
 import { rotateX as rotate3DX, rotateY as rotate3DY, rotateZ as rotate3DZ, normalize as normalize3D } from './experimental/3d/rotation.js';
+import { getKicks3D } from './experimental/3d/kicks.js';
 import { getKickOffsets, nextRotation } from './rotation.js';
 import { detectTSpin } from './t-spin.js';
 import { perfectClearBonus } from './scoring.js';
@@ -662,12 +663,14 @@ export class Game {
   }
 
   /**
-   * 3D rotation (plan v2 §2.1 Phase D). Applies one 90° rotation around
-   * the requested axis to the active piece's cached cells, normalizes
-   * the result so the bounding box re-anchors to the origin, and tests
-   * collision against the live board state. No kick table for Phase D —
-   * the rotation either fits or it doesn't. Phase D-2 will plug in the
-   * archived §6.4 kick offsets.
+   * 3D rotation (plan v2 §2.1 Phase D + D-2). Applies one 90° rotation
+   * around the requested axis to the active piece's cached cells,
+   * normalizes the result, and walks the 19-test kick table from
+   * `experimental/3d/kicks.js` (identity + 6 face + 12 edge offsets,
+   * axis-biased so in-plane shifts come first). The first non-
+   * colliding (col+dx, row+dy, depth+dz) wins — matches the 2D SRS
+   * "first kick that fits" semantics. `kickIndex` 0 = no kick;
+   * 1..6 = face; 7..18 = edge.
    *
    * @param {number} dir   ±1 (right-handed: positive = CCW around +axis)
    * @param {'x'|'y'|'z'} axis
@@ -688,26 +691,39 @@ export class Game {
     for (let i = 0; i < turns; i++) rotated = rotOnce(rotated);
     rotated = normalize3D(rotated);
 
-    // Probe the rotated piece against the live board. We pass a
-    // shallow clone with the candidate cells so getPieceCells uses
-    // them (the 3D path reads `piece.cells` first).
-    const candidate = { ...piece, cells: rotated };
-    if (this.collides(candidate, piece.col, piece.row, piece.rot)) {
-      return { rotated: false, kicked: 0, kickIndex: -1 };
+    // Walk the kick table. Each test offsets the candidate's
+    // (col, row, depth) by (dx, dy, dz). Identity (kickIndex=0) is
+    // always the first test, so a rotation that already fits passes
+    // through immediately with no observable shift.
+    const kicks = getKicks3D(axis);
+    const baseDepth = (piece.depth | 0);
+    for (let i = 0; i < kicks.length; i++) {
+      const { dx, dy, dz } = kicks[i];
+      const nc = piece.col + dx;
+      const nr = piece.row + dy;
+      const nd = baseDepth + dz;
+      const candidate = { ...piece, cells: rotated, depth: nd };
+      if (!this.collides(candidate, nc, nr, piece.rot)) {
+        piece.cells = rotated;
+        piece.col   = nc;
+        piece.row   = nr;
+        piece.depth = nd;
+        this._lastAction    = 'rotation';
+        this._lastKickIndex = i;
+        this._bus.emit(EVENTS.PIECE_ROTATE, {
+          rotation: piece.rot, // 2D rot index unused in 3D — reported for shape parity
+          dir,
+          axis,
+          kicked:    i !== 0,
+          kickIndex: i,
+          dx, dy, dz,
+          side: this._side,
+        });
+        return { rotated: true, kicked: i, kickIndex: i };
+      }
     }
-
-    piece.cells = rotated;
-    this._lastAction    = 'rotation';
-    this._lastKickIndex = 0;
-    this._bus.emit(EVENTS.PIECE_ROTATE, {
-      rotation: piece.rot, // 2D rot index unused in 3D — reported for shape parity
-      dir,
-      axis,
-      kicked:    false,
-      kickIndex: 0,
-      side: this._side,
-    });
-    return { rotated: true, kicked: 0, kickIndex: 0 };
+    // Every kick collided — rotation rejected.
+    return { rotated: false, kicked: 0, kickIndex: -1 };
   }
 
   // ─── Drops ───────────────────────────────────────────────────────────
