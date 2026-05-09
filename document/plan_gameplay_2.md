@@ -1,9 +1,15 @@
 # Tetris+ Gameplay Plan v2 — Post-§12 Forward Roadmap
 
-**Date:** 2026-05-09 · **Test surface:** 693 tests across 43 files (all green) ·
+**Date:** 2026-05-09 · **Test surface:** 717 tests across 43 files (all green) ·
 **Predecessor:** `document/archived/plan_gameplay_1.md` (preserved for the
 full design rationale, mode-by-mode specs, and shipped-implementation
 notes). v2 picks up where v1 left off.
+
+**Status:** all four §1 polish items (1.1 Stats UI surfacing, 1.2 VFX
+celebration recipes, 1.3 Garbage drain flash, 1.4 In-run B2B/combo
+chips) ✅ shipped on main. v2 now spans only the speculative chapters
+(§2) — 3D Tetris, Online Versus, Pure Physics — gated behind the
+30-day promote-or-delete culture.
 
 ---
 
@@ -26,6 +32,10 @@ specified them; v2 won't redesign these, only build on top.
 | **§13 polish #1 — HUD callouts** | v1 §13 | `ui/modern-callouts.js` subscribes to T_SPIN / B2B_CHAIN / PERFECT_CLEAR / GARBAGE_CANCELLED and renders transient text overlays. |
 | **§13 polish #2 — stats persistence** | v1 §13 | Per-run accumulators in `Game._runStats`; per-mode bests grow `bestB2bChain` / `bestCombo` / `perfectClears` / `tspinClears` / `bestGarbageCancelled`. |
 | **Versus garbage queue clarity** | v2-discovered | Per-side queue columns ("INCOMING TO YOU" / "INCOMING TO BOT") with always-visible 8-slot track + per-pip readiness state (dim / pulsing / bright). |
+| **§1 polish — Stats UI surfacing** | v2 §1.1 (`fdac17c`) | `formatModeBestModern()` formatter; Stats tab renders `bestB2bChain` / `bestCombo` / `perfectClears` / `tspinClears` / `bestGarbageCancelled` per mode. |
+| **§1 polish — VFX celebration recipes** | v2 §1.2 (`d1a4104`) | LINE_CLEAR shockwave/envReaction recolor on §12 flags (PC gold > T-spin violet > Mini dim violet > B2B cyan); SFX cues for T_SPIN / B2B_CHAIN / PERFECT_CLEAR; camera shake on B2B chain ≥ 2 + PC. |
+| **§1 polish — Garbage drain flash** | v2 §1.3 (`7553c72`) | One-shot CSS animation on the queue container — pink on GARBAGE_APPLIED, cyan on GARBAGE_CANCELLED. |
+| **§1 polish — In-run chips** | v2 §1.4 (`c123529`) | `ui/modern-chips.js` — persistent top-left readout of "B2B ×N" + "Combo ×N" while streaks active; complements transient callouts. |
 
 ### 0.2 Architectural property to preserve
 
@@ -49,11 +59,11 @@ shipped feature carried its own test file under the same directory
 
 ## 1. Open polish work (small, deliberate)
 
-These are the items §13 explicitly named that have NOT yet shipped.
-Each is small enough to land in a focused PR and adds clear player
-value on top of features already in the codebase.
+These are the items §13 explicitly named. v2 polish landed in four
+commits on `main` (`fdac17c`, `d1a4104`, `7553c72`, `c123529`).
+**All four §1 items are now ✅ shipped.**
 
-### 1.1 Stats UI surfacing (~half a day)
+### 1.1 Stats UI surfacing — ✅ shipped (`fdac17c`)
 
 **Why.** Per-mode bests now persist `bestB2bChain` / `bestCombo` /
 `perfectClears` / `tspinClears` / `bestGarbageCancelled`, but
@@ -77,12 +87,15 @@ work — the Stats tab already calls into `mode-stats.js`. ~15 lines
 of formatter code per mode, 6 modes; ~6 new test cases.
 
 **Files.**
-- `project/src/ui/format/mode-stats.js` — extend `formatModeBestPrimary` /
-  `Secondary` / `Summary` per mode key.
-- `project/src/ui/format/mode-stats.test.js` — assert the new rows
-  render with non-zero values + degrade gracefully on zero.
+- `project/src/ui/format/mode-stats.js` — added `formatModeBestModern`
+  formatter; tertiary line returned when any modern-rules field > 0.
+- `project/src/ui/settings-panel.js` — Stats tab renders the new
+  line as a third sub-row under existing primary + secondary.
+- `project/src/ui/format/mode-stats.test.js` — 12 new tests covering
+  per-mode field gating, plurals, locale separators, defensive
+  malformed-input coercion.
 
-### 1.2 VFX celebration presets (~1 day)
+### 1.2 VFX celebration presets — ✅ shipped (`d1a4104`)
 
 **Why.** §13 polish #1 added text callouts for modern-rules events.
 But the cinematic FX layer in `vfx/director.js` doesn't yet fire
@@ -108,75 +121,95 @@ already has `lineClearLayers` for sparkle/flash/shockwave/veil/
 envReaction; this adds three new recipes that subscribe to the
 §12 events directly.
 
-**Files.**
-- `project/src/vfx/director.js` — add T_SPIN / B2B_CHAIN /
-  PERFECT_CLEAR subscribers and route to existing layer apis.
-- `project/src/vfx/presets/` — three new recipe constants if
-  needed (or inline if small).
-- `project/src/app/main.js` — pass any new layer impls to
-  `registerDirector`; existing impl points are likely sufficient.
+**Files (shipped).**
+- `project/src/vfx/director.js` — LineClearOrchestrator now reads
+  `clearType` / `isB2B` / `isPerfectClear` from LINE_CLEAR payloads
+  and applies a modern-accent color override (PC gold > T-spin
+  violet > Mini dim violet > B2B cyan > existing). `isB2B` also
+  bumps the intensity arg by +1 so the cyan ring reads as escalating
+  chain energy. New T_SPIN / B2B_CHAIN / PERFECT_CLEAR subscribers
+  fire SFX cues and (for B2B chain ≥ 2 / PC) a camera-shake impulse.
+- `project/src/app/main.js` — `registerDirector` extended with
+  `shake: (force) => shake.impulse(force)` wiring.
+- `project/src/vfx/director.test.js` — 12 new tests: 5 §12 recipe
+  wiring + 6 LINE_CLEAR color override + 1 floating-point
+  toBeCloseTo for the chain-force formula.
 
-**Risk.** Visual feel is subjective. Tune in a `vfx/director.test.js`
-case that asserts the recipe wiring (subscriber registered on the
-right topic, calls the right api with the right args), not the
-animation itself.
-
-### 1.3 Garbage-bar polish — pip linger (~half a day)
+### 1.3 Garbage-bar drain flash — ✅ shipped (`7553c72`)
 
 **Why discovered (v2).** During the §13 polish playtest, the
 queue's spawn-delay window (default 800ms) means pips appear and
-disappear quickly. The §13 follow-up commit (`b3721b2`) made the
+disappear quickly. The earlier §13 follow-up (`b3721b2`) made the
 queue track always-visible with permanent slots — but actual pip
 appearances are still flicker-fast as garbage applies on the next
 lock.
 
-**What.** When a pip is about to disappear (garbage applied to
-board), fade it for ~250ms with a downward-slide animation
-("garbage hit the well"). Not a real animation of the rows landing
-— just a UI cue that the queue drained.
+**What shipped.** A simpler design than the originally-spec'd "pip
+linger animation" — a one-shot CSS animation on the queue
+container fires when an entry actually drains:
+- `GARBAGE_APPLIED` → pink flash on YOU's column ("the queue just
+  hit me — pink stayed visible for ~320ms so I could read what
+  landed")
+- `GARBAGE_CANCELLED` → cyan flash on YOU's column ("I just ate
+  that garbage with my outgoing clear")
 
-**Files.**
-- `project/src/ui/versus-badge.js` — subscribe to `GARBAGE_APPLIED`
-  + `GARBAGE_CANCELLED`, animate the pip exit before clearing the
-  DOM element. CSS-only animation; the existing transition already
-  handles opacity / transform.
+Pip-by-pip exit animation would need DOM identity tracking across
+re-renders; this container-level flash gives the same UX read with
+a fraction of the complexity. The reflow trick (`void offsetWidth`)
+restarts the animation on rapid back-to-back events.
 
-**Scope.** ~30 lines of CSS + JS. No state surface changes.
+**Files (shipped).**
+- `project/src/ui/versus-badge.js` — added two CSS keyframes
+  (queue-applied / queue-cancelled), a `flashDrain(queueEl, kind)`
+  helper, and GARBAGE_APPLIED + GARBAGE_CANCELLED subscriptions.
+  Pure CSS / DOM, no event surface changes.
 
-### 1.4 §12 stats UI in HUD (`real-time` view, optional)
+### 1.4 In-run B2B / combo chips — ✅ shipped (`c123529`)
 
-**Why.** The per-mode `bestB2bChain` etc. show up in Stats tab
-post-run, but there's no in-run readout of "current B2B: ×3" or
-"current combo: ×5". Players who hit a long combo get the
-HUD callout once but no persistent indicator.
+**Why.** The transient callouts (`ui/modern-callouts.js`) announce
+each event for ~1.4s and fade. That's good for the "wow, B2B
+Triple!" moment but loses the steady-state context: while a B2B
+chain is active, the player can't glance up and confirm "yes,
+I'm still in B2B territory at ×3". Same for combo.
 
-**What.** Add small chip(s) to the existing per-mode badges
-(marathon-badge / classic — wherever there's room) showing:
-- `B2B ×N` when `_b2b > 0`
-- `COMBO ×N` when `_combo > 1`
-- `PC?` indicator (subtle green flicker when board near-empty)
+**What shipped.** Two persistent live-status chips at the top-left:
+- **B2B ×N** (cyan accent) — visible while chain ≥ 1. Bumps on
+  each new event so the player feels the chain extending.
+- **Combo ×N** (orange accent) — visible while combo ≥ 2. Combo=1
+  stays hidden ("first clear isn't a streak yet"); chip appears
+  on the second consecutive clear.
 
-**Scope.** ~30 lines per badge × 5 badges. Each badge already
-subscribes to `MODE_START` / `LINE_CLEAR` etc.; subscribing to
-`B2B_CHAIN` / `COMBO_START` / `B2B_BREAK` / `COMBO_END` is
-backward-compatible.
+A single shared module (`ui/modern-chips.js`) instead of per-badge
+copies — every mode uses modern rules, so the chips are
+mode-agnostic. One mount point, one subscriber pair. Mounted
+top-left so they don't fight for the per-mode badges' top-center
+real estate.
 
-**Defer rationale.** Less critical than 1.1 + 1.2 since the
-modern-callouts module already announces these on each event.
-Ship this only if playtest reveals the callouts feel insufficient.
+**Implementation note.** B2B count comes directly from B2B_CHAIN
+payload (Game emits it with the post-increment count). Combo count
+is tracked locally via LINE_CLEAR (Game's `_combo` is incremented
+exactly once per clearLines call, and clearLines is the only
+LINE_CLEAR emitter — so LINE_CLEAR is a 1:1 proxy for the combo
+step). Reset on COMBO_END / MODE_START / MODE_END.
 
-### 1.5 Recommended landing order for polish
+**Files (shipped).**
+- `project/src/ui/modern-chips.js` (new, 264 lines) — pure DOM
+  module, follows the marathon-badge / versus-badge / modern-callouts
+  precedent (no DOM tests since the project doesn't have jsdom
+  configured).
+- `project/src/app/main.js` — `createModernChips` mounted next to
+  `createModernCallouts` at boot.
 
-1. **1.1 Stats UI surfacing** — half a day, immediate player-visible
-   payoff. Should land before any speculative work picks up.
-2. **1.2 VFX celebration presets** — one day. Big game-feel improvement
-   for an already-shipped capability.
-3. **1.3 Garbage-bar pip linger** — half a day. Quality-of-life on
-   the v2 garbage clarity work.
-4. **1.4 In-run B2B / combo chip** — defer until 1.1–1.3 land and
-   playtest tells us whether the callouts alone are enough.
+### 1.5 Polish landing order (post-mortem)
 
-Total: 2 days for items 1–3. Item 4 only if needed.
+The recommended order at v2 publication held: 1.1 → 1.2 → 1.3 →
+1.4. Each item shipped as its own commit on `main`. 1.4 was
+originally "deferred" pending playtest, but the user requested
+"all the polish" in one pass, so it landed in the same session.
+
+Test surface: 705 (after 1.1) → 717 (after 1.2) → 717 (1.3 was
+pure CSS, no new tests) → 717 (1.4 follows the existing UI-no-test
+precedent). All green.
 
 ---
 
@@ -241,7 +274,7 @@ risks that remain *open* plus new ones discovered in v2 work.
 
 | Risk | Likelihood | Impact | Mitigation |
 |---|---|---|---|
-| §12 events outpace HUD/VFX consumers (1.1 / 1.2 not landed) | Acknowledged | Low | Player gets score correctly but doesn't feel the moment. §13 callouts cover the text part; VFX is the visual+haptic gap. Item 1.2 closes it. |
+| ✅ §12 events outpace HUD/VFX consumers | (resolved) | — | §1.1 surfaces persisted modern stats; §1.2 wires VFX presets + camera shake; §1.3 visualizes garbage drain; §1.4 shows persistent in-run chips. The score now both math-applies AND visually + audibly registers. |
 | Modern-rules state needs 3D generalization for 3D Tetris (§6) | Medium (only if 3D ships) | Medium | Plan §2.1: scope 3D experimental as 2D-rules-only; revisit if 3D promotes. |
 | Online wire format must carry §12 events from day one or feel broken | Medium (only if §7 ships before 1.2) | Medium | Land item 1.2 first. The events already flow through the bus; networking layer pipes them through. |
 | Garbage-bar pips are too subtle / fade too fast for casual play | Low | Low | Item 1.3 adds a pip linger animation; further tweaks gated on playtest. |
@@ -252,24 +285,27 @@ risks that remain *open* plus new ones discovered in v2 work.
 
 ## 4. Schedule
 
-### 4.1 Recommended landing order (v2)
+### 4.1 Landing order (post-mortem)
 
-1. **1.1 Stats UI surfacing** — ½ day
-2. **1.2 VFX celebration presets** — 1 day
-3. **1.3 Garbage-bar pip linger** — ½ day
-4. **1.4 In-run B2B / combo chip** — ½ day (deferred; only if 1.1–1.3 leave a gap)
+1. ✅ **1.1 Stats UI surfacing** — `fdac17c`
+2. ✅ **1.2 VFX celebration presets** — `d1a4104`
+3. ✅ **1.3 Garbage drain flash** — `7553c72`
+4. ✅ **1.4 In-run B2B / combo chip** — `c123529` (originally deferred; landed in the same session as 1.1–1.3 per user request)
+
+### 4.2 Remaining (speculative chapters)
+
 5. **2.3 Pure Physics (experimental)** — 5 days (independent; pause-or-promote)
 6. **2.1 3D Tetris (experimental)** — 8 days (pause-or-promote)
-7. **2.2 Online Versus** — 16 days (depends on 1.2 for visual completeness)
+7. **2.2 Online Versus** — 16 days (the §1.2 prerequisite is now met)
 
-**Total polish:** 2 days for items 1–3 (the highest-value remainder).
 **Total speculative:** 29 days; expect 1–2 chapters to actually ship
 based on the 30-day promote-or-delete policy.
 
-### 4.2 Parallelization notes
+### 4.3 Parallelization notes
 
-- Items 1.1, 1.2, 1.3 are all small (≤1 day each) and independent —
-  any can ship first.
+- §1 polish items shipped sequentially in a single session — fastest
+  path turned out to be "do them all in the recommended order" rather
+  than parallelizing.
 - Items 2.1, 2.2, 2.3 each carry their own risk and bandwidth
   budget; sequencing them helps avoid simultaneous-experimental
   fatigue.
