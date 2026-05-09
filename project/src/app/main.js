@@ -1857,7 +1857,26 @@ function _highestFilledRow(board) {
 // All render side-effects (mesh rebuild, sfx, shatter, ring) are wired
 // as bus subscribers further down — Game emits, the host reacts.
 // =============================================================
+// Force-Physics mode (plan v2 §2.3.1) reroutes player intents through
+// PhysicsSession instead of the grid `Game`. The grid is paused for the
+// duration of the run; the active "piece" is a compound rigid body, and
+// each input becomes a force/impulse/torque on that body. The wrappers
+// below keep the same names + call sites so the keydown / DAS code
+// doesn't need to branch — the branch lives in one place per intent.
+function isPhysicsMode() {
+  return !!(physicsSession && physicsSession.isStarted);
+}
+
 function tryMove(dCol, dRow) {
+  if (isPhysicsMode()) {
+    // Vertical (dRow) is physics-driven via gravity + soft/hard drop;
+    // only the lateral axis maps to a force here. Returning true keeps
+    // callers that branch on `if (tryMove(...))` from triggering the
+    // grid-mode wall-bonk visual (which would compete with the body's
+    // own physical bounce).
+    if (dCol !== 0) physicsSession.applyMove(dCol > 0 ? 1 : -1);
+    return true;
+  }
   if (!game) return false;
   const moved = game.tryMove(dCol, dRow);
   syncFromGame();
@@ -1865,18 +1884,36 @@ function tryMove(dCol, dRow) {
 }
 
 function tryRotate(dir) {
+  if (isPhysicsMode()) {
+    physicsSession.applyRotate(dir);
+    return;
+  }
   if (!game) return;
   game.tryRotate(dir);
   syncFromGame();
 }
 
 function softDrop() {
+  if (isPhysicsMode()) {
+    physicsSession.applySoftDrop();
+    return;
+  }
   if (!game) return;
   game.softDrop();
   syncFromGame();
 }
 
 function hardDrop() {
+  if (isPhysicsMode()) {
+    // Force-Physics hard drop sets a high downward linvel + arms a
+    // fast-commit so the lock fires on the first low-velocity tick
+    // rather than waiting for the body to fully sleep. The legacy
+    // ring/SFX path below depends on `game.activePiece` which is
+    // paused in physics mode, so it's skipped — the cube's own
+    // settling visual carries the impact.
+    physicsSession.applyHardDrop();
+    return;
+  }
   if (!game) return;
   const result = game.hardDrop();
   if (!result) { syncFromGame(); return; }
@@ -1912,6 +1949,14 @@ function lockPiece() {
 }
 
 function holdActive() {
+  if (isPhysicsMode()) {
+    // Hold isn't supported in Force-Physics mode — the active piece IS
+    // a real rigid body, and swapping mid-flight would mean deleting +
+    // re-spawning, which would feel like rubber-banding. The HUD's
+    // hold slot stays empty by virtue of `game.heldPiece` never being
+    // set (Game is paused, so its hold action is never invoked).
+    return;
+  }
   if (!game) return;
   game.holdActive();
   syncFromGame();
@@ -2827,32 +2872,30 @@ Mode._wireLifecycle({
       if (restart) resetRunState();
       else         syncFromGame();
     } else if (key === 'physics') {
-      // Pure Physics (plan v2 §2.3 F+). The grid path is bypassed for
-      // locked cubes — PhysicsSession + PhysicsBoardView own that
-      // rendering. BoardView is constructed with `noLockMeshes: true`
-      // so it still handles the active piece + ghost (which are still
-      // grid-driven before lock) but skips PIECE_LOCK / LINE_CLEAR /
-      // GARBAGE_APPLIED / ZEN_RESCUE handlers.
+      // Force-Physics (plan v2 §2.3.1). The active piece IS a compound
+      // rigid body from spawn — there is no "pre-lock" grid pose, so we
+      // skip BoardView entirely (it would render an unmoving active
+      // mesh at the spawn cell). PhysicsSession owns the body lifecycle
+      // (subscribes to PIECE_SPAWN, drives lock-on-sleep, layer-clear-
+      // by-collider). PhysicsBoardView owns rendering — one cube mesh
+      // per collider, parented under caseGroup, with built-in dissolve
+      // animation on collider removal (replaces the v1 shatter).
       game = new Game({
         rules,
         bus,
         side: 'player',
         onEndRun: ({ reason, winner }) => endRun({ reason, winner }),
       });
-      boardView = new BoardView({
-        game, bus,
-        parent: caseGroup,
-        side: 'player',
-        cols: COLS, rows: ROWS, depth: DEPTH,
-        cellToWorld, makeCube, shatter, animateCubeTo, startLockAnim,
-        playSfx,
-        noLockMeshes: true,
-      });
+      boardView = null;
       physicsSession = new PhysicsSession({
         bus, game, side: 'player',
         cols: COLS, rows: ROWS,
-        // cellToWorld for physics keeps grid coords (col, row, 0). The
-        // `cellToWorld` for the renderer below converts to scene world.
+        // PhysicsSession may topout the run independently of Game's
+        // gravity-driven endCondition (a body's highest collider sits
+        // above the field for too long). Wire it to the same endRun
+        // path the host uses for grid mode so the gameover overlay +
+        // cascade fire normally.
+        onEndRun: ({ reason, winner }) => endRun({ reason, winner }),
       });
       physicsView = new PhysicsBoardView({
         session: physicsSession,
@@ -2860,7 +2903,6 @@ Mode._wireLifecycle({
         makeCube,
         cellToWorld,
         side: 'player',
-        shatter,
       });
       if (typeof versusBot !== 'undefined') versusBot.reset();
       _detachOpponentChrome();
@@ -3775,14 +3817,20 @@ function animate(dt, envTime) {
     const dtMs = dtGame * 1000;
     versusBot.tick(dtMs);
     if (versusSession) versusSession.tickOpponent(dtMs);
-    // Pure Physics (plan v2 §2.3 F+) — step the world, run layer
+    // Force-Physics (plan v2 §2.3.1) — step the world, run layer
     // detection, then sync the parallel cube-mesh renderer. Order
-    // matters: session.tick() may remove bodies (layer cleared);
+    // matters: session.tick() may remove colliders (layer cleared);
     // physicsView.tick() then prunes the meshes that lost their
-    // bodies. Done BEFORE game.tick() so the rules pack's
+    // colliders. Done BEFORE game.tick() so the rules pack's
     // endCondition (which reads physicsHighestY via the rules-state
     // augment) sees the latest body positions.
     if (physicsSession && physicsSession.isStarted) {
+      // Held down-arrow → continuous downward force on the active
+      // body. applySoftDrop is an impulse, but with damping + the
+      // session's terminal-velocity cap on the lateral axis, calling
+      // it per-tick reads as an accelerating fall rather than a
+      // single nudge.
+      if (keyState.down) physicsSession.applySoftDrop();
       physicsSession.tick();
       if (physicsView) physicsView.tick();
     }
