@@ -3779,8 +3779,20 @@ function animate(dt, envTime) {
   }
   const dtGame = dt * gameTimeScale;
 
-  // ---- DAS / ARR for held arrows ----
-  if (!gameOver && !paused && activePiece) {
+  // ---- DAS / ARR + per-tick simulation ----
+  //
+  // Force-Physics (plan v2 §2.3.1) keeps the Game paused for the
+  // duration of the run, so the legacy gate `!paused && activePiece`
+  // would skip ALL per-frame work — including physicsSession.tick()
+  // and physicsView.tick(), which is what builds the cube meshes.
+  // Compute physics-mode liveness alongside the grid gate.
+  const physicsActive = !!(physicsSession && physicsSession.isStarted);
+  const inputsAlive = !gameOver && (physicsActive || (!paused && activePiece));
+  if (inputsAlive) {
+    // DAS/ARR — tryMove auto-routes via isPhysicsMode() so this code
+    // serves both modes. The pieceVel bump is a grid-mode visual-
+    // inertia kick; in physics mode it's harmless (boardView is null,
+    // so its pieceGroup never reads the value).
     if (keyState.left) {
       dasState.left += dt;
       if (dasState.left > DAS) {
@@ -3804,40 +3816,40 @@ function animate(dt, envTime) {
       }
     }
 
-    // Mode tick — Game owns gravity, modeTimeMs accumulation, the
-    // rules pack's onTick + endCondition polling. Soft-drop input is
-    // signalled via the InputFrame so Game accelerates fallTimer 12×
-    // (matches the legacy down-arrow-held behavior).
-    //
-    // In versus mode, VersusSession.tickOpponent advances gameP2 (bot
-    // intents → tryMove/Rotate/hardDrop on gameP2 + gameP2.tick).
-    // The abstract Phase-6 versusBot is disabled in versusSession
-    // mode (alive=false from setEnabled(false)), so its tick is a
-    // safe no-op even though we still call it.
     const dtMs = dtGame * 1000;
-    versusBot.tick(dtMs);
-    if (versusSession) versusSession.tickOpponent(dtMs);
-    // Force-Physics (plan v2 §2.3.1) — step the world, run layer
-    // detection, then sync the parallel cube-mesh renderer. Order
-    // matters: session.tick() may remove colliders (layer cleared);
-    // physicsView.tick() then prunes the meshes that lost their
-    // colliders. Done BEFORE game.tick() so the rules pack's
-    // endCondition (which reads physicsHighestY via the rules-state
-    // augment) sees the latest body positions.
-    if (physicsSession && physicsSession.isStarted) {
+
+    if (physicsActive) {
+      // Force-Physics — step the world, run layer detection, then
+      // sync the parallel cube-mesh renderer. Game is paused; its
+      // grid-gravity tick is dormant. versusBot / versusSession are
+      // skipped (no opponent in physics mode v1).
+      //
       // Held down-arrow → continuous downward force on the active
-      // body. applySoftDrop is an impulse, but with damping + the
-      // session's terminal-velocity cap on the lateral axis, calling
-      // it per-tick reads as an accelerating fall rather than a
-      // single nudge.
+      // body. applySoftDrop is an impulse capped at SOFT_DROP_MAX_VEL,
+      // so calling it per-tick reads as an accelerating fall rather
+      // than runaway speed.
       if (keyState.down) physicsSession.applySoftDrop();
       physicsSession.tick();
       if (physicsView) physicsView.tick();
-    }
-    const tickResult = game ? game.tick(dtMs, { softDrop: !!keyState.down }) : null;
-    syncFromGame();
-    if (tickResult && tickResult.reason) {
-      endRun({ reason: tickResult.reason });
+      syncFromGame();
+    } else {
+      // Grid path — Game owns gravity, modeTimeMs accumulation, the
+      // rules pack's onTick + endCondition polling. Soft-drop input
+      // is signalled via the InputFrame so Game accelerates fallTimer
+      // 12× (matches the legacy down-arrow-held behavior).
+      //
+      // In versus mode, VersusSession.tickOpponent advances gameP2
+      // (bot intents → tryMove/Rotate/hardDrop on gameP2 + gameP2
+      // .tick). The abstract Phase-6 versusBot is disabled in
+      // versusSession mode (alive=false from setEnabled(false)), so
+      // its tick is a safe no-op even though we still call it.
+      versusBot.tick(dtMs);
+      if (versusSession) versusSession.tickOpponent(dtMs);
+      const tickResult = game ? game.tick(dtMs, { softDrop: !!keyState.down }) : null;
+      syncFromGame();
+      if (tickResult && tickResult.reason) {
+        endRun({ reason: tickResult.reason });
+      }
     }
   }
 
