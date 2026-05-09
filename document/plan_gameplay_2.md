@@ -333,18 +333,27 @@ visual playtest as a follow-up.
   AI problem and out of scope for Phase B. Versus / online don't
   apply to 3D in v2.
 
-### 2.2 Online Versus (§7) — ~16 days
+### 2.2 Online Versus (§7) — ~12 days · **dedicated plan: `plan_online_versus.md`**
 
-**Status.** Spec is in v1 §7. Not started.
+**Status.** Spec is in v1 §7; the implementation plan lives in
+**`document/plan_online_versus.md`** (sequenced Phases A–J with
+acceptance criteria + tests + risks). Not started.
+
 **Prereq updates.** The §3.7 sub-phase 7f seeded RNG +
 `Game.serialize` / `Game.restore` are exactly what online needs
 for replay validation + rollback. The §12 events ship over the
 wire from day one — the wire format already has slots for
 `T_SPIN` / `B2B_CHAIN` / `PERFECT_CLEAR` / `GARBAGE_*` payloads.
-**v2 ordering.** Item 1.2 (VFX celebrations) should land before
-online; otherwise the over-the-wire feed includes events the
-client doesn't yet visualize, which leaves remote opponents'
-T-spins / Perfect Clears feeling under-celebrated.
+
+**Effort revision.** v1 estimated 16 days end-to-end; v2's shipped
+floor (determinism, serialize/restore, VersusSession, modern-rules
+events, §1.2 VFX) compresses that to **~12 days** — see
+`plan_online_versus.md` §6 for the per-phase breakdown.
+
+**v2 ordering.** Item 1.2 (VFX celebrations) is ✅ shipped, so the
+ordering risk ("remote T-spins under-celebrated") is resolved.
+Online can ship into the existing director without further VFX
+work.
 
 ### 2.3 Pure Physics (§8) — ~5 days · **Phase A shipped**
 
