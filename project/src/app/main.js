@@ -15,6 +15,7 @@ import { createUltraBadge }    from '../ui/ultra-badge.js';
 import { createZenBadge }      from '../ui/zen-badge.js';
 import { createVersusBadge }   from '../ui/versus-badge.js';
 import { createModernCallouts } from '../ui/modern-callouts.js';
+import { createModernChips }    from '../ui/modern-chips.js';
 import { createStarfield } from '../world/starfield.js';
 import { createNebulaSky } from '../world/nebula-sky.js';
 import { createMoon } from '../world/moon.js';
@@ -4903,6 +4904,14 @@ const versusBadge = createVersusBadge({
 // HUD reasons; the callout fires regardless and the score field is 0).
 const modernCallouts = createModernCallouts({ bus, events: EVENTS });
 void modernCallouts; // module-scope ref keeps the listener alive for the session
+
+// Modern-rules in-run chips (plan v2 §1.4). Persistent live readouts of
+// the current B2B chain length and combo step — complements the
+// transient callouts (which fire-and-fade) with a chip that stays
+// visible while the streak is active. Mounted top-left so it doesn't
+// crowd the per-mode badges (which sit top-center).
+const modernChips = createModernChips({ bus, events: EVENTS });
+void modernChips;
 
 // Re-render whenever the player swaps modes via the settings panel — the
 // badges' refresh() reads `Mode.current` (via getActiveModeKey) and toggles
