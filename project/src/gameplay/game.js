@@ -25,6 +25,7 @@ import { EVENTS } from './events.js';
 import { PIECES, PIECE_COLORS, PIECE_KEYS } from './pieces.js';
 import { getKickOffsets, nextRotation } from './rotation.js';
 import { detectTSpin } from './t-spin.js';
+import { perfectClearBonus } from './scoring.js';
 import { createSeededRng } from '../shared/random/seeded.js';
 
 const DEFAULT_COLS = 10;
@@ -144,6 +145,15 @@ export class Game {
     this._lastAction    = null; // 'rotation' | 'move' | 'drop' | null
     this._lastKickIndex = -1;
 
+    // Back-to-Back counter (plan §12 M3). Tracks consecutive "difficult"
+    // clears (Tetris OR T-spin-with-clear). Increments at the END of
+    // clearLines for difficult clears; resets to 0 on plain 1/2/3-line
+    // clears. The 1.5× score multiplier applies when the chain is
+    // already active at the START of a clear (i.e. _b2b > 0 BEFORE
+    // increment) — the first difficult clear of a chain doesn't get
+    // the multiplier, only continuations do.
+    this._b2b = 0;
+
     // Subscribe to inbound garbage. v1 single-bus: bot's emission lands
     // here. v2 dual-sim: per-game bus + host bridge calls applyGarbage()
     // directly, but this subscription remains harmless (no other emitters).
@@ -187,6 +197,9 @@ export class Game {
 
   /**
    * Minimal state shape consumed by the rules engine (plan_gameplay_1 §2.1).
+   * `b2b` is the chain counter at the time of the snapshot — read by
+   * versus.onLinesCleared (plan §12 M3) to add +1 garbage when a
+   * difficult clear extends an active chain.
    */
   getStateSnapshot() {
     return {
@@ -195,6 +208,7 @@ export class Game {
       level:        this._level,
       linesCleared: this._lines,
       timeMs:       this._modeTimeMs,
+      b2b:          this._b2b,
     };
   }
 
@@ -562,14 +576,51 @@ export class Game {
    * update score/lines/level, emit LINE_CLEAR/LEVEL_UP/SCORE_DELTA.
    * `rows` may arrive in any order — sorted top-down internally.
    *
-   * `clearType` (default 'normal') threads through to `rules.lineScore`
-   * so T-spin clears use the modern table (plan §12 M2). Carried in
-   * the LINE_CLEAR payload for HUD subscribers that want to render
-   * T-spin-flavored celebrations.
+   * Modern-rules wiring (plan §12 M3):
+   *   - "Difficult" clears (Tetris OR T-spin-with-clear) extend the
+   *     B2B chain. A 1.5× score multiplier applies when a difficult
+   *     clear EXTENDS an already-active chain (i.e. `_b2b > 0` BEFORE
+   *     the increment).
+   *   - "Perfect Clear" — when this clear empties the board entirely —
+   *     adds a flat per-clear-type bonus to the score. Detection is
+   *     done BEFORE the rows are spliced (the rows about to disappear
+   *     are the only filled rows; everything else is already empty).
+   *   - The plain rules.onLinesCleared hook gets a 3rd `info` argument
+   *     describing this clear's modern-rules classification (clearType,
+   *     isB2B, isPerfectClear) so versus.js can compose +1 / +10
+   *     garbage atop the standard table.
    */
   clearLines(rowsArg, clearType = 'normal') {
     const rows = rowsArg.slice().sort((a, b) => b - a);
-    const scoreDelta = this._rules.lineScore(rows.length, this._level, clearType);
+
+    // Difficult-clear classification (M3). Tetris (4-line) OR any
+    // T-spin-with-clear is "difficult"; plain 1/2/3 clears are not.
+    const isDifficult = (rows.length === 4)
+      || (clearType === 'tspin' || clearType === 'mini');
+    // B2B chain continuation requires the chain to already be active
+    // BEFORE this clear (so the FIRST difficult clear of a chain
+    // doesn't get the multiplier — only continuations do).
+    const isB2B = isDifficult && this._b2b > 0;
+
+    // Perfect Clear pre-check — before the splice removes the cleared
+    // rows. The board "will be" perfectly clear iff every row is either
+    // (a) one of the rows about to be removed, or (b) already empty.
+    const clearedRowSet = new Set(rows);
+    let isPerfectClear = true;
+    for (let r = 0; r < this._rows; r++) {
+      if (clearedRowSet.has(r)) continue;
+      for (const cell of this._board[r]) {
+        if (cell !== null) { isPerfectClear = false; break; }
+      }
+      if (!isPerfectClear) break;
+    }
+
+    // Score: base + B2B 1.5× + Perfect Clear bonus.
+    let scoreDelta = this._rules.lineScore(rows.length, this._level, clearType);
+    if (isB2B) scoreDelta = Math.floor(scoreDelta * 1.5);
+    const pcBonus = isPerfectClear ? perfectClearBonus(rows.length, this._level) : 0;
+    scoreDelta += pcBonus;
+
     this._score += scoreDelta;
     this._lines += rows.length;
     this._linesThisSession += rows.length;
@@ -578,9 +629,27 @@ export class Game {
       delta: scoreDelta, total: this._score, source: 'line-clear', side: this._side,
     });
 
+    // Rules hook — pass clearType + B2B/PC flags so versus can compose
+    // outgoing garbage. State snapshot also carries the pre-update b2b
+    // value (read from `state.b2b`).
     if (this._rules.onLinesCleared) {
-      try { this._rules.onLinesCleared(this.getStateSnapshot(), rows.length); }
-      catch (err) { console.warn('[rules] onLinesCleared threw:', err); }
+      try {
+        this._rules.onLinesCleared(this.getStateSnapshot(), rows.length, {
+          clearType, isB2B, isPerfectClear,
+        });
+      } catch (err) { console.warn('[rules] onLinesCleared threw:', err); }
+    }
+
+    // Update B2B counter AFTER scoring + onLinesCleared, BEFORE the
+    // LINE_CLEAR event so subscribers see the post-update value.
+    if (isDifficult) {
+      this._b2b += 1;
+      this._bus.emit(EVENTS.B2B_CHAIN, { count: this._b2b, side: this._side });
+    } else {
+      if (this._b2b > 0) {
+        this._bus.emit(EVENTS.B2B_BREAK, { side: this._side });
+      }
+      this._b2b = 0;
     }
 
     const newLevel = this._rules.levelForLines(this._lines);
@@ -598,12 +667,26 @@ export class Game {
       overallColor,
       scoreDelta,
       clearType,
+      isB2B,
+      isPerfectClear,
       side: this._side,
     });
 
     for (const r of rows) {
       this._board.splice(r, 1);
       this._board.push(Array(this._cols).fill(null));
+    }
+
+    // PERFECT_CLEAR fires AFTER splice — at this point the board is
+    // fully empty. Carries the +10 garbage info; versus's
+    // onLinesCleared has already composed the actual GARBAGE_SENT.
+    if (isPerfectClear) {
+      this._bus.emit(EVENTS.PERFECT_CLEAR, {
+        cleared: rows.length,
+        score:   pcBonus,
+        garbage: 10,
+        side:    this._side,
+      });
     }
   }
 
@@ -784,6 +867,7 @@ export class Game {
 
     this._lastAction    = null;
     this._lastKickIndex = -1;
+    this._b2b           = 0;
 
     this.spawnPiece();
   }
@@ -833,6 +917,7 @@ export class Game {
       garbageBlocked: this._garbageBlocked,
       lastAction:     this._lastAction,
       lastKickIndex:  this._lastKickIndex,
+      b2b:            this._b2b,
       rngState: (this._rng && typeof this._rng.state === 'number') ? this._rng.state : null,
     };
   }
@@ -883,6 +968,7 @@ export class Game {
       ? blob.lastAction
       : null;
     this._lastKickIndex  = (typeof blob.lastKickIndex === 'number') ? (blob.lastKickIndex | 0) : -1;
+    this._b2b            = (typeof blob.b2b === 'number') ? Math.max(0, blob.b2b | 0) : 0;
     if (typeof blob.rngState === 'number'
         && this._rng
         && typeof this._rng.setState === 'function') {

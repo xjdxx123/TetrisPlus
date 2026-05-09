@@ -24,7 +24,7 @@ export const EVENTS = Object.freeze({
   SOFT_DROP:     'SOFT_DROP',     // (no payload)
 
   // Line clears & scoring
-  LINE_CLEAR:    'LINE_CLEAR',    // { rows: number[], simultaneous: 1..4, colors: hex[], scoreDelta, clearType: 'normal'|'tspin'|'mini' }
+  LINE_CLEAR:    'LINE_CLEAR',    // { rows: number[], simultaneous: 1..4, colors: hex[], scoreDelta, clearType, isB2B, isPerfectClear }
   COMBO_START:   'COMBO_START',   // { count }   (reserved for future)
   COMBO_END:     'COMBO_END',     // { count }   (reserved for future)
   SCORE_DELTA:   'SCORE_DELTA',   // { delta, total, source: 'soft-drop'|'hard-drop'|'line-clear' }
@@ -37,6 +37,22 @@ export const EVENTS = Object.freeze({
   // still emits — the bonus score applies). Carries `side` per the
   // §3.7 dual-board routing convention.
   T_SPIN:        'T_SPIN',        // { kind: 'tspin'|'mini', cleared: 0..3, score, side }
+
+  // Modern-rules — Back-to-Back chain (plan §12 M3). A "difficult"
+  // clear is a Tetris (4-line) or any T-spin-with-clear. Two or more
+  // consecutive difficult clears form a B2B chain — each chained
+  // clear scores 1.5× and (in Versus) sends +1 garbage. B2B_CHAIN
+  // fires when the counter increments (post-increment value);
+  // B2B_BREAK fires when a non-difficult clear resets an active chain.
+  B2B_CHAIN:     'B2B_CHAIN',     // { count: 1..N, side }
+  B2B_BREAK:     'B2B_BREAK',     // { side }
+
+  // Modern-rules — Perfect Clear (plan §12 M3). Fires when a clear
+  // empties the board entirely. Awards a per-clear-type score bonus
+  // (800/1200/1800/2000 × level for Single/Double/Triple/Tetris) and
+  // sends +10 garbage in Versus. The `garbage` field is informational
+  // — Versus's onLinesCleared composes the actual GARBAGE_SENT.
+  PERFECT_CLEAR: 'PERFECT_CLEAR', // { cleared: 1..4, score, garbage: 10, side }
 
   // Terminal — fires on topout. The director still listens to GAME_OVER
   // for the cascade visuals; MODE_END is the universal terminal that

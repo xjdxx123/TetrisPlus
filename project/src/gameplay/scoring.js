@@ -56,10 +56,34 @@ export function lineClearScore(rowCount, level, clearType = 'normal') {
   return LINE_VALUE[i] * level;
 }
 
+// Perfect Clear (plan §12 M3) — flat bonus added to the line-clear
+// score when a clear empties the playfield. Indexed by rows cleared
+// (1..4); `0` is unreachable here because a no-clear lock can't empty
+// a non-empty board, but the slot is included for index safety.
+//
+// Source: TETR.IO defaults — Single PC = 800; Double PC = 1200;
+// Triple PC = 1800; Tetris PC = 2000.
+const PERFECT_CLEAR_BONUS = Object.freeze([0, 800, 1200, 1800, 2000]);
+
+/**
+ * Bonus score awarded when a clear empties the board (Perfect Clear).
+ * Adds on TOP of the regular line-clear score (and any T-spin/B2B
+ * multipliers) — the host calls `lineClearScore + perfectClearBonus`.
+ *
+ * @param {number} rowCount   1..4 (Singles through Tetris).
+ * @param {number} level
+ * @returns {number}
+ */
+export function perfectClearBonus(rowCount, level) {
+  const i = Math.max(0, Math.min(PERFECT_CLEAR_BONUS.length - 1, rowCount | 0));
+  return PERFECT_CLEAR_BONUS[i] * level;
+}
+
 // Test / introspection accessors.
 export const _LINE_VALUE             = LINE_VALUE;
 export const _T_SPIN_LINE_VALUE      = T_SPIN_LINE_VALUE;
 export const _T_SPIN_MINI_LINE_VALUE = T_SPIN_MINI_LINE_VALUE;
+export const _PERFECT_CLEAR_BONUS    = PERFECT_CLEAR_BONUS;
 
 // Points awarded for a soft-drop tick (one cell of player-driven descent).
 export const SOFT_DROP_POINTS_PER_CELL = 1;

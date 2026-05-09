@@ -395,6 +395,9 @@ describe('Game — lockPiece and clearLines', () => {
     game.spawnPiece('T'); // need an active piece for clearLines internal state
     fillRow(game, 0, 0xaaaaaa);
     fillRow(game, 1, 0xbbbbbb);
+    // Stray cell on row 5 so the post-clear board is NOT empty (otherwise
+    // the M3 Perfect Clear bonus would fire and inflate the score).
+    game.board[5][0] = 0x111111;
     const cap = captureEvents(bus, [EVENTS.LINE_CLEAR, EVENTS.SCORE_DELTA, EVENTS.LEVEL_UP]);
     game.clearLines([0, 1]);
     cap.dispose();
@@ -408,6 +411,8 @@ describe('Game — lockPiece and clearLines', () => {
     expect(lc[0].payload.rows.sort()).toEqual([0, 1]);
     expect(lc[0].payload.colors.length).toBe(2);
     expect(lc[0].payload.scoreDelta).toBe(300);
+    expect(lc[0].payload.isB2B).toBe(false);
+    expect(lc[0].payload.isPerfectClear).toBe(false);
   });
 
   it('clearLines fires LEVEL_UP when crossing a 10-line boundary', () => {
@@ -684,6 +689,7 @@ describe('Game — snapshots', () => {
     const s = game.getStateSnapshot();
     expect(s).toEqual({
       score: 0, lines: 0, level: 1, linesCleared: 0, timeMs: 0,
+      b2b: 0,
     });
   });
 
@@ -750,6 +756,9 @@ describe('Game — versus rules emit GARBAGE_SENT on multi-clear', () => {
     game.spawnPiece('I');
     fillRow(game, 0);
     fillRow(game, 1);
+    // Stray cell to suppress the M3 Perfect Clear +10-garbage bonus,
+    // so this test isolates the standard 2-line garbage table value.
+    game.board[5][0] = 0x111111;
     const cap = captureEvents(bus, [EVENTS.GARBAGE_SENT]);
     game.clearLines([0, 1]);
     cap.dispose();
@@ -1094,6 +1103,177 @@ describe('Game — T-spin lockPiece flow (plan §12.5 M2)', () => {
     expect(tspin).toBeTruthy();
     expect(tspin.payload.score).toBe(0); // sprint always-zero scoring
     expect(game.score).toBe(0);
+  });
+});
+
+// ─── M3: B2B chain + Perfect Clear (plan §12.5) ──────────────────────
+
+describe('Game — B2B chain (plan §12.5 M3)', () => {
+  function setupTetrisRows(game) {
+    // Fill rows 0..3 except col 0 (where the I piece will drop in).
+    for (let r = 0; r < 4; r++) {
+      for (let c = 1; c < game.cols; c++) game.board[r][c] = 0xff0000;
+    }
+    // Stray cell to suppress Perfect Clear so we isolate B2B.
+    game.board[10][5] = 0x111111;
+  }
+
+  it('first Tetris does NOT get the 1.5× multiplier (chain not yet active)', () => {
+    const { game } = makeGame();
+    game.spawnPiece('T'); // spawn anything; clearLines is direct
+    setupTetrisRows(game);
+    game.clearLines([0, 1, 2, 3]); // 4-line clear
+    // Tetris at level 1 = 800. No multiplier (b2b was 0 going in).
+    expect(game.score).toBe(800);
+    expect(game._b2b).toBe(1); // chain started
+  });
+
+  it('second consecutive Tetris gets the 1.5× multiplier (1200 = 800 × 1.5)', () => {
+    const { game } = makeGame();
+    game.spawnPiece('T');
+    // Manually prime b2b as if a previous Tetris had landed.
+    game._b2b = 1;
+    setupTetrisRows(game);
+    game.clearLines([0, 1, 2, 3]);
+    // Score = 800 × 1.5 = 1200. b2b increments to 2.
+    expect(game.score).toBe(1200);
+    expect(game._b2b).toBe(2);
+  });
+
+  it('plain 1-line clear breaks the chain (b2b → 0, B2B_BREAK fires)', () => {
+    const { game, bus } = makeGame();
+    game.spawnPiece('T');
+    game._b2b = 3; // mid-chain
+    fillRow(game, 0);
+    game.board[5][5] = 0x111111; // suppress PC
+    const cap = captureEvents(bus, [EVENTS.B2B_BREAK, EVENTS.B2B_CHAIN]);
+    game.clearLines([0]);
+    cap.dispose();
+    expect(game._b2b).toBe(0);
+    expect(cap.events.find(e => e.topic === EVENTS.B2B_BREAK)).toBeTruthy();
+    expect(cap.events.find(e => e.topic === EVENTS.B2B_CHAIN)).toBeFalsy();
+  });
+
+  it('B2B_CHAIN fires with the post-increment count', () => {
+    const { game, bus } = makeGame();
+    game.spawnPiece('T');
+    setupTetrisRows(game);
+    const cap = captureEvents(bus, [EVENTS.B2B_CHAIN]);
+    game.clearLines([0, 1, 2, 3]);
+    cap.dispose();
+    expect(cap.events.length).toBe(1);
+    expect(cap.events[0].payload.count).toBe(1);
+  });
+
+  it('LINE_CLEAR payload exposes isB2B = true on chain continuations', () => {
+    const { game, bus } = makeGame();
+    game.spawnPiece('T');
+    game._b2b = 1;
+    setupTetrisRows(game);
+    const cap = captureEvents(bus, [EVENTS.LINE_CLEAR]);
+    game.clearLines([0, 1, 2, 3]);
+    cap.dispose();
+    expect(cap.events[0].payload.isB2B).toBe(true);
+  });
+});
+
+describe('Game — Perfect Clear (plan §12.5 M3)', () => {
+  it('emits PERFECT_CLEAR when a clear empties the board', () => {
+    const { game, bus } = makeGame();
+    game.spawnPiece('T');
+    fillRow(game, 0);
+    fillRow(game, 1);
+    // Board is now exactly rows 0+1 filled. Clearing them empties everything.
+    const cap = captureEvents(bus, [EVENTS.PERFECT_CLEAR, EVENTS.LINE_CLEAR]);
+    game.clearLines([0, 1]);
+    cap.dispose();
+    const pc = cap.events.find(e => e.topic === EVENTS.PERFECT_CLEAR);
+    expect(pc).toBeTruthy();
+    expect(pc.payload.cleared).toBe(2);
+    expect(pc.payload.score).toBe(1200); // Double PC at level 1
+    expect(pc.payload.garbage).toBe(10);
+  });
+
+  it('Perfect Clear bonus is added to the line score (Tetris PC at level 1 = 800 + 2000)', () => {
+    const { game } = makeGame();
+    game.spawnPiece('T');
+    for (let r = 0; r < 4; r++) fillRow(game, r);
+    game.clearLines([0, 1, 2, 3]);
+    // Tetris (800) + Tetris PC bonus (2000) = 2800. b2b=0 going in, so
+    // no 1.5× multiplier on the first Tetris.
+    expect(game.score).toBe(2800);
+  });
+
+  it('PERFECT_CLEAR fires AFTER the splice (board is empty by then)', () => {
+    const { game, bus } = makeGame();
+    game.spawnPiece('T');
+    fillRow(game, 0);
+    let boardWasEmpty = false;
+    bus.on(EVENTS.PERFECT_CLEAR, () => {
+      boardWasEmpty = game.board.every(row => row.every(c => c === null));
+    });
+    game.clearLines([0]);
+    expect(boardWasEmpty).toBe(true);
+  });
+
+  it('does NOT emit PERFECT_CLEAR when other rows remain filled', () => {
+    const { game, bus } = makeGame();
+    game.spawnPiece('T');
+    fillRow(game, 0);
+    game.board[5][5] = 0x111111; // stray cell
+    const cap = captureEvents(bus, [EVENTS.PERFECT_CLEAR]);
+    game.clearLines([0]);
+    cap.dispose();
+    expect(cap.events.length).toBe(0);
+  });
+
+  it('Versus: Perfect Clear adds +10 garbage on top of standard table', () => {
+    const bus = new EventBus({ replayBufferSize: 0, recorderSize: 0 });
+    const game = new Game({ rules: buildRules('versus', { bus }), bus, rng: seededRng(1) });
+    game.spawnPiece('I');
+    fillRow(game, 0);
+    fillRow(game, 1);
+    fillRow(game, 2);
+    fillRow(game, 3);
+    const cap = captureEvents(bus, [EVENTS.GARBAGE_SENT]);
+    game.clearLines([0, 1, 2, 3]); // Tetris PC
+    cap.dispose();
+    expect(cap.events.length).toBe(1);
+    // Tetris = 4 base garbage + 0 combo + 0 B2B (first difficult) + 10 PC = 14.
+    expect(cap.events[0].payload.rows).toBe(14);
+  });
+
+  it('Versus: B2B Tetris (chain) adds +1 garbage on top of standard table', () => {
+    const bus = new EventBus({ replayBufferSize: 0, recorderSize: 0 });
+    const game = new Game({ rules: buildRules('versus', { bus }), bus, rng: seededRng(1) });
+    game.spawnPiece('I');
+    game._b2b = 1; // chain in progress
+    for (let r = 0; r < 4; r++) fillRow(game, r);
+    game.board[10][5] = 0x111111; // suppress PC
+    const cap = captureEvents(bus, [EVENTS.GARBAGE_SENT]);
+    game.clearLines([0, 1, 2, 3]);
+    cap.dispose();
+    // Tetris = 4 base + 0 combo + 1 B2B + 0 PC = 5.
+    expect(cap.events[0].payload.rows).toBe(5);
+  });
+
+  it('serialize/restore preserves _b2b chain state', () => {
+    const { game } = makeGame();
+    game._b2b = 3;
+    const blob = game.serialize();
+    expect(blob.b2b).toBe(3);
+
+    const bus2 = new EventBus({ replayBufferSize: 0, recorderSize: 0 });
+    const g2 = new Game({ rules: buildRules('classic'), bus: bus2, rng: seededRng(1) });
+    g2.restore(blob);
+    expect(g2._b2b).toBe(3);
+  });
+
+  it('reset() clears _b2b back to 0', () => {
+    const { game } = makeGame();
+    game._b2b = 5;
+    game.reset();
+    expect(game._b2b).toBe(0);
   });
 });
 

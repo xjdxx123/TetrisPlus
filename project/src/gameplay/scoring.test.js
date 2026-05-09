@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { lineClearScore, levelForLines, SOFT_DROP_POINTS_PER_CELL, HARD_DROP_POINTS_PER_CELL } from './scoring.js';
+import {
+  lineClearScore,
+  perfectClearBonus,
+  levelForLines,
+  SOFT_DROP_POINTS_PER_CELL,
+  HARD_DROP_POINTS_PER_CELL,
+} from './scoring.js';
 
 describe('scoring', () => {
   it('lineClearScore matches standard Tetris values at level 1', () => {
@@ -78,5 +84,36 @@ describe('scoring — T-spin clearType', () => {
   it('clearType "normal" / undefined uses the standard table', () => {
     expect(lineClearScore(4, 1, 'normal')).toBe(800);
     expect(lineClearScore(4, 1)).toBe(800);
+  });
+});
+
+// ─── M3: Perfect Clear bonus (plan §12.5 M3) ──────────────────────────
+
+describe('scoring — perfectClearBonus', () => {
+  it('Single PC = 800 × level', () => {
+    expect(perfectClearBonus(1, 1)).toBe(800);
+    expect(perfectClearBonus(1, 7)).toBe(5600);
+  });
+
+  it('Double PC = 1200 × level', () => {
+    expect(perfectClearBonus(2, 1)).toBe(1200);
+    expect(perfectClearBonus(2, 3)).toBe(3600);
+  });
+
+  it('Triple PC = 1800 × level', () => {
+    expect(perfectClearBonus(3, 1)).toBe(1800);
+  });
+
+  it('Tetris PC = 2000 × level', () => {
+    expect(perfectClearBonus(4, 1)).toBe(2000);
+    expect(perfectClearBonus(4, 5)).toBe(10000);
+  });
+
+  it('returns 0 for 0-row input (no-clear can never PC)', () => {
+    expect(perfectClearBonus(0, 1)).toBe(0);
+  });
+
+  it('clamps oversized inputs to the 4-row value (defensive)', () => {
+    expect(perfectClearBonus(99, 1)).toBe(2000);
   });
 });

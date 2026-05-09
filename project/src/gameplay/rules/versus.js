@@ -59,13 +59,20 @@ export function buildVersusRules(opts = {}) {
     // Compute outgoing garbage from the player's clear and emit the bus
     // event the opponent listens for. Combo bonus accrues on consecutive
     // multi-line clears; a 1-line clear or non-clear resets combo.
-    onLinesCleared: (state, rowsCleared) => {
+    //
+    // Modern-rules (plan §12 M3): the optional `info` arg carries
+    // `{clearType, isB2B, isPerfectClear}`. B2B continuation adds +1
+    // garbage row; Perfect Clear adds +10 — both stack on top of the
+    // standard table value.
+    onLinesCleared: (state, rowsCleared, info) => {
       const r = rowsCleared | 0;
       // Combo sequencing.
       if (r >= 2) combo += 1;
       else        combo = 0;
 
-      const sent = garbageForLineCount(r, Math.max(0, combo - 1));
+      let sent = garbageForLineCount(r, Math.max(0, combo - 1));
+      if (info && info.isB2B)          sent += 1;
+      if (info && info.isPerfectClear) sent += 10;
       if (sent > 0 && bus) {
         bus.emit(EVENTS.GARBAGE_SENT, { rows: sent, target: 'opponent' });
       }
