@@ -23,7 +23,7 @@
 
 import { EVENTS } from './events.js';
 import { PIECES, PIECE_COLORS, PIECE_KEYS } from './pieces.js';
-import { KICK_OFFSETS, nextRotation } from './rotation.js';
+import { getKickOffsets, nextRotation } from './rotation.js';
 import { createSeededRng } from '../shared/random/seeded.js';
 
 const DEFAULT_COLS = 10;
@@ -134,6 +134,14 @@ export class Game {
     /** @type {Array<{rows:number, holeColumn:number}>} */
     this._garbageQueue = [];
     this._garbageBlocked = false;
+
+    // Modern-rules state (plan_gameplay_1.md §12.3). `_lastAction` records
+    // what the player just did so T-spin detection (M2) can answer "was
+    // the last successful action a rotation?" at lock time. `_lastKickIndex`
+    // (0..4, -1 = none/spawn) records which SRS kick test fit; T-spin Mini
+    // detection uses kick index ≥ 3 as a "hard kick" signal.
+    this._lastAction    = null; // 'rotation' | 'move' | 'drop' | null
+    this._lastKickIndex = -1;
 
     // Subscribe to inbound garbage. v1 single-bus: bot's emission lands
     // here. v2 dual-sim: per-game bus + host bridge calls applyGarbage()
@@ -292,6 +300,11 @@ export class Game {
     this._piecesThisSession++;
     this._activePiece = p;
     this._canHold = true;
+    // Fresh piece — reset the "last action" tracking. T-spin detection
+    // requires the most recent action to have been a rotation; on spawn
+    // there is no prior action.
+    this._lastAction    = null;
+    this._lastKickIndex = -1;
     this._bus.emit(EVENTS.PIECE_SPAWN, {
       key: p.key, color: p.color, rotation: p.rot, side: this._side,
     });
@@ -346,6 +359,9 @@ export class Game {
    * piece + ghost mesh from one subscriber instead of duplicating the
    * rebuild call after every wrapper. The host filters on `dCol !== 0`
    * to play sfx (silent on gravity / soft drop / hard drop).
+   *
+   * Sets `_lastAction = 'move'` on success so T-spin detection (M2) can
+   * tell that the last successful action was not a rotation.
    */
   tryMove(dCol, dRow) {
     if (!this._activePiece || this._gameOver || this._paused) return false;
@@ -354,30 +370,50 @@ export class Game {
     if (this.collides(this._activePiece, nc, nr, this._activePiece.rot)) return false;
     this._activePiece.col = nc;
     this._activePiece.row = nr;
+    this._lastAction = 'move';
     this._bus.emit(EVENTS.PIECE_MOVE, { dCol, dRow, side: this._side });
     return true;
   }
 
   /**
    * Rotate the active piece. `dir` is +1 (CW) or -1 (CCW). Tries each
-   * KICK_OFFSETS in order; first non-colliding offset wins. Returns
-   * `{ rotated, kicked }`; on success, emits PIECE_ROTATE.
+   * SRS kick offset for the (fromRot, toRot) pair in order; first
+   * non-colliding offset wins. Returns `{ rotated, kicked, kickIndex }`
+   * — `kickIndex` is 0..4 (the SRS test index that fit; 0 = no kick),
+   * `kicked` is preserved as the kick index for back-compat (legacy
+   * tests checked it as truthy/falsy). On success, emits PIECE_ROTATE
+   * and updates `_lastAction = 'rotation'` and `_lastKickIndex`.
    */
   tryRotate(dir) {
     if (!this._activePiece || this._gameOver || this._paused) {
-      return { rotated: false, kicked: 0 };
+      return { rotated: false, kicked: 0, kickIndex: -1 };
     }
-    const nrot = nextRotation(this._activePiece.rot, dir);
-    for (const k of KICK_OFFSETS) {
-      const nc = this._activePiece.col + k;
-      if (!this.collides(this._activePiece, nc, this._activePiece.row, nrot)) {
+    const fromRot = this._activePiece.rot;
+    const nrot    = nextRotation(fromRot, dir);
+    const offsets = getKickOffsets(this._activePiece.key, fromRot, nrot);
+    for (let i = 0; i < offsets.length; i++) {
+      const { dCol, dRow } = offsets[i];
+      const nc = this._activePiece.col + dCol;
+      const nr = this._activePiece.row + dRow;
+      if (!this.collides(this._activePiece, nc, nr, nrot)) {
         this._activePiece.col = nc;
+        this._activePiece.row = nr;
         this._activePiece.rot = nrot;
-        this._bus.emit(EVENTS.PIECE_ROTATE, { rotation: nrot, kicked: k !== 0, dir, side: this._side });
-        return { rotated: true, kicked: k };
+        this._lastAction    = 'rotation';
+        this._lastKickIndex = i;
+        this._bus.emit(EVENTS.PIECE_ROTATE, {
+          rotation:  nrot,
+          dir,
+          kicked:    i !== 0,
+          kickIndex: i,
+          dCol,
+          dRow,
+          side:      this._side,
+        });
+        return { rotated: true, kicked: i, kickIndex: i };
       }
     }
-    return { rotated: false, kicked: 0 };
+    return { rotated: false, kicked: 0, kickIndex: -1 };
   }
 
   // ─── Drops ───────────────────────────────────────────────────────────
@@ -385,6 +421,10 @@ export class Game {
   /**
    * One soft-drop tick. If the piece can fall, +softDropPerCell points;
    * otherwise it locks. Emits SCORE_DELTA on success.
+   *
+   * Soft drop overrides `_lastAction` to 'drop' (the underlying tryMove
+   * sets 'move' first; this re-tags it as a drop so T-spin detection
+   * can tell a player-driven downward step apart from a horizontal nudge).
    */
   softDrop() {
     if (!this._activePiece || this._gameOver || this._paused) return;
@@ -392,6 +432,7 @@ export class Game {
       this.lockPiece();
       return;
     }
+    this._lastAction = 'drop';
     const delta = this._rules.softDropPerCell;
     this._score += delta;
     this._bus.emit(EVENTS.SCORE_DELTA, {
@@ -418,6 +459,9 @@ export class Game {
     let dropped = 0;
     while (this.tryMove(0, -1)) dropped++;
     if (!this._activePiece) return null;
+    // Hard drop overrides the trailing `_lastAction = 'move'` from the
+    // tryMove loop above so T-spin detection sees a "drop", not a "move".
+    this._lastAction = 'drop';
 
     const cells = this.getPieceCells(this._activePiece);
     let minRow = Infinity;
@@ -696,6 +740,9 @@ export class Game {
     this._garbageQueue.length = 0;
     this._garbageBlocked = false;
 
+    this._lastAction    = null;
+    this._lastKickIndex = -1;
+
     this.spawnPiece();
   }
 
@@ -742,6 +789,8 @@ export class Game {
       linesThisSession:  this._linesThisSession,
       garbageQueue:   this._garbageQueue.map(e => ({ ...e })),
       garbageBlocked: this._garbageBlocked,
+      lastAction:     this._lastAction,
+      lastKickIndex:  this._lastKickIndex,
       rngState: (this._rng && typeof this._rng.state === 'number') ? this._rng.state : null,
     };
   }
@@ -788,6 +837,10 @@ export class Game {
       for (const e of blob.garbageQueue) this._garbageQueue.push({ ...e });
     }
     this._garbageBlocked = !!blob.garbageBlocked;
+    this._lastAction     = (blob.lastAction === 'rotation' || blob.lastAction === 'move' || blob.lastAction === 'drop')
+      ? blob.lastAction
+      : null;
+    this._lastKickIndex  = (typeof blob.lastKickIndex === 'number') ? (blob.lastKickIndex | 0) : -1;
     if (typeof blob.rngState === 'number'
         && this._rng
         && typeof this._rng.setState === 'function') {

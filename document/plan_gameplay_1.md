@@ -1536,7 +1536,7 @@ each pack chooses whether to consult `_b2b` for the multiplier
 
 | Phase | Status | Shipped |
 |---|---|---|
-| M1 — SRS wall kicks | ✅ | `gameplay/rotation.js` rewritten with per-piece tables: `getKickOffsets(pieceKey, fromRot, toRot)` returns the 5-test SRS sequence (1 for O). Game.tryRotate walks 2D `{dCol, dRow}` offsets and emits `PIECE_ROTATE` with `kickIndex: 0..4`. Legacy `KICK_OFFSETS` 1D export retained as a deprecated alias. 15 new rotation tests (canonical-value spot checks against guideline + table integrity); existing Game.tryRotate tests updated for the new return shape. |
+| M1 — SRS wall kicks | ✅ | `gameplay/rotation.js` rewritten with per-piece tables: `getKickOffsets(pieceKey, fromRot, toRot)` returns the 5-test SRS sequence (1 for O). Game.tryRotate walks 2D `{dCol, dRow}` offsets and emits `PIECE_ROTATE` with `kickIndex: 0..4` + `dCol`/`dRow`. Legacy `KICK_OFFSETS` 1D export retained as a deprecated alias. New Game state `_lastAction` (`'rotation' / 'move' / 'drop' / null`) + `_lastKickIndex` (-1 / 0..4) wired through tryMove/tryRotate/softDrop/hardDrop and serialize/restore for downstream T-spin detection (M2). 14 new rotation tests + 12 new game tests covering kickIndex propagation, lastAction tagging, serialize round-trip. |
 | M2 — T-spin detection + scoring | ❌ | — |
 | M3 — B2B chain + Perfect Clear | ❌ | — |
 | M4 — Modern combo table | ❌ | — |

@@ -16,7 +16,7 @@ export const EVENTS = Object.freeze({
   // Piece lifecycle
   PIECE_SPAWN:   'PIECE_SPAWN',   // { key, color, rotation }
   PIECE_MOVE:    'PIECE_MOVE',    // { dCol, dRow }
-  PIECE_ROTATE:  'PIECE_ROTATE',  // { rotation, kicked: boolean }
+  PIECE_ROTATE:  'PIECE_ROTATE',  // { rotation, dir, kicked: boolean, kickIndex: 0..4, dCol, dRow, side }
   PIECE_LOCK:    'PIECE_LOCK',    // { cells: [{col,row}], color }
 
   // Drops

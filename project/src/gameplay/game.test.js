@@ -830,6 +830,147 @@ describe('Game — serialize / restore', () => {
   });
 });
 
+// ─── M1: SRS wall kicks + last-action tracking (plan §12.5) ──────────
+
+describe('Game — SRS wall kicks (plan §12.5 M1)', () => {
+  it('tryRotate returns kickIndex matching the SRS test that fit', () => {
+    const { game } = makeGame();
+    game.spawnPiece('T');
+    const r = game.tryRotate(1);
+    // First rotation in mid-air should fit at the in-place test (index 0).
+    expect(r.rotated).toBe(true);
+    expect(r.kickIndex).toBe(0);
+    expect(r.kicked).toBe(0); // legacy alias
+  });
+
+  it('PIECE_ROTATE event carries kickIndex, dCol, dRow, dir', () => {
+    const { game, bus } = makeGame();
+    game.spawnPiece('T');
+    const cap = captureEvents(bus, [EVENTS.PIECE_ROTATE]);
+    game.tryRotate(1);
+    cap.dispose();
+    expect(cap.events.length).toBe(1);
+    const p = cap.events[0].payload;
+    expect(typeof p.kickIndex).toBe('number');
+    expect(typeof p.dCol).toBe('number');
+    expect(typeof p.dRow).toBe('number');
+    expect(p.dir).toBe(1);
+    expect(p.kicked).toBe(false); // first rotation, no wall — boolean form
+  });
+
+  it('returns kickIndex >= 1 when in-place test collides and a kick fits', () => {
+    const { game } = makeGame();
+    game.spawnPiece('I');
+    game.tryRotate(1); // I goes vertical
+    while (game.tryMove(1, 0)) { /* slam right wall */ }
+    const r = game.tryRotate(1); // back to horizontal, requires leftward kick
+    expect(r.rotated).toBe(true);
+    if (r.kickIndex !== 0) {
+      expect(r.kickIndex).toBeGreaterThanOrEqual(1);
+      expect(r.kicked).toBe(r.kickIndex);
+    }
+  });
+
+  it('O piece always rotates at index 0 (kicks are no-ops)', () => {
+    const { game } = makeGame();
+    game.spawnPiece('O');
+    for (let i = 0; i < 4; i++) {
+      const r = game.tryRotate(1);
+      expect(r.rotated).toBe(true);
+      expect(r.kickIndex).toBe(0);
+    }
+  });
+
+  it('failed rotation (no kick fits) returns rotated:false, kickIndex:-1', () => {
+    const { game } = makeGame();
+    // Build a tightly-walled scenario inside the playfield: T at the
+    // bottom in rot 0, board filled around it so neither in-place nor
+    // any SRS kick can fit. Setup: T pointing up at the bottom row,
+    // walls of garbage flanking from rows 0..2 in every column except
+    // the piece footprint.
+    const T_COL = 4;
+    const T_ROW = 0;
+    game._activePiece = { key: 'T', rot: 0, col: T_COL, row: T_ROW, color: PIECE_COLORS.T };
+    // Fill rows 0..3 except the T's current cells.
+    for (let r = 0; r <= 3; r++) {
+      for (let c = 0; c < game.cols; c++) game.board[r][c] = 0xff0000;
+    }
+    for (const cell of game.getPieceCells(game._activePiece)) {
+      if (cell.row >= 0 && cell.row < game.rows) game.board[cell.row][cell.col] = null;
+    }
+    const result = game.tryRotate(1);
+    expect(result.rotated).toBe(false);
+    expect(result.kickIndex).toBe(-1);
+  });
+});
+
+describe('Game — _lastAction / _lastKickIndex tracking (plan §12.3)', () => {
+  it('initial lastAction is null on spawn', () => {
+    const { game } = makeGame();
+    game.spawnPiece('T');
+    expect(game._lastAction).toBe(null);
+    expect(game._lastKickIndex).toBe(-1);
+  });
+
+  it('tryMove sets lastAction = "move"', () => {
+    const { game } = makeGame();
+    game.spawnPiece('T');
+    game.tryMove(1, 0);
+    expect(game._lastAction).toBe('move');
+  });
+
+  it('tryRotate sets lastAction = "rotation" and records kickIndex', () => {
+    const { game } = makeGame();
+    game.spawnPiece('T');
+    game.tryMove(1, 0); // taint with 'move' first
+    expect(game._lastAction).toBe('move');
+    game.tryRotate(1);
+    expect(game._lastAction).toBe('rotation');
+    expect(game._lastKickIndex).toBe(0);
+  });
+
+  it('softDrop tags lastAction = "drop" (overrides the inner tryMove "move" tag)', () => {
+    const { game } = makeGame();
+    game.spawnPiece('T');
+    game.softDrop();
+    expect(game._lastAction).toBe('drop');
+  });
+
+  it('hardDrop tags lastAction = "drop"', () => {
+    const { game } = makeGame();
+    game.spawnPiece('T');
+    game.hardDrop();
+    expect(game._lastAction).toBe('drop');
+  });
+
+  it('spawning the next piece resets lastAction/lastKickIndex', () => {
+    const { game } = makeGame();
+    game.spawnPiece('T');
+    game.tryRotate(1);
+    expect(game._lastAction).toBe('rotation');
+    game.hardDrop();
+    game.lockPiece();
+    // After spawn of the next piece, the tracking should be reset.
+    expect(game._lastAction).toBe(null);
+    expect(game._lastKickIndex).toBe(-1);
+  });
+
+  it('serialize+restore preserves lastAction and lastKickIndex', () => {
+    const { game } = makeGame();
+    game.spawnPiece('T');
+    game.tryRotate(1);
+    const blob = game.serialize();
+    expect(blob.lastAction).toBe('rotation');
+    expect(blob.lastKickIndex).toBe(0);
+
+    const bus2 = new EventBus({ replayBufferSize: 0, recorderSize: 0 });
+    const g2 = new Game({ rules: buildRules('classic'), bus: bus2, rng: seededRng(1) });
+    g2.restore(blob);
+    expect(g2._lastAction).toBe('rotation');
+    expect(g2._lastKickIndex).toBe(0);
+  });
+});
+
 // ─── Side tag plumbing ────────────────────────────────────────────────
 
 describe('Game — side tag in event payloads', () => {
