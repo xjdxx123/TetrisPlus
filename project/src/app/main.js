@@ -1885,6 +1885,14 @@ function isPhysicsMode() {
   return !!(physicsSession && physicsSession.isStarted);
 }
 
+// Active mode uses the 3D piece library (`pieceSet === 'tetracubes'`).
+// Same shape as `isPhysicsMode()` — a guard the keyboard layer + the
+// per-frame visual code can branch on without poking at Mode.current
+// (which would lag a frame after a mode swap).
+function is3DMode() {
+  return !!(game && game.pieceSet === 'tetracubes');
+}
+
 function tryMove(dCol, dRow, dDepth = 0) {
   if (isPhysicsMode()) {
     // Vertical (dRow) is physics-driven via gravity + soft/hard drop;
@@ -3236,10 +3244,31 @@ window.addEventListener('keydown', (e) => {
       e.preventDefault();
       break;
     case 'ArrowDown':
-      keyState.down = true;
+      // 3D mode (plan v2 §2.1) reroutes ArrowDown to a depth nudge —
+      // pull the piece toward the viewer (depth -1). Soft drop is
+      // omitted in 3D play; gravity + Space-hard-drop cover descent,
+      // and the depth axis is the more useful binding for a key the
+      // player will reach for instinctively when thinking "move this
+      // way." 2D modes keep ArrowDown as the soft-drop hold.
+      if (is3DMode()) {
+        tryMove(0, 0, -1);
+      } else {
+        keyState.down = true;
+      }
       e.preventDefault();
       break;
     case 'ArrowUp':
+      // 3D mode reroutes ArrowUp to depth +1 (push the piece deeper
+      // into the well, away from viewer). 2D modes keep it as the
+      // CCW rotation alongside KeyX. KeyZ/KeyX still rotate around
+      // the screen-perpendicular Z axis in both modes — see below.
+      if (is3DMode()) {
+        tryMove(0, 0, 1);
+      } else {
+        tryRotate(1);
+      }
+      e.preventDefault();
+      break;
     case 'KeyX':
       tryRotate(1);            // 2D + 3D: CCW around Z (screen-perpendicular)
       e.preventDefault();
@@ -3268,11 +3297,11 @@ window.addEventListener('keydown', (e) => {
       e.preventDefault();
       break;
     case 'KeyQ':
-      tryMove(0, 0, -1);       // 3D depth nudge — pull piece toward viewer (z-1)
-      e.preventDefault();
-      break;
-    case 'KeyE':
-      tryMove(0, 0, 1);        // 3D depth nudge — push piece away (z+1)
+      // Secondary depth-pull (alternative to ArrowDown). KeyE was
+      // dropped — it's owned by the effects panel toggle and the
+      // shared listener fires both, which would yank the panel open
+      // every time the player tried to push a piece backward.
+      tryMove(0, 0, -1);
       e.preventDefault();
       break;
     case 'Space':
