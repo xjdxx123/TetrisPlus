@@ -117,16 +117,18 @@ function installBadgeStyles() {
 
     /* ─── Per-side garbage queue (split-column layout) ─── */
     .tp-versus-badge__queue {
-      display: flex;
+      position: relative;
+      display: grid;
+      grid-template-columns: repeat(8, 14px);
       gap: 3px;
-      flex-wrap: wrap;
       justify-content: center;
-      padding: 2px 4px;
+      padding: 4px 6px;
       border-radius: 4px;
-      min-height: 12px;
-      max-width: 130px;
+      width: 136px;
+      min-height: 18px;
       transition: background 0.2s ease-out, border-color 0.2s ease-out;
-      border: 1px solid transparent;
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      background: rgba(255, 255, 255, 0.02);
     }
     .tp-versus-badge__queue-caption {
       font-family: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
@@ -134,7 +136,7 @@ function installBadgeStyles() {
       text-transform: uppercase;
       font-size: 8.5px;
       color: var(--muted, #8b93ad);
-      opacity: 0.65;
+      opacity: 0.7;
     }
     .tp-versus-badge__queue-total {
       font-family: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
@@ -142,20 +144,24 @@ function installBadgeStyles() {
       font-size: 9px;
       letter-spacing: 0.10em;
       color: var(--muted, #8b93ad);
-      opacity: 0.7;
-    }
-    .tp-versus-badge__queue-empty {
-      font-family: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
-      font-size: 9px;
-      letter-spacing: 0.14em;
-      color: var(--muted, #8b93ad);
-      opacity: 0.35;
+      opacity: 0.75;
+      min-height: 12px;
     }
 
-    /* Pip — base shape; per-side color overridden below. The width slot
-       is fixed so a wrap row stays grid-like. */
+    /* Track slot — always rendered (8 of them per side) so the queue
+       area has a permanent visible structure. Fills with a real pip
+       on top when garbage queues. */
+    .tp-versus-badge__slot {
+      width: 14px;
+      height: 6px;
+      border-radius: 2px;
+      border: 1px solid rgba(255, 255, 255, 0.10);
+      background: rgba(255, 255, 255, 0.02);
+      box-sizing: border-box;
+    }
+    /* Pip — base shape; per-side color overridden below. Sits inside
+       the corresponding slot via grid placement. */
     .tp-versus-badge__pip {
-      display: inline-block;
       width: 14px;
       height: 6px;
       border-radius: 2px;
@@ -359,11 +365,16 @@ export function createVersusBadge(opts) {
     }, 380);
   }
 
+  // Number of permanent slot outlines per side. Anything beyond this
+  // count gets summarized in the "+N more" footer rather than wrapping
+  // to a third row, so the badge stays a fixed height.
+  const SLOT_COUNT = QUEUE_PIP_CAP;
+
   /**
-   * Render one side's queue column. Replaces the prior single-row
-   * mixed-color strip — each side now gets its own pip stack with
-   * readiness states (M5 spawn-delay window) and an explicit row total
-   * count below.
+   * Render one side's queue column. Always paints `SLOT_COUNT` faded
+   * slot outlines so the queue area has visible structure even when
+   * empty; overlays a real pip on each slot that has queued garbage.
+   * Each pip carries its own readiness state (M5 spawn-delay window).
    *
    * @param {ReturnType<makeSide>} side
    * @param {GarbageQueueState} state
@@ -375,18 +386,20 @@ export function createVersusBadge(opts) {
     queue.innerHTML = '';
     queue.classList.toggle('is-blocked', blocked);
 
-    if (totalRows === 0 && !blocked) {
-      const empty = document.createElement('span');
-      empty.className = 'tp-versus-badge__queue-empty';
-      empty.textContent = '— clear —';
-      queue.appendChild(empty);
-      total.textContent = '';
-      return;
+    // Step 1 — always render the slot track so the queue area is
+    // permanently visible (vs. the prior "— clear —" empty state which
+    // hid the structure entirely and made the badge feel half-dead).
+    const slotEls = [];
+    for (let i = 0; i < SLOT_COUNT; i++) {
+      const slot = document.createElement('span');
+      slot.className = 'tp-versus-badge__slot';
+      queue.appendChild(slot);
+      slotEls.push(slot);
     }
 
-    // Iterate per-entry so each pip can carry its own readiness state.
-    // Falls back to a single synthetic entry when the host doesn't
-    // surface per-entry data (matches the pre-§13 caller contract).
+    // Step 2 — overlay real pips. Iterate per-entry so each pip can
+    // carry its own readiness state. Falls back to a single synthetic
+    // entry when the host doesn't surface per-entry data.
     const entries = Array.isArray(state.entries) && state.entries.length
       ? state.entries
       : [{ rows: totalRows, readyAt: 0 }];
@@ -394,29 +407,42 @@ export function createVersusBadge(opts) {
 
     let pipCount = 0;
     for (const entry of entries) {
-      if (pipCount >= QUEUE_PIP_CAP) break;
+      if (pipCount >= SLOT_COUNT) break;
       const remaining = (entry.readyAt | 0) - now;
       const ready    = remaining <= 0;
       const imminent = !ready && remaining <= IMMINENT_MS;
       const rows     = entry.rows | 0;
-      for (let i = 0; i < rows && pipCount < QUEUE_PIP_CAP; i++, pipCount++) {
+      for (let i = 0; i < rows && pipCount < SLOT_COUNT; i++, pipCount++) {
+        const slot = slotEls[pipCount];
         const pip = document.createElement('span');
         pip.className = `tp-versus-badge__pip ${pipKindClass}`;
         if (!ready)   pip.classList.add('tp-versus-badge__pip--pending');
         if (imminent) pip.classList.add('tp-versus-badge__pip--imminent');
-        queue.appendChild(pip);
+        // Replace the slot outline with the pip — same grid cell,
+        // so the layout doesn't shift.
+        slot.replaceWith(pip);
       }
     }
 
-    // Row-count footer. Shows total queued rows (incl. ones beyond the
-    // visible cap), plus a BLOCKED tag when capped.
+    // Step 3 — row-count footer. ALWAYS rendered now (even at 0) so
+    // the row count is a stable always-on readout, not appearing /
+    // disappearing as the queue empties.
+    const overflow = Math.max(0, totalRows - SLOT_COUNT);
+    let label;
     if (blocked) {
-      total.textContent = `${totalRows} ROWS · BLOCKED`;
+      label = `${totalRows} ROWS · BLOCKED`;
       total.style.color = '#ff8aa0';
+    } else if (totalRows === 0) {
+      label = 'CLEAR';
+      total.style.color = '';
+    } else if (overflow > 0) {
+      label = `${totalRows} ROWS · +${overflow} OFFSCREEN`;
+      total.style.color = '';
     } else {
-      total.textContent = `${totalRows} ROW${totalRows === 1 ? '' : 'S'}`;
+      label = `${totalRows} ROW${totalRows === 1 ? '' : 'S'}`;
       total.style.color = '';
     }
+    total.textContent = label;
   }
 
   /**
