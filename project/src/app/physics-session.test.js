@@ -120,6 +120,27 @@ describe('PhysicsSession — PIECE_SPAWN bridge (Force-Physics, plan v2 §2.3.1)
     expect(session.activeBodyId).toBeNull();
     session.stop();
   });
+
+  it('defensively re-pauses Game on every PIECE_SPAWN — game.reset() must not strand physics mode in grid-gravity', async () => {
+    const { game, session } = makeFixture();
+    await session.start();
+    expect(game.paused).toBe(true);
+
+    // game.reset() un-pauses the game and then calls spawnPiece(),
+    // which fires PIECE_SPAWN. The session's handler must re-pause
+    // before returning so the very next game.tick() doesn't run grid
+    // gravity in parallel with physics. (Symptom of the bug: the active
+    // piece would grid-fall, hit row 0, lockPiece + spawnNext would fire
+    // on top of the still-airborne physics body, and PIECE_SPAWN would
+    // re-enter mid-flight — producing a pile of overlapping compound
+    // bodies at the spawn cell rather than one piece per turn.)
+    game.reset();
+    expect(game.paused).toBe(true);
+    // Run several game.tick() frames; gravity must stay dormant.
+    for (let i = 0; i < 10; i++) game.tick(16.67);
+    expect(game.paused).toBe(true);
+    session.stop();
+  });
 });
 
 describe('PhysicsSession — force-driven input (plan v2 §2.3.1 H)', () => {

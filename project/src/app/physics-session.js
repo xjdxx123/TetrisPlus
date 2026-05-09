@@ -406,6 +406,18 @@ export class PhysicsSession {
     if (!this._world) return;
     if (e && e.side != null && e.side !== this._side) return;
 
+    // Defensive re-pause. `game.reset()` clears `_paused` (which the
+    // host calls on a Play-Again restart between physics-mode runs), so
+    // without this re-assert the very next `game.tick()` would run grid
+    // gravity in parallel with physics. Symptom: the active piece would
+    // grid-fall, hit row 0, lockPiece + spawnNext would fire on top of
+    // the still-airborne physics body, and PIECE_SPAWN would re-enter
+    // here mid-flight — producing a pile of overlapping compound bodies
+    // at the spawn cell rather than one piece per turn. Re-pausing on
+    // every spawn keeps the session the sole owner of piece advancement
+    // regardless of what external callers did between spawns.
+    this._game.setPaused(true);
+
     // Read the freshly-spawned active piece's cells from Game. Game's
     // grid representation is still the source of truth for "what
     // shape did the bag give us"; the cells array maps directly to

@@ -76,7 +76,7 @@ export function _resetRapierForTests() {
  * @property {boolean} [floor=true]     Add a static floor at y=-0.5 spanning the playfield width.
  * @property {boolean} [walls=true]     Add static side walls at x=-0.5 and x=cols-0.5.
  * @property {number} [friction=0.6]    Per-cube friction. Calibrated per archived §8.4.
- * @property {number} [restitution=0.1] Per-cube bounciness. Low — cubes settle, don't bounce around.
+ * @property {number} [restitution=0]   Per-cube bounciness. Zero by default — Force-Physics mode wants cubes to absorb their landing impulse and settle, not rebound off the floor / walls / each other. (Rapier's default restitution combine rule is "max", so even a low non-zero value reads as a perceptible bounce on the player's hard drop.)
  * @property {number} [stepDtSec=1/60]  Fixed timestep. Matches gameplay tick.
  */
 
@@ -87,7 +87,7 @@ const DEFAULT_OPTS = Object.freeze({
   floor: true,
   walls: true,
   friction: 0.6,
-  restitution: 0.1,
+  restitution: 0,
   stepDtSec: 1 / 60,
 });
 

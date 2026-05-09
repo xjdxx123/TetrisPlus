@@ -39,7 +39,11 @@ describe('createPhysicsWorld — boot', () => {
     expect(_DEFAULT_OPTS.rows).toBe(20);
     expect(_DEFAULT_OPTS.gravity).toBe(-9.81);
     expect(_DEFAULT_OPTS.friction).toBe(0.6);
-    expect(_DEFAULT_OPTS.restitution).toBe(0.1);
+    // Force-Physics: cubes absorb their landing impulse instead of
+    // rebounding off the floor / walls / each other. (Rapier combines
+    // restitution by `max`, so even 0.1 reads as a perceptible bounce
+    // on the player's hard drop.)
+    expect(_DEFAULT_OPTS.restitution).toBe(0);
     expect(_DEFAULT_OPTS.stepDtSec).toBe(1 / 60);
   });
 });
@@ -151,6 +155,24 @@ describe('PhysicsWorld — gravity / step', () => {
     // Walls at x=-1 (left) and x=10 (right). A body inside should
     // stay above x=-0.5 (left wall's right face).
     expect(pos.x).toBeGreaterThan(-0.5);
+    world.dispose();
+  });
+
+  it('hard-drop landing does NOT rebound off the floor (restitution=0)', async () => {
+    // Force-Physics expects cubes to absorb landing impulse and settle.
+    // A body dropped straight down with high velocity should stop near
+    // the floor's resting Y (≈0) instead of bouncing back up.
+    const world = await createPhysicsWorld({ floor: true, walls: false });
+    const id = world.addBody(0, 8, 0, { velocity: { x: 0, y: -15, z: 0 } });
+    stepN(world, 60); // 1s — long enough to land + any rebound to play out
+    const pos = world.getBodyPosition(id);
+    // Cube center at y≈0 when resting on a floor whose top face is at
+    // y=0 (floor body translation y=-0.5, half-extent 0.5). With a
+    // perfectly inelastic landing, the cube settles right around 0.
+    // We allow a tiny window for solver micro-jitter, but it must not
+    // be back up at y > 0.5 (which would indicate a rebound).
+    expect(pos.y).toBeLessThan(0.5);
+    expect(pos.y).toBeGreaterThan(-0.6); // not phasing through the floor
     world.dispose();
   });
 });
