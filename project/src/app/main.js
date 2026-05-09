@@ -4407,32 +4407,74 @@ bus.on(EVENTS.GAME_OVER, ({ score, lines, level, winner }) => {
   // breaks before the overlay covers it. 12ms per row → a 20-row stack peaks
   // in ~240ms, comfortably within the SHARD_CAPACITY budget. The shatter()
   // call itself reuses the existing GPU pool, so no allocation per cube.
+  //
+  // The mesh-registry shape differs between BoardView (2D — `cellMeshes[r][c]`
+  // is an array of `_depth` slice cubes) and BoardView3D (3D —
+  // `cellMeshes[d][r][c]` is a single cube). Branch on the active mode so
+  // the same cascade works for both. Wrap in try/catch so a single bad
+  // entry can't swallow the overlay-fade setTimeout below.
   const ROW_STAGGER_MS = 12;
   let scheduledRows = 0;
   // Snapshot the BoardView reference at schedule time — a Play-Again
   // could swap it out from under the staggered setTimeouts otherwise.
   const cascadeView = boardView;
+  const cascadeIs3D = is3DMode();
   if (cascadeView) {
-    for (let r = ROWS - 1; r >= 0; r--) {
-      let rowHasCubes = false;
-      for (let c = 0; c < COLS; c++) {
-        if (cascadeView.cellMeshes[r][c]) { rowHasCubes = true; break; }
-      }
-      if (!rowHasCubes) continue;
-      const delay = scheduledRows * ROW_STAGGER_MS;
-      scheduledRows++;
-      setTimeout(() => {
-        for (let c = 0; c < COLS; c++) {
-          const slices = cascadeView.cellMeshes[r][c];
-          if (!slices) continue;
-          for (const cube of slices) {
-            shatter(cube);
-            cascadeView.stackGroup.remove(cube);
+    try {
+      for (let r = ROWS - 1; r >= 0; r--) {
+        let rowHasCubes = false;
+        if (cascadeIs3D) {
+          // 3D: walk every depth slice for any cube at row r.
+          for (let d = 0; d < DEPTH_3D && !rowHasCubes; d++) {
+            const layer = cascadeView.cellMeshes[d];
+            if (!layer) continue;
+            for (let c = 0; c < COLS; c++) {
+              if (layer[r] && layer[r][c]) { rowHasCubes = true; break; }
+            }
           }
-          cascadeView.cellMeshes[r][c] = null;
-          board[r][c] = null;
+        } else {
+          for (let c = 0; c < COLS; c++) {
+            if (cascadeView.cellMeshes[r] && cascadeView.cellMeshes[r][c]) {
+              rowHasCubes = true; break;
+            }
+          }
         }
-      }, delay);
+        if (!rowHasCubes) continue;
+        const delay = scheduledRows * ROW_STAGGER_MS;
+        scheduledRows++;
+        setTimeout(() => {
+          try {
+            if (cascadeIs3D) {
+              for (let d = 0; d < DEPTH_3D; d++) {
+                const layer = cascadeView.cellMeshes[d];
+                if (!layer || !layer[r]) continue;
+                for (let c = 0; c < COLS; c++) {
+                  const cube = layer[r][c];
+                  if (!cube) continue;
+                  shatter(cube);
+                  cascadeView.stackGroup.remove(cube);
+                  layer[r][c] = null;
+                }
+              }
+            } else {
+              for (let c = 0; c < COLS; c++) {
+                const slices = cascadeView.cellMeshes[r][c];
+                if (!slices) continue;
+                for (const cube of slices) {
+                  shatter(cube);
+                  cascadeView.stackGroup.remove(cube);
+                }
+                cascadeView.cellMeshes[r][c] = null;
+                if (board && board[r]) board[r][c] = null;
+              }
+            }
+          } catch (err) {
+            console.warn('[gameover] cascade row threw:', err);
+          }
+        }, delay);
+      }
+    } catch (err) {
+      console.warn('[gameover] cascade scheduler threw:', err);
     }
   }
   // Catastrophic camera reaction — Tetris-strength shake + a transient bloom
