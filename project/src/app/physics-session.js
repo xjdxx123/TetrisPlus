@@ -62,6 +62,7 @@ const FORCE = Object.freeze({
   LATERAL_IMPULSE:        2.5,   // N·s on left/right tap (compound body mass ≈ 4 → ~0.6 m/s velocity change)
   ROTATE_TORQUE_IMPULSE:  1.2,   // N·m·s around Z
   SOFT_DROP_IMPULSE:      3.0,   // N·s downward (compounds with gravity)
+  SOFT_DROP_MAX_VEL:       6.0,  // m/s downward cap; held key shouldn't compound past hard-drop magnitude
   HARD_DROP_LINVEL:      -15.0,  // m/s — direct setLinvel, replaces existing velocity
   HARD_DROP_COMMIT_VEL:    1.5,  // m/s — once body's |v| drops below this after a hard-drop, commit
   LATERAL_MAX_VEL:         8.0,  // m/s lateral cap; impulse stops adding when |v.x| ≥ this
@@ -260,6 +261,11 @@ export class PhysicsSession {
   /** Mild downward force — held repeatedly while soft-drop key is down. */
   applySoftDrop() {
     if (!this._activeBodyId || !this._world) return;
+    // Cap downward velocity so a sustained press doesn't compound
+    // past hard-drop magnitude. Mirrors LATERAL_MAX_VEL behavior on
+    // the X axis. Reads private `_bodies` for parity with applyMove.
+    const v = this._world._bodies.get(this._activeBodyId)?.linvel?.();
+    if (v && v.y < -FORCE.SOFT_DROP_MAX_VEL) return;
     this._world.applyImpulse(this._activeBodyId, {
       x: 0, y: -FORCE.SOFT_DROP_IMPULSE, z: 0,
     });

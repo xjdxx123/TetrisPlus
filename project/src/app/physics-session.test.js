@@ -190,6 +190,25 @@ describe('PhysicsSession — force-driven input (plan v2 §2.3.1 H)', () => {
     session.stop();
   });
 
+  it('applySoftDrop is capped at SOFT_DROP_MAX_VEL — sustained press does not compound past hard-drop magnitude', async () => {
+    const { game, session } = makeFixture();
+    await session.start();
+    game.spawnPiece('T');
+    // Pre-set a downward velocity beyond the cap; further soft-drop
+    // calls should be no-ops on the velocity (impulse skipped).
+    session.world.setLinvel(session.activeBodyId, {
+      x: 0, y: -(_FORCE.SOFT_DROP_MAX_VEL + 0.5), z: 0,
+    });
+    const before = session.world._bodies.get(session.activeBodyId).linvel().y;
+    session.applySoftDrop();
+    session.applySoftDrop();
+    session.applySoftDrop();
+    const after = session.world._bodies.get(session.activeBodyId).linvel().y;
+    // Cap engaged — y velocity should be unchanged (not more negative).
+    expect(after).toBeCloseTo(before, 5);
+    session.stop();
+  });
+
   it('applyHardDrop sets a strong downward velocity AND arms commit', async () => {
     const { game, session } = makeFixture();
     await session.start();
