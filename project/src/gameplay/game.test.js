@@ -1940,9 +1940,10 @@ describe('Game — 3D lock + layer detection (plan v2 §2.1 Phase B)', () => {
     }
   });
 
-  it('_collectFullRows requires every (col, depth) at row Y to be filled', () => {
+  it('_collectFullRows reports a full Y-slab (every (col, depth) covered)', () => {
     const { game } = make3DGame();
-    // Fill ALL (col, depth) at row 0 — full 3D layer.
+    // 100-cube fill — strictly more than required by the projection
+    // rule but still a valid trigger.
     for (let d = 0; d < game.depth; d++) {
       for (let c = 0; c < game.cols; c++) {
         game.boardLayers[d][0][c] = 0xff0000;
@@ -1951,13 +1952,40 @@ describe('Game — 3D lock + layer detection (plan v2 §2.1 Phase B)', () => {
     expect(game._collectFullRows()).toEqual([0]);
   });
 
-  it('_collectFullRows does NOT report a partial fill (single z-slice full)', () => {
+  it('_collectFullRows projection rule — a single z-slice with a full 10-wide row triggers a clear', () => {
+    // Plan v2 §2.1 projection-clear semantics: "full" means every
+    // column has at least one cube somewhere in its depth pillar at
+    // row Y. A 2D-style filled row at z=0 satisfies that with just
+    // 10 cubes — the strict 100-cube rule from archived §6.5 was too
+    // hard to reach in practice.
     const { game } = make3DGame();
-    // Fill ONLY the front slice at row 0 — looks like a "full row" in 2D
-    // but is just a single z-slice in 3D. Should NOT register as a full
-    // layer.
     for (let c = 0; c < game.cols; c++) {
       game.boardLayers[0][0][c] = 0xff0000;
+    }
+    expect(game._collectFullRows()).toEqual([0]);
+  });
+
+  it('_collectFullRows projection rule — sparse cubes spread across z-slices count if every column is covered', () => {
+    // 10 cubes total, one per column, each at a different z-slice.
+    // The XY-projection of row 0 is full → row 0 clears.
+    const { game } = make3DGame();
+    for (let c = 0; c < game.cols; c++) {
+      const d = c % game.depth; // scatter across depth slices
+      game.boardLayers[d][0][c] = 0xff0000;
+    }
+    expect(game._collectFullRows()).toEqual([0]);
+  });
+
+  it('_collectFullRows projection rule — an empty pillar in any column rejects the row', () => {
+    // Fill every (col, depth) at row 0 EXCEPT column 5 — that pillar
+    // is empty across all depth slices, so the projection has a hole
+    // and the row should NOT clear.
+    const { game } = make3DGame();
+    for (let d = 0; d < game.depth; d++) {
+      for (let c = 0; c < game.cols; c++) {
+        if (c === 5) continue;
+        game.boardLayers[d][0][c] = 0xff0000;
+      }
     }
     expect(game._collectFullRows()).toEqual([]);
   });

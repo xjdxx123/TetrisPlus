@@ -901,14 +901,19 @@ export class Game {
    * Find every row that's "full" — meaning a candidate for line / layer
    * clear. The condition depends on dimensionality:
    *
-   *   - 2D (`_depth === 1`): every cell in the row is non-null. This is
-   *     the classic Tetris row-clear condition.
-   *   - 3D (`_depth > 1`): every (col, depth) pair at this row Y is
-   *     non-null. A "full layer" is the 3D analogue of a full row — the
-   *     entire Y-slab must be filled across all depth slices. (This
-   *     matches `experimental/3d/layer-detection.js#detectFullLayers`,
-   *     just inlined against Game's live board state instead of a cell
-   *     snapshot.)
+   *   - 2D (`_depth === 1`): every cell in the row is non-null. The
+   *     classic Tetris row-clear condition.
+   *   - 3D (`_depth > 1`): the row's **projection onto the XY plane**
+   *     is full — for every column `c`, AT LEAST ONE depth slice has
+   *     a cube at (c, row). The 100-cube "every (col, depth) filled"
+   *     rule from archived §6.5 was deemed too strict in playtest
+   *     (most tetracubes are flat at z=0, so reaching 100 cubes per
+   *     layer takes ~25 piece placements). Projection-based clearing
+   *     keeps the "3D well, layer payoff" feel — clears still vacate
+   *     all 100 positions at row Y and the layers above settle by 1
+   *     — while letting players reach a clear in roughly the same
+   *     piece count as 2D Tetris (10 cubes covering 10 columns
+   *     suffices, even if they're scattered across z-slices).
    *
    * Returns ascending row indices.
    *
@@ -923,15 +928,20 @@ export class Game {
       }
       return rows;
     }
-    // 3D path — a row is full only when every (col, depth) at that Y
-    // is occupied. Short-circuits on the first hole found per row.
+    // 3D projection rule — for every column, at least one depth slice
+    // at row Y has a cube. Short-circuits on the first uncovered
+    // column (an "empty pillar" through the depth axis).
     rowLoop:
     for (let r = 0; r < this._rows; r++) {
-      for (let d = 0; d < this._depth; d++) {
-        const row = this._board[d][r];
-        for (let c = 0; c < this._cols; c++) {
-          if (row[c] === null) continue rowLoop;
+      for (let c = 0; c < this._cols; c++) {
+        let columnCovered = false;
+        for (let d = 0; d < this._depth; d++) {
+          if (this._board[d][r][c] !== null) {
+            columnCovered = true;
+            break;
+          }
         }
+        if (!columnCovered) continue rowLoop; // empty pillar — not full
       }
       rows.push(r);
     }
