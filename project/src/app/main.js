@@ -3599,6 +3599,16 @@ function _hideLobbyPanel() {
 
 function _disposeOnlineSession() {
   if (!onlineSession) return;
+  // Tear down the opponent's chrome + viz subscribers we attached in
+  // _startOnlineMatch. We also alias `versusSession` to the online
+  // session there; if it's still pointing at our session, clear it
+  // so any solo-mode code path that runs next doesn't see a stale
+  // pointer to the now-disposed session.
+  if (onlineSession.versus && versusSession === onlineSession.versus) {
+    versusSession = null;
+  }
+  _detachOpponentChrome();
+  _disposeOpponentViz();
   try {
     if (onlineSession.transport) onlineSession.transport.close();
     if (onlineSession.router)    onlineSession.router.dispose();
@@ -3820,21 +3830,39 @@ function _tryStartGuest() {
 /**
  * Both peers have agreed on a seed. Build a VersusSession with
  * `opponentMode: 'remote'` + a RollbackEngine + the player's
- * InputRouter.
+ * InputRouter, then position the dual board + chrome so the two
+ * playfields render side-by-side instead of overlapped.
  */
 function _startOnlineMatch() {
   if (!onlineSession || onlineSession.matchActive) return;
   if (onlineSession.seed == null) return;
-  // Build VersusSession. Per the rollback design the local game IS
-  // gameP1 (always), regardless of host/guest role — both clients
-  // run the same gameplay code with the same seed against their
-  // local user's inputs.
+  if (!onlineSession.role) return;
+
+  // Two independent piece bags — one tied to the host's player, one
+  // to the guest's player. Both clients MUST agree on which seed
+  // generates which player's pieces, otherwise A's I-piece on his own
+  // screen lands as something else on B's screen (the original bug:
+  // "玩家A的方块是 4×1, 在玩家B界面里是其他方块").
+  //
+  // Convention: host's player bag uses `seed`, guest's player bag
+  // uses `seed + 1`. From a given client's view:
+  //   - localSeed  = the seed for whichever role THIS client plays.
+  //   - remoteSeed = the seed for the OTHER client's role.
+  // gameP1 (local) gets localSeed; gameP2 (the local view of the
+  // remote opponent) gets remoteSeed. So host's gameP1 == guest's
+  // gameP2 == hostSeed, and vice versa — both screens see the same
+  // sequence for each player.
+  const hostSeed   = onlineSession.seed >>> 0;
+  const guestSeed  = (onlineSession.seed + 1) >>> 0;
+  const localSeed  = (onlineSession.role === 'host') ? hostSeed  : guestSeed;
+  const remoteSeed = (onlineSession.role === 'host') ? guestSeed : hostSeed;
+
   const session = new VersusSession({
     parent: caseGroup,
     opponentMode: 'remote',
     rendererDeps: { cellToWorld, makeCube, shatter, animateCubeTo, startLockAnim, playSfx },
-    rngP1: (function () { let s = onlineSession.seed >>> 0; return () => { s = (s + 0x6D2B79F5) >>> 0; let t = s; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; })(),
-    rngP2: (function () { let s = (onlineSession.seed + 1) >>> 0; return () => { s = (s + 0x6D2B79F5) >>> 0; let t = s; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; })(),
+    rngP1: makeMulberry32(localSeed),
+    rngP2: makeMulberry32(remoteSeed),
     playerInputMode: 'host', // we drive gameP1 ourselves via rollback
     onSideEnd: (reason, side) => {
       // First side to topout loses the match.
@@ -3843,6 +3871,25 @@ function _startOnlineMatch() {
     },
   });
   session.start();
+
+  // Position the two anchors so the BoardViews don't overlap. The
+  // DualBoard default is ±separation/2 around the case center, which
+  // both render INSIDE the single visible case decoration. Mirror the
+  // bot-versus path exactly: player at x=0, opponent at
+  // OPPONENT_OFFSET_X, with a cloned case chrome on the right so the
+  // player sees TWO containers instead of one (the original bug:
+  // "界面中只有一个 container 在中间").
+  session.dualBoard.leftAnchor.position.x  = 0;
+  session.dualBoard.rightAnchor.position.x = OPPONENT_OFFSET_X;
+
+  // Alias to the global `versusSession` so `_attachOpponentChrome` /
+  // `_attachOpponentViz` (written for the bot-versus path; they read
+  // the global) work unchanged. Without this alias the helpers
+  // silently no-op and the online path has no opponent decoration +
+  // no opponent visual feedback (popups, shockwaves on opponent side).
+  versusSession = session;
+  _attachOpponentChrome();
+  _attachOpponentViz();
 
   // RollbackEngine wires gameP1 (local) + gameP2 (remote) to the
   // transport. sendInput callback ships every tick's local input.
@@ -3859,10 +3906,14 @@ function _startOnlineMatch() {
     target: window,
   });
 
-  onlineSession.versus      = session;
-  onlineSession.rollback    = rollback;
-  onlineSession.router      = router;
-  onlineSession.matchActive = true;
+  onlineSession.versus       = session;
+  onlineSession.rollback     = rollback;
+  onlineSession.router       = router;
+  // Fixed-step accumulator for the rollback tick loop in animate().
+  // Both clients must advance their tick counter at exactly 60 Hz so
+  // tick numbers stay in sync regardless of each side's rAF cadence.
+  onlineSession.tickAccumMs  = 0;
+  onlineSession.matchActive  = true;
 
   // Alias the host's primary game/boardView to the session's player
   // side so existing HUD / animate-loop code reads the right state.
@@ -3871,6 +3922,23 @@ function _startOnlineMatch() {
   syncFromGame();
 
   _hideLobbyPanel();
+}
+
+/**
+ * Mulberry32 — short, well-mixed seeded PRNG. Both clients use the
+ * same algorithm so the seed → bag-sequence map is byte-identical
+ * across machines (the load-bearing assumption for online piece
+ * sync; see `_startOnlineMatch` for the role→seed split).
+ */
+function makeMulberry32(seed) {
+  let s = seed >>> 0;
+  return () => {
+    s = (s + 0x6D2B79F5) >>> 0;
+    let t = s;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
 }
 
 // Lobby DOM event wiring — fires once at boot. The panel itself is
@@ -4370,9 +4438,29 @@ function animate(dt, envTime) {
     // skips DAS/ARR (InputRouter latches keys directly).
 
     if (onlineActive) {
+      // Lock rollback ticks to a fixed 60 Hz cadence regardless of
+      // rAF rate. rAF runs at the host's refresh rate (60 Hz on a
+      // normal monitor, 30 Hz when the tab is backgrounded, 120 Hz
+      // on high-refresh displays). Without a fixed-step accumulator
+      // each client's `rollback._currentTick` advances at a different
+      // wall-clock rate, so tick numbers across the wire drift apart
+      // and remote-input arrivals perpetually mispredict + reconcile.
+      const TICK_MS = 1000 / 60;
       const localFrame = onlineSession.router.frame();
-      try { onlineSession.rollback.tick(localFrame); }
-      catch (err) { console.warn('[online] tick threw:', err); }
+      onlineSession.tickAccumMs = (onlineSession.tickAccumMs || 0) + (dtGame * 1000);
+      // Cap catch-up to 5 ticks per frame so a long stall (e.g. tab
+      // hidden for 10 s) doesn't burst-step 600 ticks and freeze the
+      // UI. Capped overflow is dropped — the rollback engine treats
+      // it as packet loss and recovers via remote-input arrival.
+      let stepBudget = 5;
+      while (onlineSession.tickAccumMs >= TICK_MS && stepBudget-- > 0) {
+        try { onlineSession.rollback.tick(localFrame); }
+        catch (err) { console.warn('[online] tick threw:', err); break; }
+        onlineSession.tickAccumMs -= TICK_MS;
+      }
+      // Drain remaining accumulator so we don't carry unbounded debt
+      // when the per-frame budget caps the loop.
+      if (stepBudget < 0) onlineSession.tickAccumMs = 0;
       syncFromGame();
     } else {
     // DAS/ARR — tryMove auto-routes via isPhysicsMode() so this code
