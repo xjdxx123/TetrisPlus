@@ -68,11 +68,21 @@ import { PhysicsBoardView } from '../world/physics-board-view.js';
 // Phase J online-versus host wiring (plan_online_versus.md §J).
 import { loadOrCreateIdentity } from '../net/identity.js';
 import { BroadcastTransport } from '../net/transport-broadcast.js';
+import { WebSocketTransport } from '../net/transport-ws.js';
 import { encodeInput, encodeMatchStart, MSG } from '../net/protocol.js';
 import { RollbackEngine } from '../net/rollback.js';
 import { InputRouter, KEYMAP_PRESETS, EMPTY_FRAME } from '../input/intents.js';
 import { PhysicsSession } from './physics-session.js';
 import { VersusSession } from './versus.js';
+
+// Online relay endpoint. For local dev, run `npm run relay` to spin
+// up the Node WebSocket server (server/relay/local-dev.js) on port
+// 8787 — it relays messages between two clients in the same lobby
+// code. For Cloudflare deploy, swap this URL for the deployed
+// Worker endpoint. When unset OR when the WS connect fails on
+// boot, the lobby falls back to BroadcastChannel (works in two
+// tabs of the same browser, no server needed).
+const RELAY_URL_BASE = 'ws://localhost:8787/lobby/';
 
 // =============================================================
 // Tweaks — original three (gravity / mood / shatterPower) are written by
@@ -3608,13 +3618,41 @@ function _disposeOnlineSession() {
 function _connectToLobby(lobbyCode) {
   if (onlineSession) _disposeOnlineSession();
   const identity = loadOrCreateIdentity();
-  console.log('[online] connect', { lobbyCode, channelName: `tetris-online-${lobbyCode}`, userId: identity.userId, displayName: identity.displayName });
-  const transport = new BroadcastTransport({
-    channelName: `tetris-online-${lobbyCode}`,
-    userId:      identity.userId,
-    displayName: identity.displayName,
-    onOpen:      () => console.log('[online] transport open — auth sent'),
-  });
+  console.log('[online] connect', { lobbyCode, userId: identity.userId, displayName: identity.displayName });
+
+  // Try the WebSocket relay first (any browser / device on the same
+  // network can connect — start the relay with `npm run relay`). On
+  // connect failure (no relay running), fall back to BroadcastChannel
+  // which works between two tabs of the same browser without any
+  // server. Either way the rest of the lobby flow is identical —
+  // both transports have the same surface.
+  const wsUrl = RELAY_URL_BASE + encodeURIComponent(lobbyCode);
+  let transport;
+  let usingFallback = false;
+  try {
+    transport = new WebSocketTransport({
+      url:         wsUrl,
+      userId:      identity.userId,
+      displayName: identity.displayName,
+      onOpen:      () => console.log('[online] WS transport open — auth sent', wsUrl),
+      onClose:     (reason) => console.log('[online] WS closed:', reason),
+      onError:     (err) => {
+        console.warn('[online] WS error — falling back to BroadcastChannel', err);
+        if (onlineSession && onlineSession.transport === transport && !usingFallback) {
+          usingFallback = true;
+          _switchToBroadcastFallback(lobbyCode, identity);
+        }
+      },
+    });
+  } catch (err) {
+    console.warn('[online] WS construct threw — falling back to BroadcastChannel', err);
+    transport = new BroadcastTransport({
+      channelName: `tetris-online-${lobbyCode}`,
+      userId:      identity.userId,
+      displayName: identity.displayName,
+      onOpen:      () => console.log('[online] BroadcastChannel transport open — auth sent'),
+    });
+  }
   onlineSession = {
     transport, identity,
     lobbyCode,
@@ -3732,6 +3770,37 @@ function _onLobbyMessage(msg) {
   // gar / snap / desync land here too — Phase J leaves them as
   // future work since the cubes already settle correctly without
   // them at the local-tab playtest scale.
+}
+
+/**
+ * Replace the current transport with BroadcastChannel — fallback
+ * when the local relay isn't running. Same lobby code maps to a
+ * BroadcastChannel name, so two tabs in the same browser can still
+ * find each other without the relay.
+ */
+function _switchToBroadcastFallback(lobbyCode, identity) {
+  if (!onlineSession) return;
+  try { onlineSession.transport.close(); } catch { /* ignore */ }
+  console.log('[online] using BroadcastChannel fallback');
+  const transport = new BroadcastTransport({
+    channelName: `tetris-online-${lobbyCode}`,
+    userId:      identity.userId,
+    displayName: identity.displayName,
+    onOpen:      () => console.log('[online] BroadcastChannel transport open — auth sent'),
+  });
+  onlineSession.transport = transport;
+  // Reset handshake state so the fallback channel renegotiates.
+  onlineSession.peerId  = null;
+  onlineSession.role    = null;
+  onlineSession.seed    = null;
+  transport.onMessage((msg) => {
+    if (!onlineSession || onlineSession.transport !== transport) return;
+    _onLobbyMessage(msg);
+  });
+  // Update status to reflect the fallback so the user knows
+  // cross-browser play won't work without the relay.
+  const status = document.getElementById('onlineWaitingStatus');
+  if (status) status.textContent = 'No relay — using same-browser fallback. Open the second tab in the same browser.';
 }
 
 /**
