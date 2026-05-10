@@ -69,7 +69,7 @@ import { PhysicsBoardView } from '../world/physics-board-view.js';
 import { loadOrCreateIdentity } from '../net/identity.js';
 import { BroadcastTransport } from '../net/transport-broadcast.js';
 import { WebSocketTransport } from '../net/transport-ws.js';
-import { encodeInput, encodeMatchStart, MSG } from '../net/protocol.js';
+import { encodeInput, encodeMatchStart, encodeTopout, MSG } from '../net/protocol.js';
 import { RollbackEngine } from '../net/rollback.js';
 import { InputRouter, KEYMAP_PRESETS, EMPTY_FRAME } from '../input/intents.js';
 import { PhysicsSession } from './physics-session.js';
@@ -3418,6 +3418,12 @@ window.addEventListener('keydown', (e) => {
       e.preventDefault();
       break;
     case 'KeyP':
+      // Pause is disabled in online versus — see the keymap stripping in
+      // _startOnlineMatch for the rationale. The window-level KeyP
+      // handler still fires regardless of the InputRouter's keymap, so
+      // we gate it here too to prevent A from desyncing the simulation
+      // by toggling their local game's `paused` flag mid-match.
+      if (isOnlineMode()) break;
       if (game) {
         game.setPaused(!game.paused);
         syncFromGame();
@@ -3777,6 +3783,18 @@ function _onLobbyMessage(msg) {
     onlineSession.rollback.receiveRemoteInput(msg.tick, msg.frame);
     return;
   }
+  if (msg.t === MSG.TOPOUT && onlineSession.matchActive) {
+    // Peer's authoritative loss. Trust it — they're the source of
+    // truth for their own player's death. Even if our local sim
+    // hasn't reached their topout state, peer-says-they-lost = we
+    // won. endRun is single-shot via _endRunInvoked guard, so the
+    // first call wins; if our local sim spuriously declared US the
+    // loser before this message arrived, that local result already
+    // fired and we'll keep it (the desync is a separate bug, but at
+    // least the peer-trust path won't make things worse).
+    endRun({ reason: 'topout', winner: 'player' });
+    return;
+  }
   // gar / snap / desync land here too — Phase J leaves them as
   // future work since the cubes already settle correctly without
   // them at the local-tab playtest scale.
@@ -3861,12 +3879,38 @@ function _startOnlineMatch() {
     parent: caseGroup,
     opponentMode: 'remote',
     rendererDeps: { cellToWorld, makeCube, shatter, animateCubeTo, startLockAnim, playSfx },
+    // Host's global bus carries the player's PIECE_LOCK / LINE_CLEAR /
+    // T_SPIN / B2B_CHAIN / PERFECT_CLEAR events to every existing
+    // subscriber: cinematic FX (vfx/director), SFX cues, HUD refresh,
+    // line-clear shockwaves, modern chips. Without this, VersusSession
+    // creates a fresh isolated bus for gameP1 and the player's own
+    // gameplay produces no audio + no celebration FX in online mode.
+    // The opponent side stays on a private bus (per VersusSession's
+    // contract) so the global subscribers don't double-fire on the
+    // remote opponent's events.
+    busP1: bus,
     rngP1: makeMulberry32(localSeed),
     rngP2: makeMulberry32(remoteSeed),
     playerInputMode: 'host', // we drive gameP1 ourselves via rollback
     onSideEnd: (reason, side) => {
       // First side to topout loses the match.
       const winner = side === 'player' ? 'opponent' : 'player';
+      // When OUR player loses locally, send an authoritative TOPOUT
+      // to the peer so they don't have to derive the result from
+      // their (possibly desync'd) simulation. The peer's TOPOUT
+      // handler will fire endRun(winner='player') as soon as the
+      // message arrives, even if their local sim hasn't reached our
+      // topout state yet. Solves the case where deterministic-
+      // garbage hiccups make B's gameP1 spuriously top out before
+      // A's authoritative loss propagates over the wire.
+      if (side === 'player' && onlineSession && onlineSession.transport) {
+        try {
+          const tick = onlineSession.rollback ? onlineSession.rollback.currentTick : 0;
+          onlineSession.transport.send(encodeTopout(tick));
+        } catch (err) {
+          console.warn('[online] topout send threw:', err);
+        }
+      }
       endRun({ reason: 'topout', winner });
     },
   });
@@ -3900,9 +3944,16 @@ function _startOnlineMatch() {
   });
 
   // InputRouter reads the player's keyboard each frame.
+  // Strip `pause` from the keymap — applyFrameToGame early-returns when
+  // game.paused is true, so the pause-toggle would only travel one
+  // direction (paused → never unpaused). Even if the toggle worked,
+  // pause has no coherent meaning in multiplayer: A pausing freezes
+  // A's modeTimeMs while B's keeps running, so anything timer-based
+  // (garbage readyAt window, spawn delay) immediately desyncs.
+  const ONLINE_KEYMAP = { ...KEYMAP_PRESETS.player, pause: [] };
   const router = new InputRouter({
     side: 'player',
-    keymap: KEYMAP_PRESETS.player,
+    keymap: ONLINE_KEYMAP,
     target: window,
   });
 
@@ -3913,6 +3964,16 @@ function _startOnlineMatch() {
   // Both clients must advance their tick counter at exactly 60 Hz so
   // tick numbers stay in sync regardless of each side's rAF cadence.
   onlineSession.tickAccumMs  = 0;
+  // DAS/ARR state per direction. The InputRouter reports raw held
+  // state; without DAS/ARR, holding ← would call tryMove(-1,0) every
+  // single tick (60 cells/sec — uncontrollably fast). The filter
+  // below converts (held=true for N consecutive ticks) into the
+  // standard fire pattern: 1 immediate move, hold for DAS, then
+  // repeat at ARR. msHeld == -1 means "not currently held".
+  onlineSession.dasState = {
+    left:  { msHeld: -1, msSince: 0 },
+    right: { msHeld: -1, msSince: 0 },
+  };
   onlineSession.matchActive  = true;
 
   // Alias the host's primary game/boardView to the session's player
@@ -3922,6 +3983,68 @@ function _startOnlineMatch() {
   syncFromGame();
 
   _hideLobbyPanel();
+}
+
+/**
+ * Apply DAS/ARR (delay-auto-shift / auto-repeat-rate) to the raw held
+ * state of left/right movement on an InputFrame. Mutates `dasState`
+ * to track per-direction msHeld + msSinceLastFire, and returns a new
+ * frame with `left`/`right` set to true ONLY on ticks where a move
+ * should actually fire.
+ *
+ * Pattern: tick 0 (initial press) fires immediately; subsequent ticks
+ * suppress until DAS_MS has elapsed; after DAS, fires once per ARR_MS.
+ *
+ * Other fields (softDrop, hardDrop, rotateCW/CCW, hold, pause) pass
+ * through unchanged — softDrop is a continuous gravity multiplier
+ * (no DAS), discrete actions are already InputRouter-latched.
+ *
+ * @param {Object} rawFrame   Raw frame from InputRouter.frame().
+ * @param {Object} dasState   Mutated. `{left, right}` each `{msHeld, msSince}`.
+ * @param {number} tickMs     Per-tick duration (1000/60 ≈ 16.67ms).
+ * @returns {Object}          Filtered frame.
+ */
+function _dasArrFilterOnline(rawFrame, dasState, tickMs) {
+  // DAS/ARR thresholds in ms. Match the legacy values used by the
+  // solo path (line ~3307): DAS = 160ms, ARR = 45ms. Felt right in
+  // playtest; tuning is a future polish item.
+  const DAS_MS = 160;
+  const ARR_MS = 45;
+  function filter(key) {
+    const s = dasState[key];
+    if (!rawFrame[key]) {
+      // Released — reset state so the next press starts fresh.
+      s.msHeld = -1;
+      s.msSince = 0;
+      return false;
+    }
+    if (s.msHeld < 0) {
+      // Just-pressed transition — fire immediately, then enter DAS.
+      s.msHeld = 0;
+      s.msSince = 0;
+      return true;
+    }
+    s.msHeld  += tickMs;
+    s.msSince += tickMs;
+    if (s.msHeld < DAS_MS) {
+      // Still inside the DAS window — suppress repeats.
+      return false;
+    }
+    if (s.msSince >= ARR_MS) {
+      // ARR period elapsed — fire one repeat. Subtract (rather than
+      // reset to 0) so accumulated overshoot rolls into the next
+      // window — keeps long holds from drifting off-cadence on
+      // sub-tick durations.
+      s.msSince -= ARR_MS;
+      return true;
+    }
+    return false;
+  }
+  return {
+    ...rawFrame,
+    left:  filter('left'),
+    right: filter('right'),
+  };
 }
 
 /**
@@ -4446,17 +4569,45 @@ function animate(dt, envTime) {
       // wall-clock rate, so tick numbers across the wire drift apart
       // and remote-input arrivals perpetually mispredict + reconcile.
       const TICK_MS = 1000 / 60;
-      const localFrame = onlineSession.router.frame();
+      // Read the raw frame ONCE per animate cycle. InputRouter clears
+      // discrete latches (hardDrop / rotateCW / rotateCCW / hold) on
+      // each frame() call, so reading per-rollback-tick would lose any
+      // discrete action that happened between this animate and the
+      // next. We pass the rawFrame's discretes to the FIRST rollback
+      // tick only; subsequent ticks in the same animate get a copy
+      // with discretes zeroed (one keypress = one rotate, not N).
+      const rawFrame = onlineSession.router.frame();
       onlineSession.tickAccumMs = (onlineSession.tickAccumMs || 0) + (dtGame * 1000);
       // Cap catch-up to 5 ticks per frame so a long stall (e.g. tab
       // hidden for 10 s) doesn't burst-step 600 ticks and freeze the
       // UI. Capped overflow is dropped — the rollback engine treats
       // it as packet loss and recovers via remote-input arrival.
       let stepBudget = 5;
+      let firstStep = true;
       while (onlineSession.tickAccumMs >= TICK_MS && stepBudget-- > 0) {
-        try { onlineSession.rollback.tick(localFrame); }
+        // DAS/ARR filter on left/right held state. Without this, a
+        // held arrow key would tryMove every single rollback tick =
+        // 60 cells/sec (uncontrollable). Filter mutates dasState; on
+        // the FIRST tick of a fresh press it returns left/right=true
+        // immediately, then suppresses for DAS_MS, then fires per
+        // ARR_MS — matching the solo-mode feel.
+        const filtered = _dasArrFilterOnline(rawFrame, onlineSession.dasState, TICK_MS);
+        // First rollback tick of this animate gets the rawFrame's
+        // discrete actions; subsequent ticks get them zeroed so a
+        // single keypress doesn't fire N rotations / hard-drops when
+        // animate stepped through multiple rollback ticks.
+        const tickFrame = firstStep ? filtered : {
+          ...filtered,
+          hardDrop:  false,
+          rotateCW:  false,
+          rotateCCW: false,
+          hold:      false,
+          pause:     false,
+        };
+        try { onlineSession.rollback.tick(tickFrame); }
         catch (err) { console.warn('[online] tick threw:', err); break; }
         onlineSession.tickAccumMs -= TICK_MS;
+        firstStep = false;
       }
       // Drain remaining accumulator so we don't carry unbounded debt
       // when the per-frame budget caps the loop.

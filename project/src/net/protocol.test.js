@@ -10,7 +10,7 @@ import {
   encodeQueueEnter, encodeQueueLeave,
   encodeMatchFound, encodeMatchReady, encodeMatchStart, encodeMatchResign, encodeMatchEnd,
   encodeError,
-  encodeInput, encodeSnapshotHash, encodeDesyncBlob, encodeGarbage,
+  encodeInput, encodeSnapshotHash, encodeDesyncBlob, encodeGarbage, encodeTopout,
 } from './protocol.js';
 
 const UID = '0123456789abcdef'; // valid 16-char hex
@@ -144,6 +144,17 @@ describe('protocol — realtime plane', () => {
     expect(() => encodeGarbage(345, 0, 7)).toThrow(/rows/); // 0 rows is meaningless
     expect(() => encodeGarbage(345, 4, -1)).toThrow(/holeCol/);
   });
+
+  it('topout — tick required, validates non-neg int', () => {
+    const m = encodeTopout(456);
+    expect(m.t).toBe(MSG.TOPOUT);
+    expect(m.tick).toBe(456);
+    roundTrip(m);
+    roundTrip(encodeTopout(0));
+    expect(() => encodeTopout(-1)).toThrow(/tick/);
+    expect(() => encodeTopout(1.5)).toThrow(/tick/);
+    expect(() => encodeTopout('zero')).toThrow(/tick/);
+  });
 });
 
 describe('protocol — decode', () => {
@@ -196,6 +207,7 @@ describe('protocol — decode', () => {
     roundTrip(encodeSnapshotHash(0, 'abcd1234'));
     roundTrip(encodeDesyncBlob(0, { board: [] }));
     roundTrip(encodeGarbage(0, 1, 0));
+    roundTrip(encodeTopout(0));
   });
 });
 

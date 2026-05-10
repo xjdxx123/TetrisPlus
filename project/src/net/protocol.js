@@ -47,6 +47,11 @@ export const MSG = Object.freeze({
   SNAPSHOT_HASH: 'snap',
   DESYNC_BLOB:   'desync',
   GARBAGE:       'gar',
+  // Authoritative "my player just topped out at tick T" announcement.
+  // Lets the peer skip its own (potentially desync'd) topout-detection
+  // path and end the match with the right winner immediately. See
+  // the TOPOUT receive handler in main.js for the rationale.
+  TOPOUT:        'topout',
 });
 
 const KNOWN_TYPES = new Set(Object.values(MSG));
@@ -215,6 +220,19 @@ export function encodeGarbage(tick, rows, holeCol) {
   return Object.freeze({ t: MSG.GARBAGE, tick, rows, holeCol });
 }
 
+/**
+ * "My player just topped out" — authoritative loss announcement.
+ * The receiver treats this as "peer lost, I won" regardless of its
+ * own local simulation state. Without this, both clients have to
+ * derive the winner from their local view, which can disagree if
+ * the simulations have drifted (deterministic-garbage hiccup,
+ * rollback edge cases, etc).
+ */
+export function encodeTopout(tick) {
+  must(isNonNegInt(tick), 'topout: tick (non-neg int) required');
+  return Object.freeze({ t: MSG.TOPOUT, tick });
+}
+
 // ─── Decoder ───────────────────────────────────────────────────────────
 
 /**
@@ -304,6 +322,9 @@ export function decode(raw) {
     case MSG.GARBAGE:
       must(isNonNegInt(msg.tick) && isNonNegInt(msg.rows) && msg.rows > 0 && isNonNegInt(msg.holeCol),
         `${msg.t}: tick+rows+holeCol required`);
+      break;
+    case MSG.TOPOUT:
+      must(isNonNegInt(msg.tick), `${msg.t}: tick required`);
       break;
     default:
       // Unreachable — KNOWN_TYPES check above already filtered.

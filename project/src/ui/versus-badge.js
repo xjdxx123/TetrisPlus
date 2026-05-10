@@ -386,7 +386,13 @@ export function createVersusBadge(opts) {
   let _completed = false;
   let _pulseTimer = null;
 
-  function isVisible() { return getActiveModeKey() === 'versus'; }
+  function isVisible() {
+    const k = getActiveModeKey();
+    // 'online' is treated as a versus variant — same dual-board chrome,
+    // same garbage queue, same WIN/LOSS semantics — so the badge UI
+    // (score / KO / inbound + outbound queues) is reused unchanged.
+    return k === 'versus' || k === 'online';
+  }
   function pulse() {
     root.classList.add('is-pulsing');
     if (_pulseTimer != null) clearTimeout(_pulseTimer);

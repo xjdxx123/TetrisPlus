@@ -1240,7 +1240,25 @@ export class Game {
     }
     const remaining = requested - cancelled;
     if (remaining > 0) {
-      this._bus.emit(EVENTS.GARBAGE_SENT, { rows: remaining, target });
+      // Pre-pick the garbage hole column on the SENDER side using
+      // this game's RNG. Without this, the receiver's `applyGarbage`
+      // falls back to its OWN RNG when holeColumn is missing — which
+      // is fine for solo / bot-versus where there's only one
+      // simulation, but breaks online versus: each peer's local
+      // copy of the receiving game would advance its RNG slightly
+      // differently (any tick-cadence wobble or rollback replay
+      // perturbs consumption order), so the same garbage event
+      // would land on different columns on each screen.
+      //
+      // Picking on the sender means the column is determined once,
+      // travels through the bridge in the GARBAGE_SENT payload, and
+      // is restored deterministically on snapshot rollback (the
+      // sender's RNG state is part of Game.serialize). Bot-versus +
+      // solo also benefit — the garbage hole becomes a property of
+      // "what the sender threw" rather than "what the receiver
+      // happened to roll", which feels more intentional.
+      const holeColumn = Math.floor(this._rng() * this._cols) % this._cols;
+      this._bus.emit(EVENTS.GARBAGE_SENT, { rows: remaining, holeColumn, target });
     }
     if (this.queuedGarbageRows < GARBAGE_QUEUE_CAP_ROWS) {
       this._garbageBlocked = false;
