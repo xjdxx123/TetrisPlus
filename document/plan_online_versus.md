@@ -1,6 +1,6 @@
 # Tetris+ Online Versus — Implementation Plan
 
-**Date:** 2026-05-09 · **Status:** design — not started.
+**Date:** 2026-05-09 · **Status:** Phases A–I ✅ shipped (modules + tests). Phase J = operational follow-up tracked in `online_versus_launch_checklist.md`.
 **Scope:** the §2.2 chapter from `plan_gameplay_2.md`. Lifts the v1 §7
 spec out of `archived/plan_gameplay_1.md`, refreshes it against
 everything that's shipped since (seeded RNG, Game.serialize/restore,
@@ -570,18 +570,18 @@ miserable, garbage-queue visualization tweaks.
 
 ## 6. Total effort
 
-| Phase | Effort | Cumulative |
-|---|---|---|
-| A — Determinism lockdown | 0.5 | 0.5 |
-| B — Input recorder + replay | 0.5 | 1.0 |
-| C — Wire protocol module | 1.0 | 2.0 |
-| D — RemoteOpponent adapter | 1.0 | 3.0 |
-| E — Rollback engine | 2.0 | 5.0 |
-| F — WebSocket transport (parallel-ok) | 2.0 | 7.0 |
-| G — Lobby + matchmaking | 1.5 | 8.5 |
-| H — Replay validation server | 1.5 | 10.0 |
-| I — Anti-cheat + soft launch | 1.0 | 11.0 |
-| J — Hardening + polish | 1.0 | 12.0 |
+| Phase | Effort | Cumulative | Commit |
+|---|---|---|---|
+| A — Determinism lockdown | 0.5 | 0.5 | `b36ce67` ✅ |
+| B — Input recorder + replay | 0.5 | 1.0 | `9dc2dd9` ✅ |
+| C — Wire protocol module | 1.0 | 2.0 | `b8531e2` ✅ |
+| D — RemoteOpponent adapter | 1.0 | 3.0 | `1c45929` ✅ |
+| E — Rollback engine | 2.0 | 5.0 | `674a1e3` ✅ |
+| F — WebSocket transport (parallel-ok) | 2.0 | 7.0 | `c8181e8` ✅ |
+| G — Lobby + matchmaking + Tier 2 identity | 1.5 | 8.5 | `92117cc` ✅ |
+| H — Replay validation server | 1.5 | 10.0 | `274629c` ✅ |
+| I — Anti-cheat hooks | 0.5 | 10.5 | `68c9241` ✅ |
+| J — Host UI + deploy + soft launch | 1.5 | 12.0 | open (operational) |
 
 **~12 calendar-days** for one focused contributor, parallelizable
 across two contributors after Phase D (one on E rollback, one on F

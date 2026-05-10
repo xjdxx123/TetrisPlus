@@ -1,6 +1,6 @@
 # Tetris+ Gameplay Plan v2 — Post-§12 Forward Roadmap
 
-**Date:** 2026-05-09 · **Test surface:** 975 tests across 54 files (all green) ·
+**Date:** 2026-05-09 · **Test surface:** 1095 tests across 64 files (all green) ·
 **Predecessor:** `document/archived/plan_gameplay_1.md` (preserved for the
 full design rationale, mode-by-mode specs, and shipped-implementation
 notes). v2 picks up where v1 left off.
@@ -8,12 +8,19 @@ notes). v2 picks up where v1 left off.
 **Status:** all four §1 polish items (1.1 Stats UI surfacing, 1.2 VFX
 celebration recipes, 1.3 Garbage drain flash, 1.4 In-run B2B/combo
 chips) ✅ shipped on main; the §2.3 Pure Physics chapter — including
-the Force-Physics rework (Phases G/H/J/I plus the K fold-in) — also ✅
+the Force-Physics rework (Phases G/H/J/I plus the K fold-in) — ✅
 shipped, with playtest tuning (Phase L) as the only remaining
-follow-up. **§2.1 3D Tetris is now also ✅ shipped** end-to-end
-(Phases A through G plus the kick-table fold-in D-2); v2 now spans
-only §2.2 Online Versus, gated behind the 30-day promote-or-delete
-culture.
+follow-up. **§2.1 3D Tetris ✅ shipped** end-to-end (Phases A through G
+plus the kick-table fold-in D-2). **§2.2 Online Versus ✅ shipped on
+the module + server-skeleton axis** — Phases A through I (determinism
+lockdown / replay subsystem / wire protocol / RemoteOpponent /
+rollback engine / WebSocket transport + relay DO / Tier 2 identity +
+ELO + matchmaking / replay validation + cron / anomaly detection)
+all live; Phase J (host UI integration + disconnect grace + replay
+download) + the actual Cloudflare deploy + soft-launch are tracked in
+`document/online_versus_launch_checklist.md` as operational follow-up.
+v2 has no open chapters — every §2 chapter is at the "code complete,
+operationally pending" line at minimum.
 
 ---
 
@@ -333,11 +340,18 @@ visual playtest as a follow-up.
   AI problem and out of scope for Phase B. Versus / online don't
   apply to 3D in v2.
 
-### 2.2 Online Versus (§7) — ~12 days · **dedicated plan: `plan_online_versus.md`**
+### 2.2 Online Versus (§7) — ✅ **Phases A–I shipped** · dedicated plan: `plan_online_versus.md`
 
 **Status.** Spec is in v1 §7; the implementation plan lives in
-**`document/plan_online_versus.md`** (sequenced Phases A–J with
-acceptance criteria + tests + risks). Not started.
+**`document/plan_online_versus.md`** (sequenced Phases A–J).
+**Phases A through I are ✅ shipped on `feat/3d-tetris`** (~120 unit
+tests covering determinism, replay round-trip, wire protocol round-
+trip, RemoteOpponent, three rollback scenarios, fake transport,
+identity, ELO, matchmaking, replay validation, anomaly detection).
+Phase J (host UI integration — mode-picker "Online" sub-mode +
+lobby screens + disconnect-grace tuning + replay-download button) +
+the actual Cloudflare deploy + 10-tester soft launch are tracked
+in `document/online_versus_launch_checklist.md`.
 
 **Prereq updates.** The §3.7 sub-phase 7f seeded RNG +
 `Game.serialize` / `Game.restore` are exactly what online needs
@@ -647,14 +661,20 @@ risks that remain *open* plus new ones discovered in v2 work.
 4. ✅ **1.4 In-run B2B / combo chip** — `c123529` (originally deferred; landed in the same session as 1.1–1.3 per user request)
 5. ✅ **2.3 Pure Physics — Force-Physics rework** — `177a16d` (G) / `5557cd5` (H) / `f193170` (J) / `bd86167` (I); K folded in. Playtest tuning (Phase L) is the only follow-up and gated on human keyboard time.
 6. ✅ **2.1 3D Tetris** — `30d01a9` (A) / `1e538e9` (F + B) / `75bef33` (D) / `c1fc8d8` (C) / `093cb8f` (D-2) / `d9f4ee5` (E + G). End-to-end playable; visual-chrome reshuffle from archived §6.6 (top-bar Stats / Hold / Next variants) is gated on visual playtest.
+7. ✅ **2.2 Online Versus** — `b36ce67` (A determinism) / `9dc2dd9` (B replay) / `b8531e2` (C wire protocol) / `1c45929` (D RemoteOpponent) / `674a1e3` (E rollback) / `c8181e8` (F transport + relay DO) / `92117cc` (G identity + lobby) / `274629c` (H replay validation) / `68c9241` (I anomaly + checklist). Phase J (host UI + Cloudflare deploy + soft launch) tracked in `document/online_versus_launch_checklist.md`.
 
 ### 4.2 Remaining (speculative chapters)
 
-7. **2.2 Online Versus** — 16 days (the §1.2 prerequisite is now met)
+*All speculative chapters are at "code complete" — the open work is
+operational (Cloudflare deploy + 10-tester soft launch for Online
+Versus; visual-playtest tuning for Force-Physics + 3D-mode HUD
+reshuffle).*
 
-**Total speculative:** 16 days (was: 5 + 8 + 16; both Force-Physics
-and 3D Tetris budgets are retired); expect Online Versus to be the
-next chapter under the 30-day promote-or-delete policy.
+**Total v2 plan-time delivered:** every chapter (§1 polish, §2.1 3D,
+§2.2 Online, §2.3 Force-Physics) is on `main` at minimum the code-
++-tests level. The 30-day promote-or-delete policy from
+`plan_particle_2.md` §10 culture is the only remaining gate, and it
+runs against operational evidence not engineering.
 
 ### 4.3 Parallelization notes
 
