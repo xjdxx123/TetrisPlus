@@ -33,6 +33,7 @@
 import { Game } from '../gameplay/game.js';
 import { BoardView } from '../world/board-view.js';
 import { BotController } from '../gameplay/bot-controller.js';
+import { RemoteOpponent } from '../gameplay/remote-opponent.js';
 import { DualBoard } from '../world/dual-board.js';
 import { InputRouter, KEYMAP_PRESETS, EMPTY_FRAME } from '../input/intents.js';
 import { EVENTS } from '../gameplay/events.js';
@@ -45,8 +46,10 @@ import { applyFrameToGame } from '../gameplay/replay/apply-frame.js';
  * @property {THREE.Object3D} parent           Where to mount the DualBoard.
  * @property {Object}  rendererDeps            Host-owned helpers passed through to BoardView:
  *                                              `{ cellToWorld, makeCube, shatter, animateCubeTo, startLockAnim, playSfx }`.
- * @property {Object}  [opponentMode]          'bot' (default) or 'local' (second InputRouter).
- * @property {string}  [opponentStrength]      Forwarded to BotController (default 'casual').
+ * @property {Object}  [opponentMode]          'bot' (default), 'local' (second InputRouter),
+ *                                              or 'remote' (online — `getOpponent()` returns a
+ *                                              RemoteOpponent the transport layer fills).
+ * @property {string}  [opponentStrength]      Forwarded to BotController (default 'casual'). Ignored when opponentMode != 'bot'.
  * @property {string}  [playerInputMode]       'router' (default) — VersusSession owns an InputRouter for P1.
  *                                             'host'   — host (e.g. main.js) drives gameP1 directly via
  *                                             game.tryMove / hardDrop / etc; VersusSession only ticks the bot.
@@ -138,15 +141,26 @@ export class VersusSession {
         target: opts.inputTarget,
       });
     }
+    // Opponent input source — branch on opponentMode.
+    //   'bot'    → BotController plans + emits frames each tick
+    //   'local'  → second InputRouter reading from a keyboard preset
+    //   'remote' → RemoteOpponent reads frames from a buffer that
+    //              the transport layer fills (online versus, plan
+    //              §D). The "opponent input" interface is identical
+    //              for all three so VersusSession's tickOpponent
+    //              doesn't need to branch.
+    this.routerP2 = null;
+    this.bot = null;
+    this.remote = null;
     if (this._opponentMode === 'local') {
       this.routerP2 = new InputRouter({
         side: 'opponent',
         keymap: KEYMAP_PRESETS.opponent,
         target: opts.inputTarget,
       });
-      this.bot = null;
+    } else if (this._opponentMode === 'remote') {
+      this.remote = new RemoteOpponent();
     } else {
-      this.routerP2 = null;
       this.bot = new BotController({
         game: this.gameP2,
         strength: opts.opponentStrength || 'casual',
@@ -188,7 +202,8 @@ export class VersusSession {
   start() {
     if (!this.gameP1.activePiece) this.gameP1.spawnPiece();
     if (!this.gameP2.activePiece) this.gameP2.spawnPiece();
-    if (this.bot) this.bot.reset();
+    if (this.bot)    this.bot.reset();
+    if (this.remote) this.remote.reset();
   }
 
   /**
@@ -220,10 +235,21 @@ export class VersusSession {
    * @param {number} dtMs
    */
   tickOpponent(dtMs) {
-    const fP2 = this.routerP2
-      ? this.routerP2.frame()
-      : (this.bot ? this.bot.tick(dtMs) : { ...EMPTY_FRAME });
+    let fP2;
+    if      (this.routerP2) fP2 = this.routerP2.frame();
+    else if (this.remote)   fP2 = this.remote.tick(dtMs);
+    else if (this.bot)      fP2 = this.bot.tick(dtMs);
+    else                    fP2 = { ...EMPTY_FRAME };
     this._dispatchSide(this.gameP2, fP2, dtMs);
+  }
+
+  /**
+   * Online versus only — the RemoteOpponent the transport layer
+   * pushes wire-arrived InputFrames into. Returns null in 'bot' /
+   * 'local' modes.
+   */
+  getRemoteOpponent() {
+    return this.remote;
   }
 
   /** Tear down both sides + the bridge + the routers. */
