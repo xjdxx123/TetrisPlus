@@ -60,13 +60,14 @@ import SPARKLE_FRAG from '../shaders/sparkle.frag.glsl?raw';
 import { PIECES, PIECE_COLORS } from '../gameplay/pieces.js';
 import { buildRules } from '../gameplay/rules.js';
 import { recordEndOfRun } from '../gameplay/end-of-run.js';
+import { createInputRecorder } from '../gameplay/replay/index.js';
 import { pickHoleColumn } from '../gameplay/garbage.js';
 import { Game } from '../gameplay/game.js';
 import { BoardView } from '../world/board-view.js';
 import { BoardView3D } from '../world/board-view-3d.js';
 import { PhysicsBoardView } from '../world/physics-board-view.js';
 // Phase J online-versus host wiring (plan_online_versus.md §J).
-import { loadOrCreateIdentity } from '../net/identity.js';
+import { loadOrCreateIdentity, setDisplayName as setIdentityDisplayName } from '../net/identity.js';
 import { BroadcastTransport } from '../net/transport-broadcast.js';
 import { WebSocketTransport } from '../net/transport-ws.js';
 import { encodeInput, encodeMatchStart, encodeTopout, MSG } from '../net/protocol.js';
@@ -2757,6 +2758,11 @@ let _endRunInvoked = false;
 function endRun({ reason = 'topout', winner } = {}) {
   if (_endRunInvoked) return;
   _endRunInvoked = true;
+  // If the disconnect grace overlay was up (we just hit the timer
+  // OR the user clicked "Forfeit Now"), tear it down before showing
+  // the gameOver overlay — leaving both visible would stack two
+  // panels on top of each other.
+  _cancelDisconnectGrace();
   // Sync from game so the local shadow vars (score / lines / level /
   // modeTimeMs / sessionStart / _piecesThisSession / _linesThisSession)
   // reflect the final simulation state before the stats write.
@@ -2891,6 +2897,44 @@ function resetRunState() {
 document.getElementById('goRestart').addEventListener('click', () => {
   Mode.start({ restart: true });
 });
+
+// Replay-download button — serializes the InputRecorder tape and
+// triggers a browser download as JSON. The tape is the same shape
+// the wire protocol + offline replay viewer use (gameplay/replay's
+// FORMAT_VERSION = 1), so the saved file can be re-played against a
+// fresh Game with the same seed to reconstruct the run.
+//
+// Filename includes the lobbyCode + seed for identification ("did
+// my opponent claim a different result?"). Naming pattern matches
+// the soft-launch checklist's `match-${id}.json` convention.
+{
+  const dlBtn = typeof document !== 'undefined' ? document.getElementById('goDownloadReplay') : null;
+  if (dlBtn) {
+    dlBtn.addEventListener('click', () => {
+      const recorder = onlineSession && onlineSession.recorder;
+      if (!recorder || recorder.tickCount === 0) return;
+      let blob;
+      try { blob = recorder.serialize(); }
+      catch (err) { console.warn('[replay] serialize threw:', err); return; }
+      const lobbyCode = (onlineSession && onlineSession.lobbyCode) || 'local';
+      const matchId   = `${lobbyCode}-${blob.seed.toString(36)}`;
+      const json      = JSON.stringify(blob, null, 2);
+      const fileBlob  = new Blob([json], { type: 'application/json' });
+      const url       = URL.createObjectURL(fileBlob);
+      const a         = document.createElement('a');
+      a.href     = url;
+      a.download = `match-${matchId}.json`;
+      // Detached anchor — append + click + remove. The browser's
+      // download flow doesn't need it in the DOM after the click.
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      // Revoke the object URL on next tick so the download has a
+      // chance to start before the URL becomes invalid.
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    });
+  }
+}
 
 Mode._wireLifecycle({
   onStart: ({ key, seed, restart }) => {
@@ -3630,8 +3674,100 @@ function _hideLobbyPanel() {
   lobby.dataset.state = 'matched'; // CSS hides at this state
 }
 
+// =============================================================
+// Online disconnect grace window (plan_online_versus.md §J)
+// =============================================================
+// When the WebSocket transport closes mid-match, give the opponent
+// 30 seconds to reconnect before auto-forfeiting in our favor. The
+// overlay shows a countdown; "Forfeit Now" lets the player skip the
+// wait. This is the client-side grace window only — actual
+// reconnect-resume logic (re-establishing WS + re-syncing rollback
+// state) is deferred per the launch checklist's MVP scope.
+//
+// Three exit paths:
+//   1. Countdown reaches 0 → forfeit win (we won, opp didn't return).
+//   2. Player clicks "Forfeit Now" → same as #1, just skips the wait.
+//   3. Mode switches / online dispose → cancel timer, hide overlay
+//      (no endRun fired; the new mode owns the screen).
+const DISCONNECT_GRACE_MS = 30_000;
+let _disconnectTimer    = null;  // setTimeout handle
+let _disconnectInterval = null;  // setInterval handle for countdown UI
+let _disconnectDeadline = 0;     // ms timestamp when grace expires
+
+function _showDisconnectOverlay() {
+  const el = typeof document !== 'undefined'
+    ? document.getElementById('onlineDisconnect') : null;
+  if (el) el.classList.add('show');
+}
+function _hideDisconnectOverlay() {
+  const el = typeof document !== 'undefined'
+    ? document.getElementById('onlineDisconnect') : null;
+  if (el) el.classList.remove('show');
+}
+function _renderDisconnectCountdown() {
+  if (typeof document === 'undefined') return;
+  const remainMs   = Math.max(0, _disconnectDeadline - Date.now());
+  const remainSec  = Math.ceil(remainMs / 1000);
+  const countEl    = document.getElementById('onlineDisconnectCountdown');
+  if (countEl) countEl.textContent = String(remainSec);
+}
+function _cancelDisconnectGrace() {
+  if (_disconnectTimer    != null) { clearTimeout(_disconnectTimer);    _disconnectTimer    = null; }
+  if (_disconnectInterval != null) { clearInterval(_disconnectInterval); _disconnectInterval = null; }
+  _hideDisconnectOverlay();
+}
+function _completeDisconnectForfeit() {
+  // Cancel timers FIRST so the endRun → cleanup chain doesn't
+  // re-enter on a stray tick.
+  _cancelDisconnectGrace();
+  // Forfeit win — opponent didn't reconnect within the grace window.
+  // Treat it as if their gameP1 topped out via forceTopOut on our
+  // local view of them (gameP2). VersusSession's _handleSideEnd will
+  // then route through our onSideEnd: side='opponent' →
+  // winner='player' → endRun. Same flow as the wire-arrived TOPOUT
+  // path; the reason='disconnect_forfeit' marker just lets future
+  // telemetry distinguish "real loss" from "timeout".
+  if (onlineSession && onlineSession.versus && onlineSession.versus.gameP2
+      && !onlineSession.versus.gameP2.gameOver) {
+    onlineSession.versus.gameP2.forceTopOut('disconnect_forfeit', 'opponent');
+  }
+}
+function _handleTransportClose(reason) {
+  // No-op when there's no active match (transport closing during the
+  // lobby handshake, or after the match already ended via topout):
+  // just log + bail. The lobby state machine handles its own
+  // reconnect / cancel UX.
+  if (!onlineSession) return;
+  if (!onlineSession.matchActive) return;
+  if (_endRunInvoked) return;
+  console.log('[online] mid-match disconnect — starting grace window');
+  void reason;
+  _disconnectDeadline = Date.now() + DISCONNECT_GRACE_MS;
+  _showDisconnectOverlay();
+  _renderDisconnectCountdown();
+  if (_disconnectInterval == null) {
+    _disconnectInterval = setInterval(_renderDisconnectCountdown, 250);
+  }
+  if (_disconnectTimer == null) {
+    _disconnectTimer = setTimeout(_completeDisconnectForfeit, DISCONNECT_GRACE_MS);
+  }
+}
+
+// "Forfeit Now" button — skip the countdown and end the match
+// immediately with a forfeit win.
+{
+  const fNow = typeof document !== 'undefined'
+    ? document.getElementById('onlineDisconnectForfeitBtn') : null;
+  if (fNow) {
+    fNow.addEventListener('click', () => _completeDisconnectForfeit());
+  }
+}
+
 function _disposeOnlineSession() {
   if (!onlineSession) return;
+  // Cancel any in-flight disconnect grace timer / hide the overlay
+  // so a session restart doesn't carry over stale countdown UI.
+  _cancelDisconnectGrace();
   // Tear down the opponent's chrome + viz subscribers we attached in
   // _startOnlineMatch. We also alias `versusSession` to the online
   // session there; if it's still pointing at our session, clear it
@@ -3678,7 +3814,18 @@ function _connectToLobby(lobbyCode) {
       userId:      identity.userId,
       displayName: identity.displayName,
       onOpen:      () => console.log('[online] WS transport open — auth sent', wsUrl),
-      onClose:     (reason) => console.log('[online] WS closed:', reason),
+      onClose:     (reason) => {
+        console.log('[online] WS closed:', reason);
+        // Only the transport that's still owned by the active session
+        // matters; an old transport closing during a fallback swap is
+        // expected. Defer the disconnect handler to the next macrotask
+        // so it doesn't race with the fallback swap that fires on
+        // onError → _switchToBroadcastFallback (which itself calls
+        // transport.close → onClose).
+        if (onlineSession && onlineSession.transport === transport && !usingFallback) {
+          _handleTransportClose(reason);
+        }
+      },
       onError:     (err) => {
         console.warn('[online] WS error — falling back to BroadcastChannel', err);
         if (onlineSession && onlineSession.transport === transport && !usingFallback) {
@@ -4012,6 +4159,19 @@ function _startOnlineMatch() {
   onlineSession.versus       = session;
   onlineSession.rollback     = rollback;
   onlineSession.router       = router;
+  // Replay recorder — captures every tickFrame the local rollback
+  // engine processes. Tape format matches gameplay/replay's wire
+  // protocol so a downloaded `.json` can be re-played against a
+  // fresh Game with the same `localSeed` to reconstruct the run.
+  // Pinned to the LOCAL player's seed (the one driving gameP1) +
+  // 'versus' rules pack + standard 60 Hz tick. Stored on the
+  // session so the gameOver overlay's "Download replay" button can
+  // call .serialize() at end-of-run.
+  onlineSession.recorder = createInputRecorder({
+    seed:    localSeed,
+    modeKey: 'versus',
+    dtMs:    1000 / 60,
+  });
   // Fixed-step accumulator for the rollback tick loop in animate().
   // Both clients must advance their tick counter at exactly 60 Hz so
   // tick numbers stay in sync regardless of each side's rAF cadence.
@@ -4118,9 +4278,27 @@ function makeMulberry32(seed) {
 // Lobby DOM event wiring — fires once at boot. The panel itself is
 // only visible when `body[data-mode='online']`.
 {
-  const connectBtn = typeof document !== 'undefined' ? document.getElementById('onlineConnectBtn') : null;
-  const cancelBtn  = typeof document !== 'undefined' ? document.getElementById('onlineCancelBtn')  : null;
-  const codeInput  = typeof document !== 'undefined' ? document.getElementById('onlineLobbyCodeInput') : null;
+  const connectBtn   = typeof document !== 'undefined' ? document.getElementById('onlineConnectBtn')   : null;
+  const cancelBtn    = typeof document !== 'undefined' ? document.getElementById('onlineCancelBtn')    : null;
+  const codeInput    = typeof document !== 'undefined' ? document.getElementById('onlineLobbyCodeInput') : null;
+  const editNameBtn  = typeof document !== 'undefined' ? document.getElementById('onlineEditNameBtn')  : null;
+  const copyInvBtn   = typeof document !== 'undefined' ? document.getElementById('onlineCopyInviteBtn') : null;
+  const nameEl       = typeof document !== 'undefined' ? document.getElementById('onlineDisplayName')  : null;
+
+  // URL pre-fill — if the page was loaded with `?lobby=ABCD`, drop
+  // the code straight into the input so a player who clicked an
+  // invite link can hit Connect with one click. Skipped when the URL
+  // param is missing or longer than the input's maxlength=8.
+  if (typeof location !== 'undefined' && codeInput) {
+    try {
+      const params = new URLSearchParams(location.search);
+      const fromUrl = (params.get('lobby') || '').trim().toUpperCase();
+      if (fromUrl.length >= 1 && fromUrl.length <= 8) {
+        codeInput.value = fromUrl;
+      }
+    } catch (err) { console.warn('[online] URL pre-fill skipped:', err); }
+  }
+
   if (connectBtn && codeInput) {
     connectBtn.addEventListener('click', () => {
       const code = (codeInput.value || '').trim().toUpperCase();
@@ -4135,6 +4313,49 @@ function makeMulberry32(seed) {
     cancelBtn.addEventListener('click', () => {
       _disposeOnlineSession();
       _showLobbyPanel(); // back to idle
+    });
+  }
+
+  // Display-name edit — quick prompt() flow. Persists via setDisplayName
+  // (writes to localStorage). New name takes effect for the next
+  // _connectToLobby; in-flight session keeps the original name. No
+  // server round-trip — Tier 2 identity is fully client-side.
+  if (editNameBtn && nameEl) {
+    editNameBtn.addEventListener('click', () => {
+      const current = (nameEl.textContent || '').trim();
+      // eslint-disable-next-line no-alert
+      const next = (typeof window !== 'undefined' && window.prompt)
+        ? window.prompt('Display name (max 16 chars):', current)
+        : null;
+      if (next == null) return; // user cancelled
+      try {
+        const saved = setIdentityDisplayName(next);
+        nameEl.textContent = saved.displayName;
+      } catch (err) {
+        console.warn('[online] setDisplayName rejected:', err.message);
+      }
+    });
+  }
+
+  // Copy invite link — builds a shareable URL `<origin><path>?lobby=CODE`
+  // from the lobby's echo span (set when the user hits Connect). Most
+  // browsers gate clipboard.writeText behind a user-gesture handler;
+  // running inside the click listener satisfies that.
+  if (copyInvBtn) {
+    copyInvBtn.addEventListener('click', () => {
+      if (typeof location === 'undefined' || !navigator.clipboard) return;
+      const echo = document.getElementById('onlineLobbyCodeEcho');
+      const code = (echo && echo.textContent || '').trim();
+      if (!code || code === '—') return;
+      const url = `${location.origin}${location.pathname}?lobby=${encodeURIComponent(code)}`;
+      navigator.clipboard.writeText(url).then(() => {
+        const status = document.getElementById('onlineWaitingStatus');
+        if (status) {
+          const orig = status.textContent;
+          status.textContent = 'Invite link copied! Send to your friend.';
+          setTimeout(() => { if (status.textContent.startsWith('Invite')) status.textContent = orig; }, 2500);
+        }
+      }).catch(err => console.warn('[online] clipboard write failed:', err));
     });
   }
 }
@@ -4663,8 +4884,22 @@ function animate(dt, envTime) {
           hold:      false,
           pause:     false,
         };
+        // Tick number to associate with this frame. RollbackEngine's
+        // currentTick advances on its own tick(), so we read BEFORE
+        // we call it — that's the tick this frame applies to.
+        const recordedTick = onlineSession.rollback.currentTick;
         try { onlineSession.rollback.tick(tickFrame); }
         catch (err) { console.warn('[online] tick threw:', err); break; }
+        // Record the local frame for replay download. `recorder` is a
+        // sparse recorder — it only stores entries when the frame
+        // changes, so a 60 Hz capture for a 3-minute match is
+        // typically ~50–200 entries instead of 10800 ticks. Wrapped
+        // in try/catch so a recording failure (e.g. tick out of order
+        // after a clock glitch) can't kill the simulation.
+        if (onlineSession.recorder) {
+          try { onlineSession.recorder.record(recordedTick, tickFrame); }
+          catch (err) { console.warn('[online] recorder.record threw:', err); }
+        }
         onlineSession.tickAccumMs -= TICK_MS;
         firstStep = false;
       }
@@ -5133,6 +5368,19 @@ bus.on(EVENTS.GAME_OVER, ({ score, lines, level, winner }) => {
     titleEl.textContent    = 'Shattered';
     subtitleEl.textContent = 'The stack reached the top';
   }
+
+  // Replay-download button toggle. Visible only when we have a tape
+  // — currently online versus is the only mode that wires a recorder
+  // (its `_startOnlineMatch` constructs createInputRecorder pinned to
+  // the local seed). Solo / bot-versus could opt in by also setting
+  // up a recorder; for now the button stays hidden in those modes.
+  const dlBtn = document.getElementById('goDownloadReplay');
+  if (dlBtn) {
+    const haveTape = !!(onlineSession && onlineSession.recorder
+                        && onlineSession.recorder.tickCount > 0);
+    dlBtn.style.display = haveTape ? '' : 'none';
+  }
+
   playVoice('manbaout');
 
   // G20: shatter the entire stack as a top-down cascade so the case visibly

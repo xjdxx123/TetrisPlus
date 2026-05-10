@@ -445,6 +445,7 @@
     <div class="row">
       <label>Playing as</label>
       <span id="onlineDisplayName">—</span>
+      <button id="onlineEditNameBtn" style="margin-left:8px; padding:4px 10px; font-size:11px;">Edit</button>
     </div>
     <div class="lobby-state-idle">
       <div class="row">
@@ -462,7 +463,8 @@
         <span id="onlineLobbyCodeEcho" style="font-family:monospace;color:var(--accent);">—</span>
       </div>
       <div class="status" id="onlineWaitingStatus">Waiting for opponent…</div>
-      <div class="row" style="justify-content:flex-end;">
+      <div class="row" style="justify-content:flex-end; gap:8px;">
+        <button id="onlineCopyInviteBtn">Copy Invite Link</button>
         <button id="onlineCancelBtn">Cancel</button>
       </div>
     </div>
@@ -481,6 +483,26 @@
   <div class="levelup" id="levelup"></div>
   <div class="clear-callout" id="clearCallout"></div>
 
+  <!-- Online disconnect grace overlay (plan_online_versus.md §J).
+       Shown for 30s when the WebSocket transport closes mid-match.
+       The countdown updates each second; if it reaches 0, the host
+       fires endRun(winner='player') with reason='disconnect_forfeit'.
+       The "Forfeit Now" button lets the player skip the wait if they
+       know the opponent isn't coming back. -->
+  <div class="game-over" id="onlineDisconnect">
+    <div class="panel">
+      <h2>Connection Lost</h2>
+      <p id="onlineDisconnectStatus">Waiting for your opponent to reconnect…</p>
+      <div class="stats">
+        <div class="stat">
+          <div class="v" id="onlineDisconnectCountdown">30</div>
+          <div class="l">Forfeit win in</div>
+        </div>
+      </div>
+      <button id="onlineDisconnectForfeitBtn">Forfeit Now</button>
+    </div>
+  </div>
+
   <div class="game-over" id="gameOver">
     <div class="panel">
       <h2 id="goTitle">Shattered</h2>
@@ -491,6 +513,11 @@
         <div class="stat"><div class="v" id="goLevel">1</div><div class="l">Level</div></div>
       </div>
       <button id="goRestart">Play Again</button>
+      <!-- Replay download — visible only after an online match (the
+           recorder is wired in _startOnlineMatch). main.js's GAME_OVER
+           subscriber toggles `display` based on whether a recorder tape
+           is available. -->
+      <button id="goDownloadReplay" style="display:none; margin-top:8px;">Download Replay</button>
     </div>
   </div>
 
