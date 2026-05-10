@@ -82,7 +82,13 @@ export function recordEndOfRun(summary, hooks) {
   if (!hooks || typeof hooks.loadStats !== 'function' || typeof hooks.saveStats !== 'function') {
     throw new Error('recordEndOfRun requires { loadStats, saveStats } hooks');
   }
-  const now = (hooks.now || (() => (typeof performance !== 'undefined' ? performance.now() : 0)))();
+  // `now` is metadata for the saved stats blob (`lastUpdated`); the
+  // value never affects simulation. Hosts that have a wall clock pass
+  // `hooks.now: () => Date.now()`; tests + online callers pass a
+  // controlled value (or omit it for `0`). The 0-default avoids a
+  // performance.now() leak that would otherwise trip the gameplay/
+  // determinism rule (plan_online_versus.md §A).
+  const now = (hooks.now || (() => 0))();
 
   // Apply the goal multiplier — Marathon's "+50% bonus" surface — but ONLY
   // when the run terminated by completing the goal. Topouts en route to the

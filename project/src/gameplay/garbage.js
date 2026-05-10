@@ -15,6 +15,10 @@ import { createSeededRng } from '../shared/random/seeded.js';
 // deterministic stream — required by §3.7 sub-phase 7f's no-Math.random
 // rule. Hosts that want fresh entropy at boot pass their own seeded
 // source. Tests stub `rngFn` directly and never see this fallback.
+// Online versus always supplies its own per-side rng; the Date.now()
+// fallback only runs in offline / single-sim play and just chooses a
+// seed (the RNG output stays deterministic given that seed).
+// eslint-disable-next-line no-restricted-syntax
 const _defaultRng = createSeededRng((Date.now() | 0) >>> 0);
 
 // Standard Tetris garbage table (plan_gameplay_1.md §3.6 #3).

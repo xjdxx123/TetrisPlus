@@ -93,6 +93,10 @@ export class BotController {
     // Default to a seeded source so the bot's plays are reproducible
     // across a replay or a network rollback (§3.7 sub-phase 7f). Hosts
     // that want a specific seed pass `rng: createSeededRng(matchId)`.
+    // Online versus always supplies its own seeded rng; the Date.now()
+    // fallback only runs in offline play and just chooses a seed (the
+    // RNG output stays deterministic given that seed).
+    // eslint-disable-next-line no-restricted-syntax
     this._rng = opts.rng || createSeededRng((Date.now() | 0) >>> 0);
     this._mirrorOf = opts.mirrorOf || null;
     this._aps = (typeof opts.actionsPerSecond === 'number' && opts.actionsPerSecond > 0)

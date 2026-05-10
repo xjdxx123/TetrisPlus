@@ -2745,7 +2745,7 @@ function endRun({ reason = 'topout', winner } = {}) {
       runTimeMs:           _modeTimeMs,
       winner,
       updateBest,
-    }, { loadStats, saveStats });
+    }, { loadStats, saveStats, now: () => Date.now() });
     if (result && result.multiplied) {
       if (game) game.setScore(result.score);
       score = result.score;
@@ -2944,6 +2944,12 @@ Mode._wireLifecycle({
         rules,
         bus,
         side: 'player',
+        // Cosmetic — keeps the HUD's "session length" timer ticking
+        // from real wall-clock at construction. Game's simulation
+        // never reads this; online versus's determinism rule
+        // (plan_online_versus.md §A) requires gameplay/ stays
+        // performance.now()-free, so the value is host-supplied.
+        nowMs: Date.now(),
         onEndRun: ({ reason, winner }) => endRun({ reason, winner }),
       });
       boardView = null;
@@ -3001,6 +3007,12 @@ Mode._wireLifecycle({
         rules,
         bus,
         side: 'player',
+        // Cosmetic — keeps the HUD's "session length" timer ticking
+        // from real wall-clock at construction. Game's simulation
+        // never reads this; online versus's determinism rule
+        // (plan_online_versus.md §A) requires gameplay/ stays
+        // performance.now()-free, so the value is host-supplied.
+        nowMs: Date.now(),
         onEndRun: ({ reason, winner }) => endRun({ reason, winner }),
       });
       boardView = new BoardView3D({
@@ -3030,6 +3042,12 @@ Mode._wireLifecycle({
         rules,
         bus,
         side: 'player',
+        // Cosmetic — keeps the HUD's "session length" timer ticking
+        // from real wall-clock at construction. Game's simulation
+        // never reads this; online versus's determinism rule
+        // (plan_online_versus.md §A) requires gameplay/ stays
+        // performance.now()-free, so the value is host-supplied.
+        nowMs: Date.now(),
         onEndRun: ({ reason, winner }) => endRun({ reason, winner }),
       });
       boardView = new BoardView({

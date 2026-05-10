@@ -58,6 +58,13 @@ const GARBAGE_DELAY_MS_DEFAULT = 800;
  * @property {() => number} [rng]
  *   PRNG returning [0,1). Default `Math.random`. The 7f sub-phase
  *   replaces this with a seeded source for replay determinism.
+ * @property {number} [nowMs]
+ *   Wall-clock seed for the cosmetic `_sessionStart` HUD timer.
+ *   Defaults to 0 — the simulation never reads time internally
+ *   (`gameplay/` is `performance.now()`-free per the online-versus
+ *   determinism rule, plan_online_versus.md §0.2). Hosts that want
+ *   the legacy "session length displayed in HUD" feel pass
+ *   `nowMs: Date.now()` here.
  * @property {(info: { reason: string, winner?: string }) => void} [onEndRun]
  *   Host callback invoked when the simulation detects topout (or
  *   `forceTopOut` is called externally). The host handles stats
@@ -157,6 +164,13 @@ export class Game {
     // (§3.7 sub-phase 7f). Hosts that want a specific seed pass
     // `rng: createSeededRng(myMatchId)`. Hosts that genuinely want
     // non-determinism (legacy single-sim) pass `rng: Math.random`.
+    //
+    // Online versus (plan_online_versus.md) ALWAYS supplies an explicit
+    // rng — the Date.now() fallback never runs in that mode, so it
+    // doesn't compromise the determinism rule. Inline eslint-disable
+    // because the new no-restricted-syntax rule below would otherwise
+    // ban Date.now() throughout gameplay/.
+    // eslint-disable-next-line no-restricted-syntax
     this._rng      = opts.rng || createSeededRng((Date.now() | 0) >>> 0);
     this._onEndRun = opts.onEndRun || null;
 
@@ -195,7 +209,10 @@ export class Game {
 
     this._fallTimer    = 0;
     this._modeTimeMs   = 0;
-    this._sessionStart = (typeof performance !== 'undefined') ? performance.now() : 0;
+    // Cosmetic-only — display "session length" in HUD. Never read by
+    // any rule / event / lock / clear path. Default 0 (deterministic);
+    // hosts that want the wall-clock UI pass `nowMs: Date.now()`.
+    this._sessionStart = (opts.nowMs | 0) || 0;
     this._piecesThisSession = 0;
     this._linesThisSession  = 0;
 
@@ -1360,7 +1377,11 @@ export class Game {
     this._endRunCalled = false;
     this._fallTimer = 0;
     this._modeTimeMs = 0;
-    this._sessionStart = (typeof performance !== 'undefined') ? performance.now() : 0;
+    // Reset to 0 on Play-Again. Host can re-arm the wall-clock display
+    // by calling `game._sessionStart = Date.now()` after reset() if the
+    // legacy "session length since restart" HUD reading is desired —
+    // the field is never read by gameplay logic, so this is safe.
+    this._sessionStart = 0;
     this._piecesThisSession = 0;
     this._linesThisSession  = 0;
 

@@ -88,11 +88,19 @@ export class VersusSession {
     const rulesP1 = buildRules('versus', { bus: busP1 });
     const rulesP2 = buildRules('versus', { bus: busP2 });
 
+    // nowMs — host-supplied wall clock for the HUD "session length"
+    // timer. gameplay/ stays performance.now()-free per the online
+    // determinism rule (plan_online_versus.md §A); this value is
+    // cosmetic and never read by simulation logic, so the wall-clock
+    // read is at the composition root, not inside Game.
+    // eslint-disable-next-line no-restricted-syntax
+    const nowMs = Date.now();
     this.gameP1 = new Game({
       rules: rulesP1,
       bus: busP1,
       side: 'player',
       rng: opts.rngP1,
+      nowMs,
       onEndRun: ({ reason }) => this._handleSideEnd(reason, 'player'),
     });
     this.gameP2 = new Game({
@@ -100,6 +108,7 @@ export class VersusSession {
       bus: busP2,
       side: 'opponent',
       rng: opts.rngP2,
+      nowMs,
       onEndRun: ({ reason }) => this._handleSideEnd(reason, 'opponent'),
     });
 
