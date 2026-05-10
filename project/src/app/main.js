@@ -3608,10 +3608,12 @@ function _disposeOnlineSession() {
 function _connectToLobby(lobbyCode) {
   if (onlineSession) _disposeOnlineSession();
   const identity = loadOrCreateIdentity();
+  console.log('[online] connect', { lobbyCode, channelName: `tetris-online-${lobbyCode}`, userId: identity.userId, displayName: identity.displayName });
   const transport = new BroadcastTransport({
     channelName: `tetris-online-${lobbyCode}`,
     userId:      identity.userId,
     displayName: identity.displayName,
+    onOpen:      () => console.log('[online] transport open — auth sent'),
   });
   onlineSession = {
     transport, identity,
@@ -3641,6 +3643,7 @@ function _connectToLobby(lobbyCode) {
 }
 
 function _onLobbyMessage(msg) {
+  console.log('[online] recv', msg.t, msg);
   // Helper: record peer + elect deterministic host role on first
   // discovery. Both auth and match_found can carry peer identity —
   // we use whichever arrives first, since BroadcastChannel doesn't
@@ -3653,6 +3656,7 @@ function _onLobbyMessage(msg) {
     onlineSession.peerName = peerName || `Player-${peerId.slice(0,4).toUpperCase()}`;
     const myId = onlineSession.identity.userId;
     onlineSession.role = (myId < onlineSession.peerId) ? 'host' : 'guest';
+    console.log('[online] recordPeer', { peerId, peerName: onlineSession.peerName, role: onlineSession.role });
     return true;
   }
 
