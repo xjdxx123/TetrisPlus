@@ -197,6 +197,112 @@ not "we suspected they would be."
 
 ---
 
+## 2A. Identity model — Tier 2 pseudonymous
+
+Online Versus needs SOME concept of "who am I?" so the server can
+match players + persist ELO. v1 §7.6 and the original §4 of this plan
+listed OAuth (Google + GitHub) as the primary auth path, with
+anonymous guests as a fallback. **For the actual launch we invert
+that:** the primary path is anonymous-pseudonymous, OAuth is reserved
+for a later upgrade if the playerbase grows past hobby scale.
+
+### 2A.1 Why Tier 2
+
+Three options were considered:
+
+- **Tier 1 — Zero auth.** Server generates a UUID per WebSocket
+  connection. No persistence. No ELO, no history. Lowest friction;
+  effectively useless for a competitive Versus mode.
+- **Tier 2 — Pseudonymous (chosen).** First page load generates a
+  UUID, stored in localStorage. Stable across browser sessions on
+  the same device. Server stores ELO + match history keyed by UUID.
+  No login UI; no signup flow; no password recovery. Clearing
+  localStorage = losing the identity.
+- **Tier 3 — Real OAuth.** Google / GitHub sign-in. Identity
+  follows the user across devices. Friend lists, leaderboards. Adds
+  a real auth UI (sign-in button, callback, sign-out, settings
+  panel "Connected accounts" row), token management, and a
+  user-settings row in the DB.
+
+Tier 2 hits the right tradeoff for a hobby-scale competitive mode:
+
+- **Zero friction** — opens the page → has an identity → can play.
+  No "create account" wall between landing and the first match.
+- **ELO is meaningful** — a player who logs > 100 matches sees
+  their ranking move in a way that maps to their actual skill, on
+  the same device.
+- **Simplest possible server** — one DB column (`user_id`) keyed on
+  UUID. Every wire message carries the UUID; the server never has
+  to reconcile sessions or refresh tokens.
+- **Cheap to upgrade** — adding OAuth later means linking an
+  existing UUID record to a Google account; the UUID stays the
+  primary key. No migration of existing match data.
+
+The Tier 2 weaknesses are real but acceptable for the launch
+audience:
+- Cleared browser data → fresh ELO. Documented in a one-line
+  warning on the Versus mode picker tile.
+- No cross-device. Players who want it can wait for Tier 3.
+- No anti-smurf. At hobby scale, low priority — soft launch (Phase
+  I) will surface this if it actually happens.
+
+### 2A.2 Wire format addition
+
+Every realtime message gets a `userId` field (16-char UUID slice,
+not the full 36-char form — the wire stays compact). The server
+trusts the field; an attacker spoofing a UUID can play under
+someone else's name but can't steal their ELO updates because the
+server validates per-match outcomes (Phase H) before crediting ELO,
+and the same validation will reject a match where the spoofed
+client's reported inputs don't reproduce the reported outcome.
+
+```ts
+// Identity is bootstrapped on first page load:
+//
+//   let userId = localStorage.getItem('tetris.userId');
+//   if (!userId) {
+//     userId = crypto.randomUUID().replace(/-/g, '').slice(0, 16);
+//     localStorage.setItem('tetris.userId', userId);
+//   }
+//
+// Every protocol message either carries `userId` directly or is
+// scoped to a connection that authenticated with `userId` on open:
+{ t: 'auth', userId: string, displayName?: string }
+```
+
+`displayName` is an opt-in 16-char string the player can pick on
+first launch (defaults to `Player-${userId.slice(0,4)}`). Stored
+server-side alongside the UUID. Editable from the Versus mode
+picker.
+
+### 2A.3 No login UI
+
+There is **no sign-in button**, **no signup form**, and **no
+password reset flow**. The Versus mode picker shows a one-line row:
+
+```
+Playing as: Player-A1B2  [edit]
+```
+
+`[edit]` opens a tiny inline input for changing the display name.
+The UUID itself is never shown — it's a server-side artifact, not a
+user-facing label.
+
+### 2A.4 What changes in the phase plan
+
+- **Phase G** (lobby + matchmaking) absorbs the entire Tier 2
+  identity flow at no extra cost. Server-side: `user_id` column on
+  every D1 table; on first sight of a UUID, auto-create a row with
+  ELO 1200. Client-side: UUID bootstrap on app boot + display-name
+  edit row in the mode picker.
+- **Phase H** (replay validation) gains "verify the reported
+  `userId` matches the one the WebSocket authenticated with" — a
+  one-line check that prevents rage-quit ELO theft.
+- **No new phase** for auth UI. OAuth (Tier 3) is a follow-up
+  chapter outside the §2.2 budget.
+
+---
+
 ## 3. Rollback netcode
 
 ### 3.1 Buffer sizes
@@ -271,7 +377,7 @@ A misprediction that flips the opponent's row 3 from "almost full" to
 
 | Service | Owns | Tech | Notes |
 |---|---|---|---|
-| **Auth** | Accounts, OAuth (Google + GitHub), anonymous guest IDs | Cloudflare Workers + D1 | Guests get a 24-hour ID; ELO not persisted. |
+| **Identity** | Pseudonymous UUIDs (per browser, localStorage) + display names. NO password, NO OAuth at launch — see §2A. | Cloudflare D1 (one row per UUID) | Auto-create on first sight; ELO defaults to 1200. OAuth upgrade path reserved for a future chapter. |
 | **Lobby** | Match creation, friend-invite codes, pre-match settings | Cloudflare Durable Objects (one per active lobby) | DOs hold transient state cheaply. |
 | **Matchmaking** | ELO-based queue, region affinity | Same — DO per region | Pair-and-release pattern; expect <10 concurrent searchers per region in early access. |
 | **Realtime relay** | WS server for input/snapshot/garbage messages | Cloudflare Durable Objects (one per active match) | Each match is a DO; clients connect via WS to that DO. P2P WebRTC is a Phase E possibility but not Phase A. |
@@ -524,6 +630,10 @@ modern-rules events all having shipped in §3.7 / §12 / §1.2.
 
 ## 9. What this plan deliberately does NOT cover
 
+- **OAuth / real login system.** Tier 2 pseudonymous identity is
+  the launch posture (§2A). OAuth (Google + GitHub) follows in a
+  later chapter only if the playerbase outgrows Tier 2's
+  cleared-localStorage limitation.
 - **3D online versus.** Out of scope for the chapter. Determinism
   is fine but rules-pack wiring (1v1 garbage in 3D — what does a
   2D-style "row of garbage" look like in 3D?) is its own design
