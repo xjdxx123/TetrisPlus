@@ -65,6 +65,12 @@ import { Game } from '../gameplay/game.js';
 import { BoardView } from '../world/board-view.js';
 import { BoardView3D } from '../world/board-view-3d.js';
 import { PhysicsBoardView } from '../world/physics-board-view.js';
+// Phase J online-versus host wiring (plan_online_versus.md §J).
+import { loadOrCreateIdentity } from '../net/identity.js';
+import { BroadcastTransport } from '../net/transport-broadcast.js';
+import { encodeInput, encodeMatchStart, MSG } from '../net/protocol.js';
+import { RollbackEngine } from '../net/rollback.js';
+import { InputRouter, KEYMAP_PRESETS, EMPTY_FRAME } from '../input/intents.js';
 import { PhysicsSession } from './physics-session.js';
 import { VersusSession } from './versus.js';
 
@@ -1758,6 +1764,17 @@ let versusSession  = null;
 let physicsSession = null;
 let physicsView    = null;
 
+// Online versus session (plan v2 §2.2 Phase J). Holds the
+// VersusSession wrapper + transport + RollbackEngine + InputRouter
+// for the local side. `matchActive` flips to true once the lobby
+// handshake completes + the seed is known by both peers.
+//
+// Shape: { transport, identity, lobbyCode, role:'host'|'guest',
+//          peerId:string|null, seed:number|null, versus:VersusSession,
+//          rollback:RollbackEngine, router:InputRouter,
+//          matchActive:boolean }
+let onlineSession = null;
+
 // Additional bus subscriptions on the opponent's *private* bus
 // (`versusSession.gameP2.bus`) for visual feedback that the global-bus
 // subscribers can't see. Score popups for the bot's line clears live
@@ -1904,6 +1921,15 @@ function isPhysicsMode() {
 // (which would lag a frame after a mode swap).
 function is3DMode() {
   return !!(game && game.pieceSet === 'tetracubes');
+}
+
+// Online versus is live (plan_online_versus.md §J). When true, the
+// keyboard handlers route through onlineRouter + RollbackEngine
+// instead of calling game.tryMove / hardDrop directly — every input
+// must flow through the rollback engine so it ships to the remote
+// peer + applies at the right tick on both sides.
+function isOnlineMode() {
+  return !!(onlineSession && onlineSession.matchActive);
 }
 
 function tryMove(dCol, dRow, dDepth = 0) {
@@ -2862,6 +2888,7 @@ Mode._wireLifecycle({
     if (versusSession) versusSession.dispose();
     if (physicsView)   physicsView.dispose();
     if (physicsSession) physicsSession.stop();
+    if (onlineSession) _disposeOnlineSession();
     if (boardView)     boardView.dispose();
     if (game)          game.dispose();
     versusSession = null;
@@ -3035,6 +3062,24 @@ Mode._wireLifecycle({
         game.spawnPiece();
         syncFromGame();
       }
+    } else if (key === 'online') {
+      // Online versus (plan v2 §2.2 Phase J). The lobby panel takes
+      // over here — the actual VersusSession + RollbackEngine are
+      // built later, AFTER the handshake completes (when both peers
+      // exchange auth + the host emits match_start with a seed).
+      // Until then the playfield is dormant; resetRunState() clears
+      // the existing solo Game (if any) so the Tetris case is empty.
+      _disposeOnlineSession();
+      _detachOpponentChrome();
+      _showLobbyPanel();
+      // Reset host state so any prior solo run is cleared from the
+      // scene; the online VersusSession constructs its own games on
+      // match-start.
+      game = null;
+      boardView = null;
+      // Skip the post-construction spawnPiece — there's no game to
+      // spawn into yet. resetRunState clears scene-level VFX state.
+      if (restart) resetRunState();
     } else {
       // Solo modes — single Game + single BoardView, mounted directly
       // under caseGroup at origin (the legacy layout).
@@ -3254,6 +3299,14 @@ const ARR = 0.045; // auto-repeat rate
 
 window.addEventListener('keydown', (e) => {
   if (gameOver) return;
+  // Online versus consumes keyboard via the InputRouter that
+  // RollbackEngine pulls from each frame. The legacy direct-call
+  // path (game.tryMove / hardDrop / etc.) would BYPASS the engine,
+  // so the input wouldn't ship to the remote peer + the two sides
+  // would desync. InputRouter has its own keydown listener attached
+  // independently — gating this one doesn't suppress the input,
+  // just the local-side-effects.
+  if (isOnlineMode()) return;
   switch (e.code) {
     case 'ArrowLeft':
       if (!keyState.left) {
@@ -3501,6 +3554,225 @@ function _disposeOpponentViz() {
     try { u(); } catch { /* ignore */ }
   }
   _opponentVizUnsubs.length = 0;
+}
+
+// =============================================================
+// Online versus host wiring (plan v2 §2.2 Phase J)
+// =============================================================
+// The lobby panel is the entry point. Player picks a code, presses
+// Connect → BroadcastTransport opens, sends `auth`. When a peer's
+// auth arrives, the lower-userId side becomes "host" + picks a seed
+// + sends `match_start`. Both sides then build a VersusSession +
+// RollbackEngine pointed at the transport. Per-frame: read player
+// keyboard via InputRouter, call rollback.tick(localFrame).
+//
+// Currently uses BroadcastChannel (same-origin, 2-tab local play).
+// When the Cloudflare relay is deployed, swap BroadcastTransport
+// for WebSocketTransport — the rest of this code is unchanged.
+
+function _showLobbyPanel() {
+  const lobby = document.getElementById('onlineLobby');
+  if (!lobby) return;
+  // Identity name display.
+  const identity = loadOrCreateIdentity();
+  const nameEl = document.getElementById('onlineDisplayName');
+  if (nameEl) nameEl.textContent = identity.displayName;
+  // Default to idle state — input form visible.
+  lobby.dataset.state = 'idle';
+}
+
+function _hideLobbyPanel() {
+  const lobby = document.getElementById('onlineLobby');
+  if (!lobby) return;
+  lobby.dataset.state = 'matched'; // CSS hides at this state
+}
+
+function _disposeOnlineSession() {
+  if (!onlineSession) return;
+  try {
+    if (onlineSession.transport) onlineSession.transport.close();
+    if (onlineSession.router)    onlineSession.router.dispose();
+    if (onlineSession.versus)    onlineSession.versus.dispose();
+  } catch (err) {
+    console.warn('[online] dispose threw:', err);
+  }
+  onlineSession = null;
+  _hideLobbyPanel();
+}
+
+/**
+ * Connect to a lobby code via BroadcastChannel. The first peer
+ * subscribes; the second peer's auth arrival triggers the host-
+ * election + match-start handshake.
+ */
+function _connectToLobby(lobbyCode) {
+  if (onlineSession) _disposeOnlineSession();
+  const identity = loadOrCreateIdentity();
+  const transport = new BroadcastTransport({
+    channelName: `tetris-online-${lobbyCode}`,
+    userId:      identity.userId,
+    displayName: identity.displayName,
+  });
+  onlineSession = {
+    transport, identity,
+    lobbyCode,
+    role:        null,             // 'host' | 'guest' — set after handshake
+    peerId:      null,
+    peerName:    null,
+    seed:        null,
+    versus:      null,
+    rollback:    null,
+    router:      null,
+    matchActive: false,
+  };
+
+  // Update the panel to "waiting" state.
+  const lobby = document.getElementById('onlineLobby');
+  if (lobby) {
+    lobby.dataset.state = 'waiting';
+    const echo = document.getElementById('onlineLobbyCodeEcho');
+    if (echo) echo.textContent = lobbyCode;
+  }
+
+  transport.onMessage((msg) => {
+    if (!onlineSession || onlineSession.transport !== transport) return;
+    _onLobbyMessage(msg);
+  });
+}
+
+function _onLobbyMessage(msg) {
+  if (msg.t === MSG.AUTH) {
+    // Peer announced themselves. We now know both userIds; deterministic
+    // host election: lower userId wins (the host picks the seed).
+    if (onlineSession.peerId) return; // already saw peer auth
+    onlineSession.peerId   = msg.userId;
+    onlineSession.peerName = msg.displayName || `Player-${msg.userId.slice(0,4).toUpperCase()}`;
+    const myId = onlineSession.identity.userId;
+    onlineSession.role = (myId < onlineSession.peerId) ? 'host' : 'guest';
+    if (onlineSession.role === 'host') {
+      // Pick a seed (lower 32 bits of wall clock — fine for a match
+      // ID since both clients build the same seeded RNG from it). The
+      // tickCount-at-start is 0 for both sides since no game has begun.
+      // eslint-disable-next-line no-restricted-syntax
+      const seed = (Date.now() | 0) >>> 0;
+      const matchId = `bcast-${onlineSession.lobbyCode}-${seed.toString(36)}`;
+      onlineSession.seed = seed;
+      onlineSession.transport.send(encodeMatchStart(matchId, 0));
+      // The match_start payload doesn't carry seed (per protocol §2.1);
+      // send seed via a separate `match_found` so the guest knows.
+      // For the local-broadcast MVP we just include both fields here
+      // to keep handshake simple — when the WS relay ships, lobby
+      // service supplies seed via `match_found` upstream.
+      onlineSession.transport.send({ t: MSG.MATCH_FOUND, matchId, seed,
+        opponent: { userId: onlineSession.peerId, displayName: onlineSession.peerName },
+        settings: { mode: 'versus' } });
+      _startOnlineMatch();
+    } else {
+      // Wait for host's match_start + match_found.
+      const status = document.getElementById('onlineWaitingStatus');
+      if (status) status.textContent = 'Connected — opponent is host…';
+    }
+    return;
+  }
+  if (msg.t === MSG.MATCH_FOUND) {
+    // Guest receives the seed.
+    onlineSession.seed = msg.seed;
+    return;
+  }
+  if (msg.t === MSG.MATCH_START) {
+    // Guest's cue to begin.
+    if (onlineSession.role === 'guest' && onlineSession.seed != null) {
+      _startOnlineMatch();
+    }
+    return;
+  }
+  if (msg.t === MSG.INPUT && onlineSession.matchActive) {
+    onlineSession.rollback.receiveRemoteInput(msg.tick, msg.frame);
+    return;
+  }
+  // gar / snap / desync land here too — Phase J leaves them as
+  // future work since the cubes already settle correctly without
+  // them at the local-tab playtest scale.
+}
+
+/**
+ * Both peers have agreed on a seed. Build a VersusSession with
+ * `opponentMode: 'remote'` + a RollbackEngine + the player's
+ * InputRouter.
+ */
+function _startOnlineMatch() {
+  if (!onlineSession || onlineSession.matchActive) return;
+  if (onlineSession.seed == null) return;
+  // Build VersusSession. Per the rollback design the local game IS
+  // gameP1 (always), regardless of host/guest role — both clients
+  // run the same gameplay code with the same seed against their
+  // local user's inputs.
+  const session = new VersusSession({
+    parent: caseGroup,
+    opponentMode: 'remote',
+    rendererDeps: { cellToWorld, makeCube, shatter, animateCubeTo, startLockAnim, playSfx },
+    rngP1: (function () { let s = onlineSession.seed >>> 0; return () => { s = (s + 0x6D2B79F5) >>> 0; let t = s; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; })(),
+    rngP2: (function () { let s = (onlineSession.seed + 1) >>> 0; return () => { s = (s + 0x6D2B79F5) >>> 0; let t = s; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; })(),
+    playerInputMode: 'host', // we drive gameP1 ourselves via rollback
+    onSideEnd: (reason, side) => {
+      // First side to topout loses the match.
+      const winner = side === 'player' ? 'opponent' : 'player';
+      endRun({ reason: 'topout', winner });
+    },
+  });
+  session.start();
+
+  // RollbackEngine wires gameP1 (local) + gameP2 (remote) to the
+  // transport. sendInput callback ships every tick's local input.
+  const rollback = new RollbackEngine({
+    localGame:  session.gameP1,
+    remoteGame: session.gameP2,
+    sendInput:  (tick, frame) => onlineSession.transport.send(encodeInput(tick, frame)),
+  });
+
+  // InputRouter reads the player's keyboard each frame.
+  const router = new InputRouter({
+    side: 'player',
+    keymap: KEYMAP_PRESETS.player,
+    target: window,
+  });
+
+  onlineSession.versus      = session;
+  onlineSession.rollback    = rollback;
+  onlineSession.router      = router;
+  onlineSession.matchActive = true;
+
+  // Alias the host's primary game/boardView to the session's player
+  // side so existing HUD / animate-loop code reads the right state.
+  game      = session.gameP1;
+  boardView = session.viewP1;
+  syncFromGame();
+
+  _hideLobbyPanel();
+}
+
+// Lobby DOM event wiring — fires once at boot. The panel itself is
+// only visible when `body[data-mode='online']`.
+{
+  const connectBtn = typeof document !== 'undefined' ? document.getElementById('onlineConnectBtn') : null;
+  const cancelBtn  = typeof document !== 'undefined' ? document.getElementById('onlineCancelBtn')  : null;
+  const codeInput  = typeof document !== 'undefined' ? document.getElementById('onlineLobbyCodeInput') : null;
+  if (connectBtn && codeInput) {
+    connectBtn.addEventListener('click', () => {
+      const code = (codeInput.value || '').trim().toUpperCase();
+      if (code.length === 0) return;
+      _connectToLobby(code);
+    });
+    codeInput.addEventListener('keydown', (e) => {
+      if (e.code === 'Enter') connectBtn.click();
+    });
+  }
+  if (cancelBtn) {
+    cancelBtn.addEventListener('click', () => {
+      _disposeOnlineSession();
+      _showLobbyPanel(); // back to idle
+    });
+  }
 }
 
 /**
@@ -3959,8 +4231,28 @@ function animate(dt, envTime) {
   // and physicsView.tick(), which is what builds the cube meshes.
   // Compute physics-mode liveness alongside the grid gate.
   const physicsActive = !!(physicsSession && physicsSession.isStarted);
-  const inputsAlive = !gameOver && (physicsActive || (!paused && activePiece));
+  const onlineActive  = isOnlineMode();
+  const inputsAlive = !gameOver && (physicsActive || onlineActive || (!paused && activePiece));
   if (inputsAlive) {
+    // Online versus runs its own per-tick path: read the player's
+    // input via the InputRouter, hand it to the rollback engine,
+    // and skip every legacy DAS/ARR / game.tick / versus-bot path.
+    // The engine handles BOTH games + ships the local input to the
+    // remote peer; the existing per-frame visual code further down
+    // (mesh sync via BoardView's bus subscriptions, HUD, etc.)
+    // continues to fire normally because both Game.bus emit on
+    // tryMove/lockPiece/etc. just like in solo modes.
+    //
+    // The if/else structure below routes to ONE of: online, physics,
+    // or grid path — never two. Online ticks the rollback engine,
+    // skips DAS/ARR (InputRouter latches keys directly).
+
+    if (onlineActive) {
+      const localFrame = onlineSession.router.frame();
+      try { onlineSession.rollback.tick(localFrame); }
+      catch (err) { console.warn('[online] tick threw:', err); }
+      syncFromGame();
+    } else {
     // DAS/ARR — tryMove auto-routes via isPhysicsMode() so this code
     // serves both modes. The pieceVel bump is a grid-mode visual-
     // inertia kick; in physics mode it's harmless (boardView is null,
@@ -4023,6 +4315,7 @@ function animate(dt, envTime) {
         endRun({ reason: tickResult.reason });
       }
     }
+    } // end of if (onlineActive) else (physics/grid path)
   }
 
   // ---- Piece visual inertia ----

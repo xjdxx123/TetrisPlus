@@ -114,6 +114,74 @@
   body[data-mode="3d"] .help-3d           { display: block; }
   body[data-mode="3d"] .help-2d           { display: none; }
 
+  /* Online Versus lobby panel (plan v2 §2.2 Phase J). Shown only when
+     `body[data-mode="online"]` AND a `data-lobby-state` flag drives
+     visibility of each sub-panel:
+       - "idle"      → "Choose a lobby code" form
+       - "waiting"   → "Waiting for opponent…" with code echo
+       - "matched"   → hidden (the match is live; chrome reverts)
+     The panel hovers above the playfield like the Settings panel does. */
+  .online-lobby {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    background: rgba(8, 10, 30, 0.92);
+    border: 1px solid rgba(108, 240, 255, 0.4);
+    border-radius: 12px;
+    padding: 24px 28px;
+    color: var(--ink);
+    font-size: 14px;
+    z-index: 100;
+    min-width: 300px;
+    box-shadow: 0 0 40px rgba(108, 240, 255, 0.15);
+    display: none;
+  }
+  body[data-mode="online"] .online-lobby                         { display: block; }
+  body[data-mode="online"] .online-lobby[data-state="matched"]   { display: none; }
+  .online-lobby h3 {
+    margin: 0 0 12px 0;
+    font-size: 13px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--accent);
+  }
+  .online-lobby .row { display: flex; align-items: center; gap: 10px; margin: 10px 0; }
+  .online-lobby .row label { color: var(--muted); min-width: 110px; font-size: 12px; }
+  .online-lobby input[type="text"] {
+    background: rgba(0, 0, 0, 0.4);
+    border: 1px solid rgba(108, 240, 255, 0.3);
+    color: var(--ink);
+    border-radius: 4px;
+    padding: 6px 10px;
+    font-family: 'SF Mono', Menlo, monospace;
+    font-size: 13px;
+    flex: 1;
+    outline: none;
+  }
+  .online-lobby input[type="text"]:focus { border-color: var(--accent); }
+  .online-lobby button {
+    background: rgba(108, 240, 255, 0.15);
+    border: 1px solid var(--accent);
+    color: var(--ink);
+    padding: 8px 16px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 13px;
+    letter-spacing: 0.05em;
+  }
+  .online-lobby button:hover { background: rgba(108, 240, 255, 0.3); }
+  .online-lobby .status {
+    color: var(--muted);
+    font-size: 12px;
+    margin-top: 8px;
+    font-style: italic;
+  }
+  .online-lobby .lobby-state-idle    { display: block; }
+  .online-lobby .lobby-state-waiting { display: none; }
+  .online-lobby[data-state="waiting"] .lobby-state-idle    { display: none; }
+  .online-lobby[data-state="waiting"] .lobby-state-waiting { display: block; }
+
   /* Panel jitter — scoped to .panel-inner so it never touches the
      outer element's transform (CSS3DRenderer rewrites that every frame).
      --p is the intensity 0..1, set inline by JS based on score delta. */
@@ -365,6 +433,40 @@
   <button class="settings-toggle" id="settingsToggle" title="Settings (O)">⚙</button>
   <button class="audio-toggle" id="audioToggle" title="Mute / unmute audio">🔊</button>
   <button class="help-toggle" id="helpToggle" title="Toggle controls">?</button>
+
+  <!-- Online Versus lobby (plan v2 §2.2 Phase J). Shown only when
+       Mode.current === 'online' via the body[data-mode] CSS hook.
+       The `data-state` attribute drives sub-panel visibility:
+         "idle"    → form for picking a lobby code
+         "waiting" → echo of the chosen code + "waiting for opponent"
+         "matched" → CSS hides the panel; play continues -->
+  <div class="online-lobby" id="onlineLobby" data-state="idle">
+    <h3>Online Versus</h3>
+    <div class="row">
+      <label>Playing as</label>
+      <span id="onlineDisplayName">—</span>
+    </div>
+    <div class="lobby-state-idle">
+      <div class="row">
+        <label>Lobby code</label>
+        <input type="text" id="onlineLobbyCodeInput" maxlength="8" placeholder="e.g. ABCD" />
+      </div>
+      <div class="row" style="justify-content:flex-end;">
+        <button id="onlineConnectBtn">Connect</button>
+      </div>
+      <div class="status">Pick any 1–8 character code. Both players type the same code.</div>
+    </div>
+    <div class="lobby-state-waiting">
+      <div class="row">
+        <label>Lobby code</label>
+        <span id="onlineLobbyCodeEcho" style="font-family:monospace;color:var(--accent);">—</span>
+      </div>
+      <div class="status" id="onlineWaitingStatus">Waiting for opponent…</div>
+      <div class="row" style="justify-content:flex-end;">
+        <button id="onlineCancelBtn">Cancel</button>
+      </div>
+    </div>
+  </div>
   <!-- crossorigin="anonymous" is REQUIRED for Web Audio MediaElementSource
        to capture non-silent audio (Stage 5). Without it, the element plays
        fine through the speakers but createMediaElementSource produces a

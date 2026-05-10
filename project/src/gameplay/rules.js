@@ -151,6 +151,11 @@ const BUILDERS = Object.freeze({
   versus:   buildVersusRules,
   physics:  buildPhysicsRules,
   '3d':     build3DRules,
+  // plan v2 §2.2 — Online Versus uses the SAME rules pack as local
+  // versus (same garbage table, B2B/PC/T-spin behavior, scoring).
+  // The "online" distinction lives in the host-side wiring (which
+  // transport drives the opponent) + matchmaking, not in the rules.
+  online:   buildVersusRules,
 });
 
 /**

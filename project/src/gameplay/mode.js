@@ -30,6 +30,13 @@ const AVAILABLE = Object.freeze([
   // The rules pack declares dimensions: { COLS:10, ROWS:20, DEPTH:10 }
   // and pieceSet: 'tetracubes'; Game reads both at construction.
   '3d',
+  // plan v2 §2.2 — Online Versus. Same versus rules pack as local
+  // versus, but the opponent is a real remote player connected via
+  // (currently) BroadcastChannel for local 2-tab testing or
+  // (eventually) a Cloudflare Workers Durable Object relay.
+  // `isOnline: true` so the Versus-mode chrome surfaces the lobby
+  // panel + identity row.
+  'online',
 ]);
 
 const LABELS = Object.freeze({
@@ -41,6 +48,7 @@ const LABELS = Object.freeze({
   versus:   'Versus',
   physics:  'Physics',
   '3d':     '3D',
+  online:   'Online Versus',
 });
 
 // Future-behavior contract — informational; useful when modes ship to
@@ -54,6 +62,7 @@ const DESCRIPTIONS = Object.freeze({
   versus:   'Reserved — needs network or AI. Disabled until then.',
   physics:  'Experimental. Locked pieces become rigid bodies; layer-detection replaces row-clear.',
   '3d':     'Experimental. 10×10×20 well, 8 tetracubes, layer-clear scoring.',
+  online:   'Experimental. 1v1 versus over BroadcastChannel (2-tab) or WebSocket relay.',
 });
 
 // Modes the v1 plan ships with disabled-looking. The UI greys these out
@@ -73,6 +82,7 @@ const CONFIG = Object.freeze({
   versus:   Object.freeze({ goalLabel: 'Versus (1v1)',            hudKind: 'versus',   estimatedDurationMin: 5,    isOnline: false, isExperimental: false }),
   physics:  Object.freeze({ goalLabel: 'Pure Physics — chaos lab', hudKind: 'physics', estimatedDurationMin: null, isOnline: false, isExperimental: true  }),
   '3d':     Object.freeze({ goalLabel: 'Endless (3D)',             hudKind: '3d',       estimatedDurationMin: null, isOnline: false, isExperimental: true  }),
+  online:   Object.freeze({ goalLabel: 'Versus (1v1 online)',      hudKind: 'versus',   estimatedDurationMin: 5,    isOnline: true,  isExperimental: true  }),
 });
 
 let _current = 'classic';
