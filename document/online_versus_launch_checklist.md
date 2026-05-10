@@ -60,17 +60,32 @@ acceptance criteria all green.
 - [x] **Anomaly detection** — `checkPlayerHealth` flags accounts
       with > 1% validation-failure rate over 100 matches.
       (Phase I)
-- [ ] **Host UI integration** — Versus mode picker grew an
-      "Online" sub-mode + lobby screens (friend invite + queue).
-      Reads identity from `net/identity.js`; constructs
-      VersusSession with `opponentMode: 'remote'` + a
-      WebSocketTransport pointed at the relay endpoint.
-      *Phase J inline; depends on host-side wiring.*
-- [ ] **Disconnect grace window** — Mid-match disconnect waits 30s
-      before auto-forfeit (currently the relay forfeits
-      immediately on close). *Phase J.*
-- [ ] **Replay download** — End-of-match button to save the local
-      tape as `match-${id}.json` for debugging desyncs. *Phase J.*
+- [x] **Host UI integration** — Versus mode picker has an "Online"
+      sub-mode; lobby panel reads identity from `net/identity.js`
+      and constructs VersusSession with `opponentMode: 'remote'` +
+      a WebSocketTransport pointed at the relay endpoint. Lobby UX
+      polished in Track 2 (`338695e`): URL pre-fill (`?lobby=XXX`),
+      Copy Invite Link button, display-name edit via prompt()
+      persisted through `setDisplayName`. Matchmaking-queue UI
+      (server-side ELO pair) NOT yet wired — friend-code lobby is
+      the only path; queue UI is a future polish item.
+- [x] **Disconnect grace window** — Mid-match WS close triggers
+      `_handleTransportClose` which shows the `#onlineDisconnect`
+      overlay with a 30s countdown. On expiry (or "Forfeit Now"
+      click), host fires `gameP2.forceTopOut('disconnect_forfeit',
+      'opponent')` — routes through VersusSession's standard
+      side-end → endRun(winner='player') flow. Reconnect-resume
+      (re-establishing WS + re-syncing rollback) is deferred —
+      current implementation is "wait, then forfeit-win" only.
+      (Track 2, `338695e`)
+- [x] **Replay download** — `_startOnlineMatch` constructs an
+      `InputRecorder` pinned to the local seed + 'versus' + 60Hz;
+      each rollback tick records `(recordedTick, tickFrame)`. The
+      gameOver overlay's "Download Replay" button serializes the
+      tape and triggers a `match-${lobbyCode}-${seed}.json` download
+      via Blob + URL.createObjectURL. Format matches the wire
+      protocol + validation server's expected shape. (Track 2,
+      `338695e`)
 
 ---
 
