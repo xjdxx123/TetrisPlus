@@ -38,6 +38,7 @@ import { InputRouter, KEYMAP_PRESETS, EMPTY_FRAME } from '../input/intents.js';
 import { EVENTS } from '../gameplay/events.js';
 import { EventBus } from '../engine/events/bus.js';
 import { buildRules } from '../gameplay/rules.js';
+import { applyFrameToGame } from '../gameplay/replay/apply-frame.js';
 
 /**
  * @typedef {Object} VersusOpts
@@ -241,25 +242,13 @@ export class VersusSession {
   // ─── Internal ────────────────────────────────────────────────────────
 
   _dispatchSide(game, frame, dtMs) {
-    if (game.gameOver || game.paused) return;
-    // Discrete intents fire first (rotate/hold/drop) — they may queue
-    // up state Game.tick depends on (e.g. rotation changes the piece
-    // before gravity falls).
-    if (frame.rotateCW)  game.tryRotate(1);
-    if (frame.rotateCCW) game.tryRotate(-1);
-    if (frame.hold)      game.holdActive();
-    // Held movement — single-step per frame; the host's DAS layer would
-    // call tryMove repeatedly under sustained holds. v1 keeps it simple.
-    if (frame.left)      game.tryMove(-1, 0);
-    if (frame.right)     game.tryMove(1, 0);
-    if (frame.hardDrop) {
-      const result = game.hardDrop();
-      if (result) game.lockPiece();
-    }
-    if (frame.pause)     game.setPaused(!game.paused);
-    // Soft-drop input is signalled into game.tick which accelerates
-    // the fall timer 12×.
-    game.tick(dtMs, { softDrop: !!frame.softDrop });
+    // The dispatch logic moved to gameplay/replay/apply-frame.js so
+    // VersusSession + replay/player.js + the future online RemoteOpponent
+    // all share ONE source of truth. Drift between the live path and
+    // the replay-validation path would silently desync online matches;
+    // a single helper means a fix here automatically updates every
+    // re-execution surface.
+    applyFrameToGame(game, frame, dtMs);
   }
 
   _handleSideEnd(reason, side) {
