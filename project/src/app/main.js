@@ -3184,12 +3184,23 @@ bus.on(EVENTS.PIECE_ROTATE, ({ dir }) => {
 
 // PIECE_SPAWN — reset the visual-inertia state so the new piece reads
 // as crisp, and refresh the HUD's hold/next/score readout.
+//
+// The syncFromGame() call here is load-bearing for the next-piece
+// preview: PIECE_SPAWN fires SYNCHRONOUSLY during game.spawnPiece,
+// AFTER the queue's nextPieceKey() shift but BEFORE the host's
+// per-frame syncFromGame runs at the bottom of animate(). Without
+// this sync, the host shadow `nextQueue` is one alias-step behind —
+// it might still point at the previous Game's _nextQueue (just-
+// switched mode) or at a stale snapshot. Calling syncFromGame here
+// re-aliases `nextQueue` to the live `game._nextQueue` array before
+// `updateHUD` reads `nextQueue[0]` for the mini-piece render.
 bus.on(EVENTS.PIECE_SPAWN, () => {
   pieceVisualOffset.set(0, 0, 0);
   pieceVel.set(0, 0, 0);
   pieceRotVisual = 0;
   pieceRotTarget = 0;
   pieceRotVel = 0;
+  syncFromGame();
   updateHUD();
 });
 
@@ -3937,15 +3948,19 @@ function _startOnlineMatch() {
       endRun({ reason: 'topout', winner });
     },
   });
-  session.start();
 
   // Position the two anchors so the BoardViews don't overlap. The
   // DualBoard default is ±separation/2 around the case center, which
   // both render INSIDE the single visible case decoration. Mirror the
   // bot-versus path exactly: player at x=0, opponent at
   // OPPONENT_OFFSET_X, with a cloned case chrome on the right so the
-  // player sees TWO containers instead of one (the original bug:
-  // "界面中只有一个 container 在中间").
+  // player sees TWO containers instead of one.
+  //
+  // Set anchor positions BEFORE session.start so the first piece
+  // mesh, attached to the anchor inside BoardView's PIECE_SPAWN
+  // handler, is parented at the correct world position (otherwise
+  // it briefly appears at the default ±separation/2 then snaps to
+  // (0, OPPONENT_OFFSET_X) when we set them later).
   session.dualBoard.leftAnchor.position.x  = 0;
   session.dualBoard.rightAnchor.position.x = OPPONENT_OFFSET_X;
 
@@ -3957,6 +3972,20 @@ function _startOnlineMatch() {
   versusSession = session;
   _attachOpponentChrome();
   _attachOpponentViz();
+
+  // Alias host shadows BEFORE session.start so the first PIECE_SPAWN's
+  // updateHUD reads the fresh gameP1.nextQueue. Without this, the
+  // first piece's "Next" preview shows the previous mode's leftover
+  // piece (or empty) — the host shadow `nextQueue` is only re-aliased
+  // by syncFromGame, and if start() fires PIECE_SPAWN before that
+  // alias is refreshed, updateHUD reads stale state. The PIECE_SPAWN
+  // subscriber itself also calls syncFromGame defensively, but it
+  // depends on `game` already pointing at the new session.
+  game      = session.gameP1;
+  boardView = session.viewP1;
+  syncFromGame();
+
+  session.start();
 
   // RollbackEngine wires gameP1 (local) + gameP2 (remote) to the
   // transport. sendInput callback ships every tick's local input.
@@ -3999,11 +4028,10 @@ function _startOnlineMatch() {
   };
   onlineSession.matchActive  = true;
 
-  // Alias the host's primary game/boardView to the session's player
-  // side so existing HUD / animate-loop code reads the right state.
-  game      = session.gameP1;
-  boardView = session.viewP1;
-  syncFromGame();
+  // Final HUD refresh in case session.start's first-piece events
+  // didn't re-render with fresh state (e.g. an early subscriber
+  // listed before our PIECE_SPAWN handler). Belt-and-suspenders.
+  updateHUD();
 
   _hideLobbyPanel();
 }
