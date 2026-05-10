@@ -1,0 +1,27 @@
+# Example wrangler.toml for the match-relay service.
+# Copy to wrangler.toml and fill in account-specific values before
+# `wrangler dev` / `wrangler deploy`.
+
+name = "tetris-plus-relay"
+main = "worker.js"
+compatibility_date = "2026-05-09"
+
+# Durable Object binding for MatchRelay (one DO instance per active match).
+[[durable_objects.bindings]]
+name = "MATCH_RELAY"
+class_name = "MatchRelay"
+
+[[migrations]]
+tag = "v1"
+new_classes = ["MatchRelay"]
+
+# (Optional) Static asset binding for the lobby + matchmaking REST
+# endpoints. Phase G adds these handlers.
+# [[r2_buckets]]
+# binding = "REPLAYS"
+# bucket_name = "tetris-plus-replays"
+#
+# [[d1_databases]]
+# binding = "DB"
+# database_name = "tetris-plus"
+# database_id   = "<paste your D1 id>"
