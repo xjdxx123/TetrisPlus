@@ -3641,49 +3641,84 @@ function _connectToLobby(lobbyCode) {
 }
 
 function _onLobbyMessage(msg) {
-  if (msg.t === MSG.AUTH) {
-    // Peer announced themselves. We now know both userIds; deterministic
-    // host election: lower userId wins (the host picks the seed).
-    if (onlineSession.peerId) return; // already saw peer auth
-    onlineSession.peerId   = msg.userId;
-    onlineSession.peerName = msg.displayName || `Player-${msg.userId.slice(0,4).toUpperCase()}`;
+  // Helper: record peer + elect deterministic host role on first
+  // discovery. Both auth and match_found can carry peer identity —
+  // we use whichever arrives first, since BroadcastChannel doesn't
+  // queue past messages and the late-joining tab might miss the
+  // first tab's `auth` entirely.
+  function recordPeer(peerId, peerName) {
+    if (onlineSession.peerId) return false;
+    if (!peerId || peerId === onlineSession.identity.userId) return false;
+    onlineSession.peerId   = peerId;
+    onlineSession.peerName = peerName || `Player-${peerId.slice(0,4).toUpperCase()}`;
     const myId = onlineSession.identity.userId;
     onlineSession.role = (myId < onlineSession.peerId) ? 'host' : 'guest';
-    if (onlineSession.role === 'host') {
-      // Pick a seed (lower 32 bits of wall clock — fine for a match
-      // ID since both clients build the same seeded RNG from it). The
-      // tickCount-at-start is 0 for both sides since no game has begun.
+    return true;
+  }
+
+  if (msg.t === MSG.AUTH) {
+    const recorded = recordPeer(msg.userId, msg.displayName);
+    if (!recorded) return;
+
+    // Re-broadcast our OWN auth back to the channel — the peer may
+    // have joined AFTER we sent our initial auth (BroadcastChannel
+    // doesn't queue history), so without this they'd never see our
+    // identity + would stay forever in waiting. Only fires the first
+    // time we hear from a peer to avoid an infinite re-broadcast loop.
+    onlineSession.transport.send({
+      t: MSG.AUTH,
+      userId: onlineSession.identity.userId,
+      displayName: onlineSession.identity.displayName,
+    });
+
+    // If we're the elected host, pick a seed + send match_start +
+    // match_found right away. Guest sits on its hands waiting for
+    // those messages.
+    if (onlineSession.role === 'host' && onlineSession.seed == null) {
       // eslint-disable-next-line no-restricted-syntax
       const seed = (Date.now() | 0) >>> 0;
       const matchId = `bcast-${onlineSession.lobbyCode}-${seed.toString(36)}`;
       onlineSession.seed = seed;
       onlineSession.transport.send(encodeMatchStart(matchId, 0));
-      // The match_start payload doesn't carry seed (per protocol §2.1);
-      // send seed via a separate `match_found` so the guest knows.
-      // For the local-broadcast MVP we just include both fields here
-      // to keep handshake simple — when the WS relay ships, lobby
-      // service supplies seed via `match_found` upstream.
-      onlineSession.transport.send({ t: MSG.MATCH_FOUND, matchId, seed,
-        opponent: { userId: onlineSession.peerId, displayName: onlineSession.peerName },
-        settings: { mode: 'versus' } });
+      // match_found's `opponent` field is "the other side from the
+      // RECEIVER's perspective" — so the host puts ITS OWN identity
+      // in there (the guest's opponent IS the host). When the WS
+      // relay ships, the lobby service emits this upstream with the
+      // already-correct fields; the BroadcastChannel MVP synthesizes
+      // it inline.
+      onlineSession.transport.send({
+        t: MSG.MATCH_FOUND, matchId, seed,
+        opponent: {
+          userId:      onlineSession.identity.userId,
+          displayName: onlineSession.identity.displayName,
+        },
+        settings: { mode: 'versus' },
+      });
       _startOnlineMatch();
     } else {
-      // Wait for host's match_start + match_found.
       const status = document.getElementById('onlineWaitingStatus');
       if (status) status.textContent = 'Connected — opponent is host…';
     }
     return;
   }
   if (msg.t === MSG.MATCH_FOUND) {
-    // Guest receives the seed.
-    onlineSession.seed = msg.seed;
+    // Guest path. The host's match_found arrives even if we never
+    // saw their `auth` — it carries the host's identity in
+    // `opponent` + the seed for both Games. Record peer + seed,
+    // then try to start (in case match_start already arrived).
+    if (msg.opponent && msg.opponent.userId) {
+      recordPeer(msg.opponent.userId, msg.opponent.displayName);
+    }
+    if (onlineSession.seed == null) onlineSession.seed = msg.seed;
+    _tryStartGuest();
     return;
   }
   if (msg.t === MSG.MATCH_START) {
-    // Guest's cue to begin.
-    if (onlineSession.role === 'guest' && onlineSession.seed != null) {
-      _startOnlineMatch();
-    }
+    // Guest's cue to begin. Order between match_start + match_found
+    // is unspecified on the wire, so try-start fires from both
+    // handlers and gates on (role='guest' AND seed known AND not
+    // already started).
+    _tryStartGuest();
     return;
   }
   if (msg.t === MSG.INPUT && onlineSession.matchActive) {
@@ -3693,6 +3728,20 @@ function _onLobbyMessage(msg) {
   // gar / snap / desync land here too — Phase J leaves them as
   // future work since the cubes already settle correctly without
   // them at the local-tab playtest scale.
+}
+
+/**
+ * Guest-side gate: only call _startOnlineMatch when role + seed +
+ * (not-already-active) are all satisfied. Called from both
+ * match_found and match_start handlers since wire-order isn't
+ * guaranteed.
+ */
+function _tryStartGuest() {
+  if (!onlineSession) return;
+  if (onlineSession.matchActive) return;
+  if (onlineSession.role !== 'guest') return;
+  if (onlineSession.seed == null) return;
+  _startOnlineMatch();
 }
 
 /**
