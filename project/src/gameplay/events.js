@@ -20,6 +20,18 @@ export const EVENTS = Object.freeze({
   PIECE_LOCK:    'PIECE_LOCK',    // { cells: [{col,row}], color }
 
   // Drops
+  // PIECE_HARD_DROPPED is the SIMULATION-side event — emitted by
+  // Game.hardDrop with piece-space data. The host subscribes and
+  // re-emits HARD_DROP after baking world-space ring coordinates
+  // (which depend on PLAY_W / CELL / 3D mode — host-only knowledge).
+  // The split lets the legacy keyboard path AND the rollback-engine
+  // path (which calls game.hardDrop directly via applyFrameToGame)
+  // both fire the visual stack: in solo, main.js's keyboard handler
+  // calls game.hardDrop which fires PIECE_HARD_DROPPED → host
+  // subscriber → HARD_DROP → vfx/director. In online, the rollback
+  // engine's applyFrameToGame call follows the exact same path with
+  // no host-side coupling needed.
+  PIECE_HARD_DROPPED: 'PIECE_HARD_DROPPED', // { dropRows, color, minRow, cells: [{col,row,depth}], side }
   HARD_DROP:     'HARD_DROP',     // { dropRows, color, ringX, ringY, minRow, cells }
   SOFT_DROP:     'SOFT_DROP',     // (no payload)
 

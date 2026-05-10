@@ -812,6 +812,21 @@ export class Game {
       delta, total: this._score, source: 'hard-drop', side: this._side,
     });
 
+    // Fire the simulation-side hard-drop event with piece-space data.
+    // The host's PIECE_HARD_DROPPED subscriber bakes world-space ring
+    // coordinates (depends on PLAY_W / CELL / is3DMode — host-only
+    // knowledge) and re-emits HARD_DROP for vfx/director. This means
+    // BOTH the legacy keyboard path (main.js#hardDrop calls this) AND
+    // the rollback-engine path (applyFrameToGame calls this in online
+    // mode) fire the same visual cascade.
+    this._bus.emit(EVENTS.PIECE_HARD_DROPPED, {
+      dropRows: dropped,
+      cells:    summary.cells,
+      minRow:   summary.minRow,
+      color:    summary.color,
+      side:     this._side,
+    });
+
     return summary;
   }
 

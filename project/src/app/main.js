@@ -1995,41 +1995,57 @@ function hardDrop() {
     return;
   }
   if (!game) return;
+  // Game.hardDrop fires PIECE_HARD_DROPPED on the global bus; the
+  // subscriber registered below bakes world-space ring coords + emits
+  // HARD_DROP for vfx/director. This way the visual cascade fires
+  // identically whether we got here via the keyboard path (this
+  // function) or the rollback-engine path (applyFrameToGame calling
+  // game.hardDrop directly in online mode).
   const result = game.hardDrop();
   if (!result) { syncFromGame(); return; }
-  // Compute world-space ring coords + emit HARD_DROP *before* the
-  // lock cascade — preserves the legacy ordering that vfx/director.js
-  // subscribers rely on (impact ring shows BEFORE the shatter).
-  pieceVel.y -= 8 + result.dropRows * 0.4;
-  shake.impulse(0.15 + result.dropRows * 0.02);
+  game.lockPiece();
+  syncFromGame();
+}
+
+/**
+ * PIECE_HARD_DROPPED → bake world-space ring coords + emit HARD_DROP.
+ *
+ * Lives on the GLOBAL bus, so:
+ *   - Solo / online: gameP1 (or solo's `game`) emits on the global
+ *     bus → this fires → ring + sparks + camera shake on the player's
+ *     well at the correct cell-centroid position.
+ *   - Bot-versus + online opponent: gameP2 emits on the PRIVATE busP2
+ *     → this subscriber doesn't see it → no opponent ring (matches
+ *     legacy behavior; opponent visuals are limited to popups +
+ *     shockwaves via _attachOpponentViz).
+ */
+bus.on(EVENTS.PIECE_HARD_DROPPED, (summary) => {
+  pieceVel.y -= 8 + summary.dropRows * 0.4;
+  shake.impulse(0.15 + summary.dropRows * 0.02);
   // Centroid of the bottom-row cells in scene space. In 3D mode the
   // piece can land at any depth slice (0..DEPTH_3D-1); compute Z the
   // same way as X so the impact ring + sparks + flash light all land
   // under the piece instead of at the well's center plane (z=0).
-  // 2D modes report depth=0 uniformly → ringZ resolves to scene z=0
-  // (the front slice's center) which matches the legacy behavior.
   const playD = is3DMode() ? PLAY_D_3D : PLAY_D;
   let xSum = 0, zSum = 0, count = 0;
-  for (const cell of result.cells) {
-    if (cell.row === result.minRow) {
+  for (const cell of summary.cells) {
+    if (cell.row === summary.minRow) {
       xSum += -PLAY_W / 2 + (cell.col + 0.5) * CELL;
       zSum += -playD / 2 + ((cell.depth | 0) + 0.5) * CELL;
       count++;
     }
   }
-  const ringX = xSum / count;
-  const ringZ = zSum / count;
-  const ringY = -PLAY_H / 2 + result.minRow * CELL;
+  const ringX = count > 0 ? xSum / count : 0;
+  const ringZ = count > 0 ? zSum / count : 0;
+  const ringY = -PLAY_H / 2 + summary.minRow * CELL;
   bus.emit(EVENTS.HARD_DROP, {
-    dropRows: result.dropRows,
-    color:    result.color,
+    dropRows: summary.dropRows,
+    color:    summary.color,
     ringX, ringY, ringZ,
-    minRow:   result.minRow,
-    cells:    result.cells,
+    minRow:   summary.minRow,
+    cells:    summary.cells,
   });
-  game.lockPiece();
-  syncFromGame();
-}
+});
 
 function lockPiece() {
   if (!game) return;
@@ -3784,15 +3800,20 @@ function _onLobbyMessage(msg) {
     return;
   }
   if (msg.t === MSG.TOPOUT && onlineSession.matchActive) {
-    // Peer's authoritative loss. Trust it — they're the source of
-    // truth for their own player's death. Even if our local sim
-    // hasn't reached their topout state, peer-says-they-lost = we
-    // won. endRun is single-shot via _endRunInvoked guard, so the
-    // first call wins; if our local sim spuriously declared US the
-    // loser before this message arrived, that local result already
-    // fired and we'll keep it (the desync is a separate bug, but at
-    // least the peer-trust path won't make things worse).
-    endRun({ reason: 'topout', winner: 'player' });
+    // Peer's authoritative loss. Force their game state (our gameP2)
+    // to topout via the standard VersusSession side-end flow. That
+    // path:
+    //   1. Marks gameP2.gameOver = true.
+    //   2. Fires onSideEnd('opponent_topout', 'opponent') → our
+    //      onSideEnd above computes winner='player' + endRun.
+    //   3. Synthesizes a forfeit on gameP1 so animate's gameOver
+    //      flag flips and the player is locked out of further input.
+    // The reason check in onSideEnd above filters out the synthesized
+    // forfeit so we don't echo a TOPOUT back to the peer.
+    const opp = onlineSession.versus && onlineSession.versus.gameP2;
+    if (opp && !opp.gameOver) {
+      opp.forceTopOut('opponent_topout', 'opponent');
+    }
     return;
   }
   // gar / snap / desync land here too — Phase J leaves them as
@@ -3895,15 +3916,17 @@ function _startOnlineMatch() {
     onSideEnd: (reason, side) => {
       // First side to topout loses the match.
       const winner = side === 'player' ? 'opponent' : 'player';
-      // When OUR player loses locally, send an authoritative TOPOUT
-      // to the peer so they don't have to derive the result from
-      // their (possibly desync'd) simulation. The peer's TOPOUT
-      // handler will fire endRun(winner='player') as soon as the
-      // message arrives, even if their local sim hasn't reached our
-      // topout state yet. Solves the case where deterministic-
-      // garbage hiccups make B's gameP1 spuriously top out before
-      // A's authoritative loss propagates over the wire.
-      if (side === 'player' && onlineSession && onlineSession.transport) {
+      // Send authoritative TOPOUT to the peer ONLY for the genuine
+      // "our player just lost" call (reason === 'topout' AND side
+      // === 'player'). VersusSession.handleSideEnd synthesizes a
+      // forfeit on the OTHER side after the first topout — that
+      // synthesized call arrives here with reason === 'opponent_topout'.
+      // We must NOT send TOPOUT for the synthesized call, otherwise
+      // a TOPOUT from peer would echo a TOPOUT back from us, and
+      // each side would then try to forceTopOut the other again.
+      // The reason check filters out exactly that synthesized path.
+      if (reason === 'topout' && side === 'player'
+          && onlineSession && onlineSession.transport) {
         try {
           const tick = onlineSession.rollback ? onlineSession.rollback.currentTick : 0;
           onlineSession.transport.send(encodeTopout(tick));
@@ -4568,23 +4591,31 @@ function animate(dt, envTime) {
       // each client's `rollback._currentTick` advances at a different
       // wall-clock rate, so tick numbers across the wire drift apart
       // and remote-input arrivals perpetually mispredict + reconcile.
+      //
+      // Use REAL `dt` (not `dtGame`) so slow-mo / time-scale effects
+      // don't decouple the rollback engine from wall-clock — both
+      // peers MUST advance tick numbers at the same real-time rate
+      // regardless of either side's local visual scaling.
       const TICK_MS = 1000 / 60;
-      // Read the raw frame ONCE per animate cycle. InputRouter clears
-      // discrete latches (hardDrop / rotateCW / rotateCCW / hold) on
-      // each frame() call, so reading per-rollback-tick would lose any
-      // discrete action that happened between this animate and the
-      // next. We pass the rawFrame's discretes to the FIRST rollback
-      // tick only; subsequent ticks in the same animate get a copy
-      // with discretes zeroed (one keypress = one rotate, not N).
-      const rawFrame = onlineSession.router.frame();
-      onlineSession.tickAccumMs = (onlineSession.tickAccumMs || 0) + (dtGame * 1000);
+      onlineSession.tickAccumMs = (onlineSession.tickAccumMs || 0) + (dt * 1000);
       // Cap catch-up to 5 ticks per frame so a long stall (e.g. tab
       // hidden for 10 s) doesn't burst-step 600 ticks and freeze the
       // UI. Capped overflow is dropped — the rollback engine treats
       // it as packet loss and recovers via remote-input arrival.
       let stepBudget = 5;
       let firstStep = true;
+      // rawFrame is read lazily — only on the first iteration where
+      // we actually step. InputRouter.frame() CONSUMES discrete
+      // latches (hardDrop / rotateCW / rotateCCW / hold) on each
+      // call. If we read but don't step (e.g. the while condition
+      // never becomes true due to rAF jitter delivering a sub-16ms
+      // frame), the user's keypress is silently dropped — they have
+      // to press Space again. Reading inside the loop only when
+      // we're committed to stepping preserves the latch across
+      // animate cycles where we don't step.
+      let rawFrame = null;
       while (onlineSession.tickAccumMs >= TICK_MS && stepBudget-- > 0) {
+        if (rawFrame === null) rawFrame = onlineSession.router.frame();
         // DAS/ARR filter on left/right held state. Without this, a
         // held arrow key would tryMove every single rollback tick =
         // 60 cells/sec (uncontrollable). Filter mutates dasState; on
@@ -5058,15 +5089,16 @@ bus.on(EVENTS.GAME_OVER, ({ score, lines, level, winner }) => {
   document.getElementById('goScore').textContent = score.toLocaleString();
   document.getElementById('goLines').textContent = lines;
   document.getElementById('goLevel').textContent = level;
-  // Versus mode rewrites the overlay text so the player can tell at a
-  // glance whether they won or lost. Solo modes keep the legacy
-  // "Shattered / The stack reached the top" copy.
+  // Versus + online mode rewrite the overlay text so the player can
+  // tell at a glance whether they won or lost. Solo modes keep the
+  // legacy "Shattered / The stack reached the top" copy.
   const titleEl    = document.getElementById('goTitle');
   const subtitleEl = document.getElementById('goSubtitle');
-  if (Mode.current === 'versus' && winner === 'player') {
+  const isVersusLike = (Mode.current === 'versus' || Mode.current === 'online');
+  if (isVersusLike && winner === 'player') {
     titleEl.textContent    = 'Victory';
     subtitleEl.textContent = 'Your opponent topped out';
-  } else if (Mode.current === 'versus' && winner === 'opponent') {
+  } else if (isVersusLike && winner === 'opponent') {
     titleEl.textContent    = 'Defeat';
     subtitleEl.textContent = 'Your stack reached the top';
   } else {
@@ -5087,9 +5119,19 @@ bus.on(EVENTS.GAME_OVER, ({ score, lines, level, winner }) => {
   // entry can't swallow the overlay-fade setTimeout below.
   const ROW_STAGGER_MS = 12;
   let scheduledRows = 0;
+  // Pick which BoardView to cascade. The user-facing semantics are
+  // "the LOSER's stack explodes":
+  //   - DEFEAT (we lost):  cascade our own viewP1 (boardView).
+  //   - VICTORY (we won):  cascade the opponent's viewP2 — that's
+  //     the right-side container in our local view (whoever lost,
+  //     their stack should visibly break).
+  //   - Solo / no winner:  cascade local (legacy fallback).
   // Snapshot the BoardView reference at schedule time — a Play-Again
   // could swap it out from under the staggered setTimeouts otherwise.
-  const cascadeView = boardView;
+  let cascadeView = boardView;
+  if (versusSession && winner === 'player' && versusSession.viewP2) {
+    cascadeView = versusSession.viewP2;
+  }
   const cascadeIs3D = is3DMode();
   if (cascadeView) {
     try {
