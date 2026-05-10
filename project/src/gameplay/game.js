@@ -1586,6 +1586,22 @@ export class Game {
         && typeof this._rng.setState === 'function') {
       this._rng.setState(blob.rngState);
     }
+
+    // Notify renderer subscribers that state was bulk-overwritten.
+    // BoardView accumulates mesh state by reacting to incremental
+    // events (PIECE_LOCK / LINE_CLEAR / GARBAGE_APPLIED). Restore
+    // bypasses all of those — the mesh side has no idea the data
+    // just rewound. STATE_RESTORED tells subscribers to throw away
+    // their accumulated state and rebuild from the current game
+    // state in one shot. Without this, the rollback engine's
+    // restore-then-replay-forward loop leaves BoardView holding
+    // STALE mesh from before the rewind, while the data side is
+    // back at the snapshot — every replay step then layers new
+    // mesh mutations on top, drifting visibly out of sync. The
+    // user-facing symptom was "active piece overlaps with stack
+    // blocks after multiple garbage waves" because every garbage
+    // application got mesh-mirrored TWICE per rollback round.
+    this._bus.emit(EVENTS.STATE_RESTORED, { side: this._side });
   }
 
   /**

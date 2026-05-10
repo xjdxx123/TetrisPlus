@@ -102,6 +102,45 @@ export class BoardView3D {
     this._unsubs.push(this._bus.on(EVENTS.LINE_CLEAR,      (e) => this._onLineClear(e)));
     this._unsubs.push(this._bus.on(EVENTS.GARBAGE_APPLIED, (e) => this._onGarbageApplied(e)));
     this._unsubs.push(this._bus.on(EVENTS.ZEN_RESCUE,      (e) => this._onZenRescue(e)));
+    // Game.restore (rollback misprediction) — see BoardView's
+    // counterpart for rationale. Rebuilds the entire mesh registry
+    // from `game.board` so the rendered stack snaps to the snapshot
+    // state before replay-forward starts incrementally mutating
+    // cellMeshes again.
+    this._unsubs.push(this._bus.on(EVENTS.STATE_RESTORED,  () => this._rebuildFromGame()));
+  }
+
+  /**
+   * Wipe + rebuild the entire 3D stack mesh from `this._game.board`.
+   * 3D analog of BoardView._rebuildFromGame — game.board returns the
+   * full `[depth][row][col]` array so we walk every depth slice.
+   */
+  _rebuildFromGame() {
+    if (!this._game) return;
+    this.clear();
+    // Use `boardLayers` (full 3D `[d][r][c]`) — `board` would only
+    // give us the front depth slice. 2D modes have depth=1 so the
+    // outer loop runs once; 3D rebuilds every depth slice.
+    const layers = this._game.boardLayers;
+    if (!Array.isArray(layers)) return;
+    for (let d = 0; d < this._depth; d++) {
+      const layer = layers[d];
+      if (!Array.isArray(layer)) continue;
+      for (let r = 0; r < this._rows; r++) {
+        const rowArr = layer[r];
+        if (!Array.isArray(rowArr)) continue;
+        for (let c = 0; c < this._cols; c++) {
+          const color = rowArr[c];
+          if (color == null) continue;
+          const cube = this._makeCube(color);
+          cube.position.copy(this._cellToWorld(c, r, d));
+          this.stackGroup.add(cube);
+          this.cellMeshes[d][r][c] = cube;
+        }
+      }
+    }
+    this.rebuildPieceMesh();
+    this.rebuildGhostMesh();
   }
 
   // ─── Public API ──────────────────────────────────────────────────────

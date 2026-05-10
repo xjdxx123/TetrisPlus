@@ -80,6 +80,14 @@ export const EVENTS = Object.freeze({
   MODE_END:           'MODE_END',           // { reason: 'topout'|'goal'|'time'|'forfeit', score, lines, level, timeMs }
   MODE_GOAL_PROGRESS: 'MODE_GOAL_PROGRESS', // { kind: 'lines'|'time'|'score', value, target }
 
+  // Fired by Game.restore AFTER the state mutation completes. Subscribers
+  // (BoardView, host HUD) treat this as "wipe and rebuild from current
+  // game state" — the incremental event stream they normally follow has
+  // been bypassed (rollback rewound past their accumulated state). The
+  // rollback engine is the only production caller; replay viewer + tests
+  // also benefit from the same hook.
+  STATE_RESTORED:     'STATE_RESTORED',     // (no payload — subscriber reads from this._game)
+
   // Zen rescue (plan_gameplay_1.md §3.5). Replaces topout in Zen — instead
   // of ending the run, the bottom N rows are removed and the stack settles
   // down. Visual layer (vfx/director.js) listens for the restorative

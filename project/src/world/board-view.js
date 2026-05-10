@@ -120,7 +120,58 @@ export class BoardView {
       this._unsubs.push(this._bus.on(EVENTS.LINE_CLEAR,      (e) => this._onLineClear(e)));
       this._unsubs.push(this._bus.on(EVENTS.GARBAGE_APPLIED, (e) => this._onGarbageApplied(e)));
       this._unsubs.push(this._bus.on(EVENTS.ZEN_RESCUE,      (e) => this._onZenRescue(e)));
+      // Game.restore (called by the rollback engine on misprediction)
+      // bulk-overwrites simulation state. The incremental event stream
+      // we accumulate from misses the rewind — without this hook our
+      // cellMeshes drift out of sync with game.board, and subsequent
+      // events stack on top of the stale state. Rebuilding from
+      // game.board on STATE_RESTORED clamps the mesh side back to
+      // whatever the simulation just restored to.
+      this._unsubs.push(this._bus.on(EVENTS.STATE_RESTORED,  () => this._rebuildFromGame()));
     }
+  }
+
+  /**
+   * Wipe + rebuild the entire stack mesh from `this._game.board`.
+   * Triggered by STATE_RESTORED (rollback's restore-then-replay-forward
+   * pattern). The replay's incremental events (PIECE_LOCK / LINE_CLEAR /
+   * GARBAGE_APPLIED) fire AFTER this rebuild and pick up where the
+   * snapshot leaves off, keeping mesh + data aligned through the
+   * remaining replay steps.
+   */
+  _rebuildFromGame() {
+    if (!this._game) return;
+    // Tear down all stack cubes — clear() also wipes pieceGroup +
+    // ghostGroup, which we'll rebuild via the existing helpers below.
+    this.clear();
+    // Re-create cubes for every non-null cell in game.board. 2D modes
+    // have depth=1 so the outer loop runs once; 3D mode rebuilds all
+    // depth slices (this BoardView class is the 2D path — 3D goes
+    // through BoardView3D which has its own rebuild).
+    const board = this._game.board;
+    if (Array.isArray(board)) {
+      for (let r = 0; r < this._rows; r++) {
+        for (let c = 0; c < this._cols; c++) {
+          // 2D `Game.board` getter returns `this._board[0]` — the front
+          // depth slice — so `board[r][c]` is the color or null.
+          const color = (board[r] && board[r][c] != null) ? board[r][c] : null;
+          if (color == null) continue;
+          const slices = [];
+          for (let d = 0; d < this._depth; d++) {
+            const cube = this._makeCube(color);
+            cube.position.copy(this._cellToWorld(c, r, d));
+            this.stackGroup.add(cube);
+            slices.push(cube);
+          }
+          this.cellMeshes[r][c] = slices;
+        }
+      }
+    }
+    // Active piece + ghost — incremental events would have caught up
+    // mid-replay, but rebuilding here makes the post-restore frame
+    // visually consistent even before any subsequent input replays.
+    this.rebuildPieceMesh();
+    this.rebuildGhostMesh();
   }
 
   // ─── Public API ──────────────────────────────────────────────────────
