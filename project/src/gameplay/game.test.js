@@ -418,6 +418,81 @@ describe('Game — lockPiece and clearLines', () => {
     expect(lc[0].payload.isPerfectClear).toBe(false);
   });
 
+  it('clearLines splice handles multi-row clears correctly (descending order)', () => {
+    // Regression: the splice loop must process cleared rows in
+    // DESCENDING order. Iterating ascending makes each splice's
+    // index drift relative to the original positions, so a Tetris
+    // [3,4,5,6] would silently leave rows 4/6/8 occupied while
+    // claiming all four rows cleared. Symptom in online versus:
+    // "phantom blocks" appearing in the stack after multi-row
+    // clears, with the active piece colliding with them.
+    const { game } = makeGame();
+    game.spawnPiece('T');
+    // Markers at rows 7 and 9 — they should shift DOWN by 4 (the
+    // count of cleared rows below them) to land at rows 3 and 5.
+    game.board[7][0] = 0x111111;
+    game.board[9][0] = 0x222222;
+    // Fill rows 3, 4, 5, 6 — a Tetris.
+    fillRow(game, 3); fillRow(game, 4); fillRow(game, 5); fillRow(game, 6);
+
+    game.clearLines([3, 4, 5, 6]);
+
+    expect(game.lines).toBe(4);
+    // After Tetris at rows 3-6:
+    // - rows 0,1,2 stay empty
+    // - row 7's marker (color 0x111111) shifts to row 3
+    // - row 9's marker (0x222222) shifts to row 5
+    // - rows 4, 6, 7-19 should all be empty (modulo the markers)
+    expect(game.board[0].every(c => c === null)).toBe(true);
+    expect(game.board[1].every(c => c === null)).toBe(true);
+    expect(game.board[2].every(c => c === null)).toBe(true);
+    expect(game.board[3][0]).toBe(0x111111); // was row 7
+    expect(game.board[3].slice(1).every(c => c === null)).toBe(true);
+    expect(game.board[4].every(c => c === null)).toBe(true);
+    expect(game.board[5][0]).toBe(0x222222); // was row 9
+    expect(game.board[5].slice(1).every(c => c === null)).toBe(true);
+    expect(game.board[6].every(c => c === null)).toBe(true);
+    // No "phantom" surviving cells from the original rows 3-6 that
+    // should have been cleared.
+    for (let r = 6; r < game.rows; r++) {
+      // skip the two markers we placed; everything else null
+      const expected = (r === 3 || r === 5) ? null : null; // post-shift markers are at 3,5
+      void expected;
+      for (let c = 0; c < game.cols; c++) {
+        if (r === 3 && c === 0) continue;
+        if (r === 5 && c === 0) continue;
+        expect(game.board[r][c]).toBe(null);
+      }
+    }
+  });
+
+  it('clearLines splice handles non-contiguous multi-row clears', () => {
+    // Regression: same bug, non-contiguous case. Clearing [3, 5]
+    // should leave row 4's content unchanged.
+    const { game } = makeGame();
+    game.spawnPiece('T');
+    fillRow(game, 3, 0xff0000);
+    game.board[4][0] = 0xabcdef; // single sentinel at row 4
+    fillRow(game, 5, 0x00ff00);
+
+    game.clearLines([3, 5]);
+
+    expect(game.lines).toBe(2);
+    // After clearing rows 3 and 5:
+    //   - row 0,1,2 untouched (empty)
+    //   - row 4 (sentinel at col 0) shifts down to row 3
+    //   - rows 4+ empty
+    expect(game.board[3][0]).toBe(0xabcdef);
+    for (let c = 1; c < game.cols; c++) {
+      expect(game.board[3][c]).toBe(null);
+    }
+    for (let r = 4; r < game.rows; r++) {
+      for (let c = 0; c < game.cols; c++) {
+        expect(game.board[r][c]).toBe(null);
+      }
+    }
+  });
+
   it('clearLines fires LEVEL_UP when crossing a 10-line boundary', () => {
     const { game, bus } = makeGame();
     game.spawnPiece('T');

@@ -1141,7 +1141,17 @@ export class Game {
 
     // Splice the cleared rows out of every depth slice + push a fresh
     // empty row at the top of each. For 2D the outer loop runs once.
-    for (const r of rows) {
+    //
+    // CRITICAL: process rows in DESCENDING order. After each splice
+    // the array shifts down, so iterating ascending would make the
+    // second splice target the WRONG row (e.g. for rows=[3,4]:
+    //   splice(3) removes orig r3, then splice(4) removes orig r5
+    //   instead of orig r4 — which is now at idx 3 after the shift).
+    // Descending splice keeps each target index stable for that
+    // iteration because the only rows shifting are ones we've
+    // already processed (above the current index, in array terms).
+    const sortedRows = [...rows].sort((a, b) => b - a);
+    for (const r of sortedRows) {
       for (let d = 0; d < this._depth; d++) {
         this._board[d].splice(r, 1);
         this._board[d].push(Array(this._cols).fill(null));

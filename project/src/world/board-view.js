@@ -262,7 +262,15 @@ export class BoardView {
         }
       }
     }
-    for (const r of rows) {
+    // Mirror Game.clearLines: splice cleared rows in DESCENDING order
+    // so the array shift from each splice doesn't move the next
+    // target. Iterating ascending would silently skip every other
+    // cleared row (Tetris-clear of [3,4,5,6] would land as [3,5,7,9],
+    // leaving phantom mesh blocks at rows 4/6/8 — and Game.clearLines
+    // had the SAME bug at the data side, so they stayed in sync but
+    // both were wrong).
+    const sortedRows = [...rows].sort((a, b) => b - a);
+    for (const r of sortedRows) {
       this.cellMeshes.splice(r, 1);
       this.cellMeshes.push(Array(this._cols).fill(null));
     }
