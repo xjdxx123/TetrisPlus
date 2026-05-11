@@ -106,6 +106,11 @@ export function createMuonOriginal({
     // bgScale or push bgZ farther negative to make it more "distant sky".
     bgZ: -200,
     bgScale: 3.3,
+    // Brightness multiplier. Additive blending has no real "opacity", so
+    // we dim by scaling the HSL lightness of the colour uniform (0 = HSL
+    // L=0 = black = additive no-op = invisible). Same multiplier applies
+    // to dust so they stay matched.
+    opacity: 1.0,
     // 'off' = group detached from scene; 'background' = attached.
     mode: "off",
   };
@@ -371,11 +376,12 @@ export function createMuonOriginal({
       exponentialBassScaler = maxExponentialScaler;
 
     const hue = CoreControls.hueControl((_delta * timeDelta) / 2);
-    particles.material.uniforms.color.value.setHSL(hue, 0.7, 0.5);
-    particles2.material.uniforms.color.value.setHSL(hue, 0.7, 0.5);
+    const _L = 0.5 * Math.max(0, Math.min(1, params.opacity ?? 1));
+    particles.material.uniforms.color.value.setHSL(hue, 0.7, _L);
+    particles2.material.uniforms.color.value.setHSL(hue, 0.7, _L);
     if (params.syncColors) {
       emittedParticleSystem.material.uniforms.color.value.setHSL(
-        hue, 0.7, 0.5,
+        hue, 0.7, _L,
       );
     }
 

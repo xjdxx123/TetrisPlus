@@ -5908,6 +5908,7 @@ function _persistSettingsSnapshot() {
       mode:                spiralWave.getMode ? spiralWave.getMode() : 'off',
       bgZ:                 spiralWave.params.bgZ,
       bgScale:             spiralWave.params.bgScale,
+      opacity:             spiralWave.params.opacity,
       useFeatureBus:       !!spiralWave.params.useFeatureBus,
       maxPoints:           spiralWave.params.maxPoints,
       colorSpectrum:       spiralWave.params.colorSpectrum,
@@ -6083,6 +6084,10 @@ const settingsPanel = createSettingsPanel({
         if (spiralWave.spiralGroup) spiralWave.spiralGroup.scale.setScalar(v);
         _persistSettingsSnapshot();
       },
+    },
+    opacity: {
+      value: spiralWave.params.opacity ?? 1.0,
+      onChange: (v) => { spiralWave.params.opacity = v; _persistSettingsSnapshot(); },
     },
     useFeatureBus: {
       value: !!spiralWave.params.useFeatureBus,

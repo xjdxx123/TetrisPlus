@@ -343,6 +343,13 @@ export function createSettingsPanel(cfg) {
         format: (n) => n.toFixed(1),
       });
     }
+    if (v.opacity) {
+      addSlider({
+        label: 'Opacity', min: 0, max: 1, step: 0.05,
+        value: v.opacity.value, onChange: v.opacity.onChange,
+        format: (n) => `${(n * 100).toFixed(0)}%`,
+      });
+    }
 
     // --- Audio source ----------------------------------------------------
     visualizerPane.appendChild(sectionLabel('Audio source'));
