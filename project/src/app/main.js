@@ -6641,6 +6641,7 @@ if (typeof window !== 'undefined') {
   window.__bindings = bindings;
   window.__featureDebug = featureDebug;
   window.__spiralWave = spiralWave;
+  window.__liveBeat = liveBeat;
   window.__audio = audio;
   window.__bgm = bgmPlaylist;
   window.__playlistPanel = playlistPanel;

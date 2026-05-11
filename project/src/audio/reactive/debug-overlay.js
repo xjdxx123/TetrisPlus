@@ -429,6 +429,14 @@ export function createFeatureDebugOverlay({
       }
       // Onset markers.
       if (onsetRows && feature.onsets) {
+        // Distinct colour per onset channel so kick / snare / generic
+        // flashes are visually distinguishable — they used to all share
+        // the same pink, defeating the point of having 3 separate dots.
+        const ONSET_COLORS = {
+          kick:    { r: 255, g:  92, b: 138 },   // pink — punchy low
+          snare:   { r: 255, g: 209, b: 102 },   // yellow — bright mid
+          generic: { r: 108, g: 240, b: 255 },   // cyan — airy high
+        };
         const FADE_SEC = 0.25;
         const now = feature.totalSec || 0;
         for (const name of feature.onsets.names) {
@@ -437,15 +445,16 @@ export function createFeatureDebugOverlay({
           const k = Math.max(0, Math.min(1, 1 - elapsed / FADE_SEC));
           const dot = onsetRows[name].dot;
           const label = onsetRows[name].strength;
+          const col = ONSET_COLORS[name] || ONSET_COLORS.kick;
           if (k > 0) {
             const alpha = 0.25 + 0.75 * k;
-            dot.style.background = `rgba(255, 92, 138, ${alpha.toFixed(2)})`;
-            dot.style.boxShadow = `0 0 ${(8 + 12 * k).toFixed(0)}px rgba(255, 92, 138, ${(0.6 * k).toFixed(2)}), 0 0 0 1px rgba(255, 92, 138, 0.6)`;
+            dot.style.background = `rgba(${col.r}, ${col.g}, ${col.b}, ${alpha.toFixed(2)})`;
+            dot.style.boxShadow = `0 0 ${(8 + 12 * k).toFixed(0)}px rgba(${col.r}, ${col.g}, ${col.b}, ${(0.6 * k).toFixed(2)}), 0 0 0 1px rgba(${col.r}, ${col.g}, ${col.b}, 0.6)`;
             label.textContent = tele.lastStrength.toFixed(2);
             label.style.opacity = (0.4 + 0.6 * k).toFixed(2);
           } else {
             dot.style.background = 'rgba(255,255,255,0.06)';
-            dot.style.boxShadow = '0 0 0 1px rgba(255,255,255,0.10)';
+            dot.style.boxShadow = `0 0 0 1px rgba(${col.r}, ${col.g}, ${col.b}, 0.25)`;
             label.style.opacity = '0.45';
           }
         }
