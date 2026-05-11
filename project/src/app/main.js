@@ -5742,7 +5742,55 @@ try {
     tick() {}, setVisible() {}, setMode() {}, getMode: () => 'off',
     isVisible() { return false; }, isInFront() { return false; },
     dispose() {}, params: { monoColor: {} },
+    pulseOpacity() {}, triggerMorph() {},
   };
+}
+
+// === Gameplay event → Spiral hooks ===================================
+// The spiral isn't just music-reactive — it also reacts to what the
+// player just did. Subscribed here (not inside muon-original) because
+// the engine bus is host-side and we want this wiring obvious at the
+// app integration point.
+//
+// Frequencies tuned so common events feel like feedback but don't drown
+// out the music reactivity: singles tap, doubles ripple, triples/Tetris
+// trigger preset morphs, Perfect Clear is the climax.
+//
+// HARD_DROP intentionally skipped — fires every piece, too dense.
+if (spiralWave.pulseOpacity && spiralWave.triggerMorph) {
+  bus.on(EVENTS.LINE_CLEAR, ({ simultaneous = 1 } = {}) => {
+    if (simultaneous >= 4) {
+      spiralWave.pulseOpacity(1.8, 700);
+      spiralWave.triggerMorph();
+    } else if (simultaneous >= 3) {
+      spiralWave.pulseOpacity(1.5, 500);
+      spiralWave.triggerMorph();
+    } else if (simultaneous >= 2) {
+      spiralWave.pulseOpacity(1.3, 400);
+    } else {
+      spiralWave.pulseOpacity(1.15, 300);
+    }
+  });
+  bus.on(EVENTS.T_SPIN, () => {
+    spiralWave.pulseOpacity(1.4, 500);
+    spiralWave.triggerMorph();
+  });
+  bus.on(EVENTS.LEVEL_UP, () => {
+    spiralWave.pulseOpacity(1.4, 800);
+    spiralWave.triggerMorph();
+  });
+  bus.on(EVENTS.PERFECT_CLEAR, () => {
+    spiralWave.pulseOpacity(2.0, 1200);
+    spiralWave.triggerMorph();
+    // Second morph 600ms in for a "wow" double-tap on Perfect Clears.
+    setTimeout(() => spiralWave.triggerMorph(), 600);
+  });
+  bus.on(EVENTS.B2B_CHAIN, ({ count = 1 } = {}) => {
+    // Stack the chain count into the pulse — 2-stack subtle, 5+ chain
+    // really brightens.
+    const mult = 1.2 + Math.min(count, 6) * 0.15;
+    spiralWave.pulseOpacity(mult, 500);
+  });
 }
 
 // Effects toggle panel — E key toggles. Each entry's `onChange` runs once

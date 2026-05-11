@@ -27,6 +27,7 @@
 
 import * as THREE from "three";
 import GUI from "lil-gui";
+import gsap from "gsap";
 import { Operations } from "./Utils/operations";
 import { CoreControls } from "./CoreControls";
 import { generateParticlesSpiral } from "./Resources/geometries";
@@ -129,11 +130,30 @@ export function createMuonOriginal({
   let prevExponentialBassScalar = 0;
   let dataArray = new Uint8Array(0);
 
-  // FeatureBus onset bridge.
+  // FeatureBus onset bridge + general-purpose morph pulse used by game
+  // event hooks (LINE_CLEAR / TETRIS / LEVEL_UP / etc). Both feed the
+  // same wavePresetController via a synthetic _delta spike.
   let _fbOnsetFired = false;
+  let _morphPulse = false;
   if (feature && feature.onsets && typeof feature.onsets.on === "function") {
     feature.onsets.on("kick", () => { _fbOnsetFired = true; });
   }
+
+  // Opacity pulse — gsap-tweened transient multiplier on top of the
+  // user-set params.opacity. Lets game events (line clear, level up,
+  // perfect clear) spike the spiral brightness without permanently
+  // changing the user's slider value.
+  const _pulseRef = { value: 1.0 };
+  const pulseOpacity = (mult = 1.5, durationMs = 500) => {
+    gsap.killTweensOf(_pulseRef);
+    _pulseRef.value = mult;
+    gsap.to(_pulseRef, {
+      value: 1.0,
+      duration: Math.max(0.05, durationMs / 1000),
+      ease: "power2.out",
+    });
+  };
+  const triggerMorph = () => { _morphPulse = true; };
 
   // === Scene assembly =================================================
   // No standalone scene/camera/renderer/composer — those all belong to
@@ -316,10 +336,16 @@ export function createMuonOriginal({
       ? deriveAudioFeatsFromFeatureBus(feature)
       : CoreControls.audioProcessing(dataArray);
 
+    // The same _morphPulse flag covers FB onsets and game-event hooks
+    // (LINE_CLEAR / TETRIS / LEVEL_UP) via triggerMorph().
     if (useFB) {
-      _delta = _fbOnsetFired ? 0.01 : 0;
+      _delta = (_fbOnsetFired || _morphPulse) ? 0.01 : 0;
       _fbOnsetFired = false;
+    } else if (_morphPulse) {
+      const sign = (_delta >= 0) ? 1 : -1;
+      _delta = sign * Math.max(Math.abs(_delta), 0.015);
     }
+    _morphPulse = false;
 
     const coreScaler = audioFeats.coreScaler;
     exponentialBassScaler = audioFeats.exponentialBassScaler;
@@ -376,12 +402,17 @@ export function createMuonOriginal({
       exponentialBassScaler = maxExponentialScaler;
 
     const hue = CoreControls.hueControl((_delta * timeDelta) / 2);
-    const _L = 0.5 * Math.max(0, Math.min(1, params.opacity ?? 1));
-    particles.material.uniforms.color.value.setHSL(hue, 0.7, _L);
-    particles2.material.uniforms.color.value.setHSL(hue, 0.7, _L);
+    // Final lightness = user opacity × transient pulse multiplier.
+    // Clamped to [0, 1] (HSL spec) — pulse can exceed 1 for a moment and
+    // it just saturates to white, which reads as "flash".
+    const _opacityLive = (params.opacity ?? 1) * _pulseRef.value;
+    const _L = 0.5 * Math.max(0, Math.min(2, _opacityLive));
+    const _Lclamp = Math.min(1, _L);
+    particles.material.uniforms.color.value.setHSL(hue, 0.7, _Lclamp);
+    particles2.material.uniforms.color.value.setHSL(hue, 0.7, _Lclamp);
     if (params.syncColors) {
       emittedParticleSystem.material.uniforms.color.value.setHSL(
-        hue, 0.7, _L,
+        hue, 0.7, _Lclamp,
       );
     }
 
@@ -412,6 +443,8 @@ export function createMuonOriginal({
     isVisible:  () => params.mode !== "off",
     isInFront:  () => false,           // never — host always renders
     spiralGroup,                       // expose for ad-hoc tuning
+    pulseOpacity,                      // gameplay hooks: transient brightness
+    triggerMorph,                      // gameplay hooks: force preset switch
     params,
     gui,
   };
