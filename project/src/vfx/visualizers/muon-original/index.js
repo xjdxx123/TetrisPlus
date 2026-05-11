@@ -236,11 +236,18 @@ export function createMuonOriginal({
   // lil-gui stays hidden by default — the Settings panel ("Spiral" tab)
   // is the user-facing surface now. Dev shortcut for the full param
   // surface: `__spiralWave.gui.show()` from the console.
+  //
+  // cameraIntro is the cinematic explosion — camera scales from 0, params
+  // tween through 0→1080→7920→5400 over 4s. We only run it ONCE per page
+  // load: subsequent V toggles just show/hide the canvas without restarting
+  // the tween, otherwise it would clobber any user-set Particle count /
+  // Color spectrum / Spacing every time the overlay reopens.
+  let _introPlayed = false;
   const setVisible = (v) => {
     canvas.style.display = v ? "block" : "none";
     canvas.style.pointerEvents = v ? "auto" : "none";
-    if (v) {
-      // Re-run intro every time we open the overlay.
+    if (v && !_introPlayed) {
+      _introPlayed = true;
       gsapControls.cameraIntro(camera, params);
     }
   };
