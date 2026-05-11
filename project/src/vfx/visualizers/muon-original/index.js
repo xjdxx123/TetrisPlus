@@ -101,10 +101,11 @@ export function createMuonOriginal({
     enableMonoColor: false,
     monoColor: { h: 350, s: 0.9, v: 0.3 },
     useFeatureBus: false,
-    // Scene-embedded geometry: how far back + how big. Tune via Settings →
-    // Spiral or via console (__spiralWave.params.bgZ = -1200).
-    bgZ: -800,
-    bgScale: 10,
+    // Scene-embedded geometry: how far back + how big. Defaults are the
+    // hand-tuned values that look right against TetrisPlus's camera; raise
+    // bgScale or push bgZ farther negative to make it more "distant sky".
+    bgZ: -200,
+    bgScale: 3.3,
     // 'off' = group detached from scene; 'background' = attached.
     mode: "off",
   };
@@ -241,14 +242,29 @@ export function createMuonOriginal({
   // Backward-compat shim — older call sites use setVisible/isVisible.
   const setVisible = (v) => setMode(v ? "background" : "off");
 
-  // V toggles between off and background.
+  // V toggles between off and background. Capture-phase listener so any
+  // upstream handler that calls stopImmediatePropagation can't swallow it
+  // before we see it. Skip only "real" text inputs — range/number/etc
+  // don't capture keystrokes and we want the hotkey to still work while
+  // the player happens to have a slider focused.
+  const isTextInput = (el) => {
+    if (!el) return false;
+    if (el.isContentEditable) return true;
+    if (el.tagName === "TEXTAREA") return true;
+    if (el.tagName === "INPUT") {
+      const t = (el.type || "text").toLowerCase();
+      return t === "text" || t === "search" || t === "email" || t === "url"
+          || t === "password" || t === "tel" || t === "number";
+    }
+    return false;
+  };
   const onKey = (e) => {
     if (e.code !== hotkey) return;
-    const t = e.target;
-    if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+    if (isTextInput(e.target)) return;
+    console.log(`[muon-original] V pressed, current mode=${params.mode}`);
     setMode(params.mode === "off" ? "background" : "off");
   };
-  window.addEventListener("keydown", onKey);
+  window.addEventListener("keydown", onKey, true);   // capture phase
 
   // === Per-frame audio + uniform update =============================
   // Same body as Muon's render() minus the composer.render() — host

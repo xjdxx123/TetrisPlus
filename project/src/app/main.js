@@ -4764,9 +4764,13 @@ function animate(dt, envTime) {
   // and freeze the page. Log + isolate so the game keeps running.
   try { spiralWave.tick(); }
   catch (err) { console.error('[spiralWave.tick] error, disabling overlay:', err); spiralWave.setVisible(false); }
-  // Spiral now coexists with nebula in the same scene at different depths
-  // (spiral at z=-800 default, nebula somewhere closer). No need to hide
-  // nebula or drop the game canvas opacity any more.
+  // Auto-hide nebula when spiral is the background — they're both
+  // "skybox" layers and overlapping reads as visual noise. User feedback:
+  // turning nebula off or making it black gives the cleanest spiral
+  // experience.
+  if (nebula && nebula.mesh) {
+    nebula.mesh.visible = spiralWave.getMode ? spiralWave.getMode() === 'off' : true;
+  }
   playbackProgress.update();
   // Settings panel — drive the open/close animation tween and keep the
   // gear-button chrome in sync with the panel's visibility (the panel's
