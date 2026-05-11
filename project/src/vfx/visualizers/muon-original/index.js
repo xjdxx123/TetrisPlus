@@ -68,6 +68,9 @@ export function createMuonOriginal({
   visibleByDefault = false,
 } = {}) {
   // === Canvas + DOM mount ============================================
+  // Mount inside #app (same stacking context as the game canvas) so z-index
+  // ordering is direct: spiral z=1 sits below game z=2 in background mode,
+  // both at z=41 and z=2 means spiral covers in theater mode.
   const canvas = document.createElement("canvas");
   canvas.id = "muon-original-canvas";
   canvas.className = "webgl";   // matches Muon's HTML class
@@ -77,11 +80,11 @@ export function createMuonOriginal({
     width: "100%",
     height: "100%",
     pointerEvents: "none",
-    zIndex: "41",      // above spiral (40), below tp-panel chrome (50+)
+    zIndex: "41",
     display: "none",
     background: "#000000",
   });
-  document.body.appendChild(canvas);
+  (document.getElementById("app") || document.body).appendChild(canvas);
 
   // === Muon's params (verbatim from original src/index.js) ===========
   const params = {
