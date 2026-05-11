@@ -110,6 +110,11 @@ export function createMuonOriginal({
     // FeatureBus (6-band + AGC + onset detection). FB only takes effect if
     // a `feature` argument was passed to createMuonOriginal.
     useFeatureBus: false,
+    // Display mode — set via setMode(). 'off' hides the canvas entirely;
+    // 'background' renders behind the game (z-index below game canvas);
+    // 'theater' renders in front and suppresses the game render so the
+    // GPU isn't doing two heavy 3D pipelines at once.
+    mode: "off",
   };
 
   let sineCounter = 0;
@@ -142,7 +147,7 @@ export function createMuonOriginal({
   let particles2 = Objects.initParticles(params.maxPoints);
 
   const camera = Objects.initCamera();
-  Objects.initOrbitControls(camera, canvas);
+  const controls = Objects.initOrbitControls(camera, canvas);
 
   const renderer = Objects.initRenderer(canvas);
   const composer = Objects.initComposer(renderer, scene, camera);
@@ -232,32 +237,68 @@ export function createMuonOriginal({
   colorFolder.add(params.monoColor, "s", 0, 1,  0.01).name("mono.s");
   colorFolder.add(params.monoColor, "v", 0, 1,  0.01).name("mono.v");
 
-  // === Visibility / hotkey ==========================================
+  // === Mode / visibility / hotkey ===================================
   // lil-gui stays hidden by default — the Settings panel ("Spiral" tab)
   // is the user-facing surface now. Dev shortcut for the full param
   // surface: `__spiralWave.gui.show()` from the console.
   //
   // cameraIntro is the cinematic explosion — camera scales from 0, params
   // tween through 0→1080→7920→5400 over 4s. We only run it ONCE per page
-  // load: subsequent V toggles just show/hide the canvas without restarting
+  // load: subsequent mode flips just re-style the canvas without restarting
   // the tween, otherwise it would clobber any user-set Particle count /
-  // Color spectrum / Spacing every time the overlay reopens.
+  // Color spectrum / Spacing.
+  //
+  // Three modes:
+  //   off        — canvas hidden, game renders normally
+  //   background — spiral canvas behind game (z-index 1, game canvas is at
+  //                z-index 2 with alpha:true so transparent areas reveal
+  //                the spiral); pointer events pass through to the game so
+  //                play continues uninterrupted
+  //   theater    — spiral canvas in front (z-index 41), captures pointer
+  //                events for OrbitControls; game render is suppressed by
+  //                main.js so we don't double-pipeline the GPU
   let _introPlayed = false;
-  const setVisible = (v) => {
-    canvas.style.display = v ? "block" : "none";
-    canvas.style.pointerEvents = v ? "auto" : "none";
-    if (v && !_introPlayed) {
+  const MODES = ["off", "background", "theater"];
+
+  const setMode = (mode) => {
+    if (!MODES.includes(mode)) return;
+    params.mode = mode;
+    if (mode === "off") {
+      canvas.style.display = "none";
+      canvas.style.pointerEvents = "none";
+      canvas.style.zIndex = "41";
+      controls.enabled = false;
+    } else if (mode === "background") {
+      canvas.style.display = "block";
+      canvas.style.pointerEvents = "none";
+      canvas.style.zIndex = "1";
+      controls.enabled = false;
+    } else if (mode === "theater") {
+      canvas.style.display = "block";
+      canvas.style.pointerEvents = "auto";
+      canvas.style.zIndex = "41";
+      controls.enabled = true;
+    }
+    if (mode !== "off" && !_introPlayed) {
       _introPlayed = true;
       gsapControls.cameraIntro(camera, params);
     }
   };
-  setVisible(visibleByDefault);
+  setMode(params.mode);
 
+  // Backward-compat shim — older call sites use setVisible/isVisible.
+  // setVisible(true) maps to "theater" (the original full-screen behaviour).
+  const setVisible = (v) => setMode(v ? "theater" : "off");
+  if (visibleByDefault) setMode("theater");
+
+  // V cycles modes: off → background → theater → off. The first non-off
+  // press triggers the cinematic intro.
   const onKey = (e) => {
     if (e.code !== hotkey) return;
     const t = e.target;
     if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
-    setVisible(canvas.style.display === "none");
+    const i = MODES.indexOf(params.mode);
+    setMode(MODES[(i + 1) % MODES.length]);
   };
   window.addEventListener("keydown", onKey);
 
@@ -386,7 +427,10 @@ export function createMuonOriginal({
     tick,
     dispose,
     setVisible,
-    isVisible: () => canvas.style.display !== "none",
+    setMode,
+    getMode: () => params.mode,
+    isVisible:    () => params.mode !== "off",
+    isInFront:    () => params.mode === "theater", // gates main game render
     canvas,
     params,
     gui,            // exposed for dev: __spiralWave.gui.show()

@@ -314,6 +314,18 @@ export function createSettingsPanel(cfg) {
       return t;
     };
 
+    // --- Mode ------------------------------------------------------------
+    visualizerPane.appendChild(sectionLabel('Mode'));
+    if (v.mode) {
+      const modeCtl = makeSegmentedRow({
+        label: 'Display',
+        choices: v.mode.choices,
+        value: v.mode.value,
+        onChange: v.mode.onChange,
+      });
+      visualizerPane.appendChild(modeCtl.row);
+    }
+
     // --- Audio source ----------------------------------------------------
     visualizerPane.appendChild(sectionLabel('Audio source'));
     addToggle({

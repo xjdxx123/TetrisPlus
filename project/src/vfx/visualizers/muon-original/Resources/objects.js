@@ -33,6 +33,8 @@ export const Objects = {
     const controls = new OrbitControls(camera, canvas);
     controls.enableDamping = true;
     controls.enablePan = false;
+    return controls;   // patched: original didn't return; we need the
+                       // reference to disable controls in background mode
   },
   initRenderer: (canvas) => {
     const renderer = new THREE.WebGLRenderer({

@@ -5282,11 +5282,13 @@ function animate(dt, envTime) {
   camera.position.add(shake.offset).add(punchZoom.offset);
   // Stage 2 — render the bloom layer first (masked render → blur). The
   // result is sampled by the combine pass inside the main composer below.
-  // While the spiral overlay is in front (V mode), skip the game's heavy
-  // post-processed render — two 3D pipelines competing for one GPU pushes
-  // integrated GPUs past the frame budget. Game logic still ticks; only the
-  // GPU work is suppressed.
-  if (!spiralWave.isVisible()) {
+  // Skip the game's heavy post-processed render only when the spiral
+  // overlay is "theater" mode (in front + opaque). In "background" mode
+  // the spiral sits BEHIND the game canvas so both must render. Two 3D
+  // pipelines on one GPU is fine for the bg + game combo on most hardware;
+  // the freezes we hit earlier were specifically theater-mode bloom +
+  // afterimage on top of game's selectiveBloom.
+  if (!spiralWave.isInFront()) {
     selectiveBloom.renderBloomLayer();
     composer.render();
     cssRenderer.render(cssScene, camera);
@@ -5704,10 +5706,29 @@ try {
     hotkey: 'KeyV',
     visibleByDefault: false,
   });
+  // Hydrate persisted Spiral params (set in the Settings → Spiral tab).
+  // Mutates in place so the references already captured by lil-gui and
+  // muon-original's params stay valid. Mode applied via setMode so canvas
+  // CSS / OrbitControls follow.
+  const _persistedVis = (_persistedSettings && _persistedSettings.visualizer) || {};
+  for (const [k, v] of Object.entries(_persistedVis)) {
+    if (k === 'monoColor' && v && typeof v === 'object') {
+      Object.assign(spiralWave.params.monoColor, v);
+    } else if (k === 'mode') {
+      // applied below via setMode
+    } else if (v !== undefined) {
+      spiralWave.params[k] = v;
+    }
+  }
+  if (typeof _persistedVis.mode === 'string' && spiralWave.setMode) {
+    spiralWave.setMode(_persistedVis.mode);
+  }
 } catch (err) {
   console.error('[spiralVisualizer] failed to initialise — stubbing out:', err);
   spiralWave = {
-    tick() {}, setVisible() {}, isVisible() { return false; }, dispose() {}, params: {},
+    tick() {}, setVisible() {}, setMode() {}, getMode: () => 'off',
+    isVisible() { return false; }, isInFront() { return false; },
+    dispose() {}, params: { monoColor: {} },
   };
 }
 
@@ -5867,6 +5888,29 @@ function _persistSettingsSnapshot() {
       ...(_persistedSettings.panel || { x: 0, y: 0, z: 6, yaw: 0, pitch: 0 }),
       hidden: settingsPanel ? !settingsPanel.isOpen : false,
     },
+    // Spiral visualizer — only the player-facing knobs that the Settings
+    // panel exposes. Re-applied at boot via the Object.assign hydration
+    // block right after spiralWave is created.
+    visualizer: {
+      mode:                spiralWave.getMode ? spiralWave.getMode() : 'off',
+      useFeatureBus:       !!spiralWave.params.useFeatureBus,
+      maxPoints:           spiralWave.params.maxPoints,
+      colorSpectrum:       spiralWave.params.colorSpectrum,
+      aperture:            spiralWave.params.aperture,
+      spacing:             spiralWave.params.spacing,
+      particleMirror:      spiralWave.params.particleMirror,
+      visualizationPreset: spiralWave.params.visualizationPreset,
+      divisions:           spiralWave.params.divisions,
+      lifespan:            spiralWave.params.lifespan,
+      noiseScale:          spiralWave.params.noiseScale,
+      syncColors:          spiralWave.params.syncColors,
+      enableMonoColor:     !!spiralWave.params.enableMonoColor,
+      monoColor:           {
+        h: spiralWave.params.monoColor && spiralWave.params.monoColor.h,
+        s: spiralWave.params.monoColor && spiralWave.params.monoColor.s,
+        v: spiralWave.params.monoColor && spiralWave.params.monoColor.v,
+      },
+    },
   });
 }
 
@@ -5997,61 +6041,71 @@ const settingsPanel = createSettingsPanel({
 
   // Spiral visualizer (muon-original) — only the player-facing knobs.
   // The full param surface stays available via the legacy lil-gui panel
-  // for dev tuning. localStorage persistence for useFeatureBus is handled
-  // inside muon-original itself; the rest are session-only edits.
+  // for dev tuning (`__spiralWave.gui.show()`). Each onChange persists
+  // via _persistSettingsSnapshot so the chosen mode + tuning survive
+  // page reloads.
   visualizer: {
+    mode: {
+      value: spiralWave.getMode ? spiralWave.getMode() : 'off',
+      choices: [
+        { value: 'off',        label: 'Off' },
+        { value: 'background', label: 'BG'  },
+        { value: 'theater',    label: 'Theater' },
+      ],
+      onChange: (v) => { spiralWave.setMode(v); _persistSettingsSnapshot(); },
+    },
     useFeatureBus: {
       value: !!spiralWave.params.useFeatureBus,
-      onChange: (v) => { spiralWave.params.useFeatureBus = v; },
+      onChange: (v) => { spiralWave.params.useFeatureBus = v; _persistSettingsSnapshot(); },
     },
     maxPoints: {
       value: spiralWave.params.maxPoints || 5400,
-      onChange: (v) => { spiralWave.params.maxPoints = v; },
+      onChange: (v) => { spiralWave.params.maxPoints = v; _persistSettingsSnapshot(); },
     },
     colorSpectrum: {
       value: spiralWave.params.colorSpectrum ?? 18,
-      onChange: (v) => { spiralWave.params.colorSpectrum = v; },
+      onChange: (v) => { spiralWave.params.colorSpectrum = v; _persistSettingsSnapshot(); },
     },
     aperture: {
       value: spiralWave.params.aperture ?? 3,
-      onChange: (v) => { spiralWave.params.aperture = v; },
+      onChange: (v) => { spiralWave.params.aperture = v; _persistSettingsSnapshot(); },
     },
     spacing: {
       value: spiralWave.params.spacing ?? 1,
-      onChange: (v) => { spiralWave.params.spacing = v; },
+      onChange: (v) => { spiralWave.params.spacing = v; _persistSettingsSnapshot(); },
     },
     particleMirror: {
       value: spiralWave.params.particleMirror !== false,
-      onChange: (v) => { spiralWave.params.particleMirror = v; },
+      onChange: (v) => { spiralWave.params.particleMirror = v; _persistSettingsSnapshot(); },
     },
     visualizationPreset: {
       value: spiralWave.params.visualizationPreset !== false,
-      onChange: (v) => { spiralWave.params.visualizationPreset = v; },
+      onChange: (v) => { spiralWave.params.visualizationPreset = v; _persistSettingsSnapshot(); },
     },
     divisions: {
       value: spiralWave.params.divisions ?? 21,
-      onChange: (v) => { spiralWave.params.divisions = v; },
+      onChange: (v) => { spiralWave.params.divisions = v; _persistSettingsSnapshot(); },
     },
     lifespan: {
       value: spiralWave.params.lifespan ?? 200,
-      onChange: (v) => { spiralWave.params.lifespan = v; },
+      onChange: (v) => { spiralWave.params.lifespan = v; _persistSettingsSnapshot(); },
     },
     noiseScale: {
       value: spiralWave.params.noiseScale ?? 0.3,
-      onChange: (v) => { spiralWave.params.noiseScale = v; },
+      onChange: (v) => { spiralWave.params.noiseScale = v; _persistSettingsSnapshot(); },
     },
     syncColors: {
       value: spiralWave.params.syncColors !== false,
-      onChange: (v) => { spiralWave.params.syncColors = v; },
+      onChange: (v) => { spiralWave.params.syncColors = v; _persistSettingsSnapshot(); },
     },
     enableMonoColor: {
       value: !!spiralWave.params.enableMonoColor,
-      onChange: (v) => { spiralWave.params.enableMonoColor = v; },
+      onChange: (v) => { spiralWave.params.enableMonoColor = v; _persistSettingsSnapshot(); },
     },
     monoColor: {
       h: {
         value: (spiralWave.params.monoColor && spiralWave.params.monoColor.h) ?? 350,
-        onChange: (v) => { spiralWave.params.monoColor.h = v; },
+        onChange: (v) => { spiralWave.params.monoColor.h = v; _persistSettingsSnapshot(); },
       },
     },
   },
