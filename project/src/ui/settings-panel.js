@@ -354,6 +354,24 @@ export function createSettingsPanel(cfg) {
       });
     }
 
+    // --- Beat sync -------------------------------------------------------
+    // BGM-only feature. External tab capture path doesn't go through
+    // beat-grid (we can't analyse other-tab audio offline), so the
+    // anticipation gate inside muon-original auto-zeros there.
+    if (v.enableBeatAntic && v.beatAnticBoost) {
+      visualizerPane.appendChild(sectionLabel('Beat sync (BGM only)'));
+      addToggle({
+        label: 'Anticipate beats',
+        value: v.enableBeatAntic.value,
+        onChange: v.enableBeatAntic.onChange,
+      });
+      addSlider({
+        label: 'Strength', min: 0, max: 1, step: 0.05,
+        value: v.beatAnticBoost.value, onChange: v.beatAnticBoost.onChange,
+        format: (n) => `${(n * 100).toFixed(0)}%`,
+      });
+    }
+
     // --- Audio source ----------------------------------------------------
     visualizerPane.appendChild(sectionLabel('Audio source'));
     addToggle({

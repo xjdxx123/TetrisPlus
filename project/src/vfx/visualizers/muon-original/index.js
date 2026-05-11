@@ -67,7 +67,7 @@ export function createMuonOriginal({
   audio,
   scene,                  // REQUIRED — game scene the spiral group attaches to
   feature = null,
-  beatGrid = null,        // eslint-disable-line no-unused-vars
+  beatGrid = null,
   hotkey = "KeyV",
   visibleByDefault = false,
 } = {}) {
@@ -112,6 +112,16 @@ export function createMuonOriginal({
     // L=0 = black = additive no-op = invisible). Same multiplier applies
     // to dust so they stay matched.
     opacity: 1.0,
+    // Beat anticipation — pre-beat lean-in. beatGrid.anticipation ramps
+    // 0→1 over the 250ms before each detected kick (offline BPM analysis
+    // of the current BGM track via web-audio-beat-detector). We multiply
+    // beatScaler + opacity by (1 + boost*antic) so the spiral visually
+    // "inhales" before each beat — the signature Tetris-Effect-style
+    // predictive feel. Auto-disabled when external tab capture is active
+    // (beat-grid is BGM-only).
+    enableBeatAntic: true,
+    beatAnticBoost:  0.35,        // beatScaler boost peak
+    beatAnticGlow:   0.15,        // opacity boost peak (lighter touch)
     // 'off' = group detached from scene; 'background' = attached.
     mode: "off",
   };
@@ -368,6 +378,17 @@ export function createMuonOriginal({
       ? audioFeats.exponentialTrebleScaler
       : audioFeats.exponentialBassScaler;
 
+    // Beat anticipation — pre-beat lean-in. 0..1 ramp over the 250ms
+    // window before each kick, peaks at the beat. Only meaningful when
+    // the BGM analyser drives the spiral; external tab capture has no
+    // matching beat-grid so we zero it out then.
+    const onBgm = !_externalAnalyser;
+    const antic = (beatGrid && params.enableBeatAntic && onBgm)
+      ? Math.max(0, Math.min(1, beatGrid.anticipation || 0))
+      : 0;
+    const anticBoostScaler  = 1 + (params.beatAnticBoost ?? 0) * antic;
+    const anticOpacityBoost = 1 + (params.beatAnticGlow  ?? 0) * antic;
+
     if (coreScaler > 1) {
       sineCounter += coreScaler * 0.5 * timeDelta;
     } else {
@@ -404,8 +425,12 @@ export function createMuonOriginal({
       sineCounter,
       dataArray,
       params,
-      exponentialBassScaler,
-      exponentialTrebleScaler,
+      // Bake anticipation into the bass/treble inputs — sineWavePropagation
+      // computes beatScaler from these internally, so multiplying here
+      // gives the same "wave amplitude rises pre-beat" outcome without
+      // forking the vendored function.
+      exponentialBassScaler * anticBoostScaler,
+      exponentialTrebleScaler * anticBoostScaler,
       prevParams,
     );
 
@@ -419,11 +444,10 @@ export function createMuonOriginal({
     const hue = CoreControls.hueControl((_delta * timeDelta) / 2);
     // Bright "flash" events (Tetris, Perfect Clear) want headroom beyond
     // HSL's L=1 saturation. Set the base colour at Muon's L=0.5 and then
-    // RGB-multiply by opacity × pulse — values > 1 push the additive
-    // contribution into HDR, which the game composer's tone mapping
-    // compresses back into a visible "flash". Without this, anything
-    // above ~2× pulse looked the same as 2×.
-    const _opacityLive = (params.opacity ?? 1) * _pulseRef.value;
+    // RGB-multiply by opacity × pulse × beat-anticipation glow — values
+    // > 1 push the additive contribution into HDR, which the game
+    // composer's tone mapping compresses back into a visible "flash".
+    const _opacityLive = (params.opacity ?? 1) * _pulseRef.value * anticOpacityBoost;
     particles.material.uniforms.color.value.setHSL(hue, 0.7, 0.5).multiplyScalar(_opacityLive);
     particles2.material.uniforms.color.value.setHSL(hue, 0.7, 0.5).multiplyScalar(_opacityLive);
     if (params.syncColors) {

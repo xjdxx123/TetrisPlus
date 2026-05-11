@@ -6028,6 +6028,8 @@ function _persistSettingsSnapshot() {
       bgZ:                 spiralWave.params.bgZ,
       bgScale:             spiralWave.params.bgScale,
       opacity:             spiralWave.params.opacity,
+      enableBeatAntic:     spiralWave.params.enableBeatAntic !== false,
+      beatAnticBoost:      spiralWave.params.beatAnticBoost,
       useFeatureBus:       !!spiralWave.params.useFeatureBus,
       maxPoints:           spiralWave.params.maxPoints,
       colorSpectrum:       spiralWave.params.colorSpectrum,
@@ -6207,6 +6209,20 @@ const settingsPanel = createSettingsPanel({
     opacity: {
       value: spiralWave.params.opacity ?? 1.0,
       onChange: (v) => { spiralWave.params.opacity = v; _persistSettingsSnapshot(); },
+    },
+    enableBeatAntic: {
+      value: spiralWave.params.enableBeatAntic !== false,
+      onChange: (v) => { spiralWave.params.enableBeatAntic = v; _persistSettingsSnapshot(); },
+    },
+    beatAnticBoost: {
+      value: spiralWave.params.beatAnticBoost ?? 0.35,
+      onChange: (v) => {
+        spiralWave.params.beatAnticBoost = v;
+        // Track the glow knob proportionally — small but matched. Avoids
+        // exposing both as separate sliders for first cut.
+        spiralWave.params.beatAnticGlow = v * 0.4;
+        _persistSettingsSnapshot();
+      },
     },
     useFeatureBus: {
       value: !!spiralWave.params.useFeatureBus,
