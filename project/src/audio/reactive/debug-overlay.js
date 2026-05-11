@@ -19,6 +19,12 @@ const SPECTRUM_W    = 232;    // panel-body inner width
 const SPECTRUM_H    = 64;
 const SMOOTHING     = 0.55;   // per-bar exponential smoothing (0 = no, 1 = freeze)
 
+// Beat-lab strip chart — 3-second rolling history of anticipation + the
+// two beat-related events so the user can visually align them.
+const STRIP_W       = SPECTRUM_W;
+const STRIP_H       = 40;
+const STRIP_SAMPLES = 180;    // ≈ 3 seconds at 60 fps
+
 export function createFeatureDebugOverlay({
   feature,
   audio = null,
@@ -88,6 +94,50 @@ export function createFeatureDebugOverlay({
   sourceLine.style.cssText = 'font-family:"SF Mono",ui-monospace,Menlo,Consolas,monospace;font-size:9.5px;letter-spacing:0.05em;color:var(--muted,#8b93ad);margin-bottom:6px;';
   sourceLine.textContent = 'source: —';
   body.appendChild(sourceLine);
+
+  // === Beat lab — anticipation curve + beat/onset markers ==============
+  // Time-axis strip chart so the user can verify the spiral's
+  // anticipation is actually leading the audio kick. The cyan area is
+  // beatGrid.anticipation (0..1 in the 250ms before each predicted beat).
+  // White ticks: beat-grid's predicted beat moment (anticipation peak
+  // collapsed back to 0). Red ticks: FeatureBus's audio-detected kick
+  // onset. When BPM is well-calibrated, white and red ticks coincide —
+  // and you should see the cyan ramp visibly *precede* both.
+  const beatLabLabel = document.createElement('div');
+  beatLabLabel.className = 'tp-panel__section-label';
+  beatLabLabel.textContent = 'Beat lab';
+  body.appendChild(beatLabLabel);
+
+  const stripCanvas = document.createElement('canvas');
+  stripCanvas.width  = STRIP_W * dpr;
+  stripCanvas.height = STRIP_H * dpr;
+  stripCanvas.style.width  = `${STRIP_W}px`;
+  stripCanvas.style.height = `${STRIP_H}px`;
+  stripCanvas.style.display = 'block';
+  stripCanvas.style.borderRadius = '4px';
+  stripCanvas.style.background = 'rgba(255,255,255,0.03)';
+  stripCanvas.style.marginBottom = '4px';
+  body.appendChild(stripCanvas);
+  const stripCtx = stripCanvas.getContext('2d');
+  stripCtx.scale(dpr, dpr);
+
+  const stripLegend = document.createElement('div');
+  stripLegend.className = 'tp-legend';
+  stripLegend.style.marginBottom = '6px';
+  stripLegend.innerHTML = `
+    <span><span class="tp-legend__swatch" style="background:rgba(108,240,255,0.42);"></span>antic</span>
+    <span><span class="tp-legend__swatch" style="background:rgba(255,255,255,0.9);"></span>beat</span>
+    <span><span class="tp-legend__swatch" style="background:rgba(255,92,138,0.9);"></span>kick</span>
+  `;
+  body.appendChild(stripLegend);
+
+  // Ring buffers: anticipation samples, beat ticks, kick ticks.
+  const stripAntic = new Float32Array(STRIP_SAMPLES);
+  const stripBeat  = new Uint8Array(STRIP_SAMPLES);
+  const stripKick  = new Uint8Array(STRIP_SAMPLES);
+  let stripHead = 0;
+  let prevAntic = 0;
+  let lastKickFireAtSec = -1;
 
   // Per-bin state — recomputed when analyser bin-count changes.
   let dataArray = null;
@@ -216,6 +266,73 @@ export function createFeatureDebugOverlay({
     return audio && audio.analyser ? audio.analyser : null;
   }
 
+  function renderBeatLab() {
+    // Sample current state and detect events vs last frame.
+    const antic = (beatGrid && Number.isFinite(beatGrid.anticipation))
+      ? Math.max(0, Math.min(1, beatGrid.anticipation))
+      : 0;
+    // Beat moment = anticipation peaked then dropped (it ramps 0→1 over
+    // 250ms then resets to 0 at the predicted kick). Edge-detect the
+    // drop with a high threshold to avoid noise.
+    const isBeat = (prevAntic >= 0.9 && antic < prevAntic - 0.2);
+    // Kick onset edge — telemetry's lastFireAtSec advances when a new
+    // kick fires.
+    let isKick = false;
+    if (feature.onsets) {
+      const t = feature.onsets.telemetry('kick').lastFireAtSec;
+      if (t > lastKickFireAtSec) { isKick = true; lastKickFireAtSec = t; }
+    }
+
+    stripAntic[stripHead] = antic;
+    stripBeat[stripHead]  = isBeat ? 1 : 0;
+    stripKick[stripHead]  = isKick ? 1 : 0;
+    stripHead = (stripHead + 1) % STRIP_SAMPLES;
+    prevAntic = antic;
+
+    stripCtx.clearRect(0, 0, STRIP_W, STRIP_H);
+
+    // Anticipation area fill (oldest sample at left edge, newest at right).
+    stripCtx.beginPath();
+    stripCtx.moveTo(0, STRIP_H);
+    for (let i = 0; i < STRIP_SAMPLES; i++) {
+      const idx = (stripHead + i) % STRIP_SAMPLES;
+      const x = (i / (STRIP_SAMPLES - 1)) * STRIP_W;
+      const y = STRIP_H - stripAntic[idx] * STRIP_H;
+      stripCtx.lineTo(x, y);
+    }
+    stripCtx.lineTo(STRIP_W, STRIP_H);
+    stripCtx.closePath();
+    stripCtx.fillStyle = 'rgba(108,240,255,0.40)';
+    stripCtx.fill();
+    stripCtx.strokeStyle = 'rgba(108,240,255,0.85)';
+    stripCtx.lineWidth = 1;
+    stripCtx.stroke();
+
+    // Beat markers (white verticals).
+    stripCtx.fillStyle = 'rgba(255,255,255,0.85)';
+    for (let i = 0; i < STRIP_SAMPLES; i++) {
+      const idx = (stripHead + i) % STRIP_SAMPLES;
+      if (stripBeat[idx]) {
+        const x = (i / (STRIP_SAMPLES - 1)) * STRIP_W;
+        stripCtx.fillRect(x - 0.5, 0, 1.5, STRIP_H);
+      }
+    }
+
+    // Kick onsets (red verticals, wider for visibility).
+    stripCtx.fillStyle = 'rgba(255,92,138,0.92)';
+    for (let i = 0; i < STRIP_SAMPLES; i++) {
+      const idx = (stripHead + i) % STRIP_SAMPLES;
+      if (stripKick[idx]) {
+        const x = (i / (STRIP_SAMPLES - 1)) * STRIP_W;
+        stripCtx.fillRect(x - 1, 0, 2.5, STRIP_H);
+      }
+    }
+
+    // "Now" indicator on the right edge.
+    stripCtx.fillStyle = 'rgba(255,255,255,0.25)';
+    stripCtx.fillRect(STRIP_W - 1, 0, 1, STRIP_H);
+  }
+
   function renderSpectrum(analyser) {
     if (!analyser) return;
     const bins = analyser.frequencyBinCount;
@@ -282,6 +399,10 @@ export function createFeatureDebugOverlay({
         ctx2d.clearRect(0, 0, SPECTRUM_W, SPECTRUM_H);
       }
       sourceLine.textContent = `source: ${sourceLabel}`;
+
+      // Beat lab strip — always render (the time-history is itself
+      // informative even before FB binds).
+      renderBeatLab();
 
       if (!ready) return;
       // Beat-grid status.
