@@ -32,6 +32,7 @@ import { createSelectiveBloom } from '../rendering/post/selective-bloom.js';
 import { createAfterimagePass } from '../rendering/post/afterimage.js';
 import { createChromaticPass } from '../rendering/post/chromatic.js';
 import { createFeatureBus } from '../audio/reactive/feature-bus.js';
+import { createLiveBeatTracker } from '../audio/reactive/live-beat-tracker.js';
 import { createFeatureDebugOverlay } from '../audio/reactive/debug-overlay.js';
 import { createBeatGrid } from '../audio/reactive/beat-grid.js';
 import { createBpmCache } from '../audio/reactive/bpm-cache.js';
@@ -5633,7 +5634,23 @@ const bgmPlaylist = createBgmPlaylist({
 // is a safe no-op (sampler returns null on the first frames).
 // Bindings is the SOLE place an audio stream meets a visual property —
 // no other module may straddle the boundary (plan_particle_2.md §1.5).
-const featureBus = createFeatureBus({ audio });
+// _captureHandle holds the external tab capture (Settings → Spiral). It's
+// referenced by both featureBus's getAnalyser thunk below and by the
+// featureDebug closure further down. Hoist the `let` here so both closures
+// capture a real binding before the actual assignment in the toggle handler.
+let _captureHandle = null;
+
+// FeatureBus reads from whichever analyser is currently driving the
+// spiral — BGM by default, the external tab analyser while capture is
+// active. Onset detection / bands / kicks all follow the source.
+const featureBus = createFeatureBus({
+  audio,
+  getAnalyser: () => (_captureHandle && _captureHandle.analyser) || (audio && audio.analyser) || null,
+});
+// Real-time beat tracker built on FB onsets — works for any source
+// (replaces the offline beat-grid for the spiral, which doesn't have a
+// pre-decoded AudioBuffer when external capture is the source).
+const liveBeat = createLiveBeatTracker({ feature: featureBus });
 
 // Stage 5b — beat grid (anticipatory beat scheduler).
 // The grid uses the BGM element's currentTime as its source of truth (NOT
@@ -5694,16 +5711,12 @@ const bindings = createBindings({
 // Live FeatureBus inspector — F key toggles. Visible by default during the
 // Stage 5 verification window; comment out `visibleByDefault: true` once the
 // audio→visual loop has been confirmed working.
-// _captureHandle holds the external tab capture (Settings → Spiral). It's
-// referenced by featureDebug's getAnalyser closure below; the actual
-// assignment happens further down in the toggle handler. Hoist the let
-// here so the closure captures a real binding.
-let _captureHandle = null;
-
 const featureDebug = createFeatureDebugOverlay({
   feature: featureBus,
   audio,
-  beatGrid,
+  // Live tracker for the Beat-grid section — works for both BGM and
+  // external tab capture (the offline beatGrid only knows BGM).
+  beatGrid: liveBeat,
   hotkey: 'KeyF',
   visibleByDefault: true,
   // Source the active analyser — falls back to BGM when no external capture.
@@ -5719,7 +5732,9 @@ try {
     audio,
     scene,                 // host scene — spiral particles attach as a child group
     feature: featureBus,   // optional — enables in-panel "Use FeatureBus" toggle
-    beatGrid,              // for future beat-anticipation hook
+    // Live beat tracker (FB-onset-driven) rather than the offline grid.
+    // Works for both BGM and external tab capture.
+    beatGrid: liveBeat,
     hotkey: 'KeyV',
     visibleByDefault: false,
   });

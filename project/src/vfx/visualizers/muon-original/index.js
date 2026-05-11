@@ -379,11 +379,10 @@ export function createMuonOriginal({
       : audioFeats.exponentialBassScaler;
 
     // Beat anticipation — pre-beat lean-in. 0..1 ramp over the 250ms
-    // window before each kick, peaks at the beat. Only meaningful when
-    // the BGM analyser drives the spiral; external tab capture has no
-    // matching beat-grid so we zero it out then.
-    const onBgm = !_externalAnalyser;
-    const antic = (beatGrid && params.enableBeatAntic && onBgm)
+    // window before each kick, peaks at the beat. Now backed by a live
+    // beat tracker that reads FB onsets, so it works regardless of audio
+    // source (BGM or external tab capture).
+    const antic = (beatGrid && params.enableBeatAntic)
       ? Math.max(0, Math.min(1, beatGrid.anticipation || 0))
       : 0;
     const anticBoostScaler  = 1 + (params.beatAnticBoost ?? 0) * antic;

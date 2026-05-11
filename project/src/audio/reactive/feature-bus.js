@@ -64,11 +64,16 @@ const ONSET_CHANNELS = {
 };
 export const ONSET_NAMES = Object.freeze(Object.keys(ONSET_CHANNELS));
 
-export function createFeatureBus({ audio } = {}) {
+export function createFeatureBus({ audio, getAnalyser } = {}) {
   // Pass a thunk, not the analyser itself. audio.analyser is null at boot
   // (init() runs only after the first user gesture) and the sampler would
   // otherwise capture the stale null forever.
-  const sampler = createAnalyserSampler({ getAnalyser: () => audio.analyser });
+  //
+  // The optional getAnalyser override lets the host swap analyser sources
+  // at runtime (BGM ↔ external tab capture). When omitted we read the BGM
+  // analyser off the audio singleton, preserving original behaviour.
+  const _getAnalyser = getAnalyser || (() => audio.analyser);
+  const sampler = createAnalyserSampler({ getAnalyser: _getAnalyser });
   const bands = createBands();
 
   // Per-band stateful processors.
@@ -156,8 +161,9 @@ export function createFeatureBus({ audio } = {}) {
 
   function tryBind() {
     if (bound) return true;
-    if (!audio.analyser || !audio.sampleRate) return false;
-    bands.bind(audio.analyser.fftSize, audio.sampleRate);
+    const a = _getAnalyser();
+    if (!a || !audio.sampleRate) return false;
+    bands.bind(a.fftSize, audio.sampleRate);
     bound = true;
     return true;
   }

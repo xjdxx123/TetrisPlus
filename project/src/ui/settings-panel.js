@@ -355,11 +355,11 @@ export function createSettingsPanel(cfg) {
     }
 
     // --- Beat sync -------------------------------------------------------
-    // BGM-only feature. External tab capture path doesn't go through
-    // beat-grid (we can't analyse other-tab audio offline), so the
-    // anticipation gate inside muon-original auto-zeros there.
+    // Live FB-onset-driven tracker, so this works for BGM AND external
+    // tab capture. Needs ~3 detected kicks (a couple of seconds) before
+    // the BPM estimate stabilises.
     if (v.enableBeatAntic && v.beatAnticBoost) {
-      visualizerPane.appendChild(sectionLabel('Beat sync (BGM only)'));
+      visualizerPane.appendChild(sectionLabel('Beat sync'));
       addToggle({
         label: 'Anticipate beats',
         value: v.enableBeatAntic.value,
