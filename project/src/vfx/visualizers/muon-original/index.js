@@ -75,9 +75,13 @@ export function createMuonOriginal({
   }
 
   // === Muon's params (verbatim from original src/index.js) + our extras
+  // maxPoints / colorSpectrum start at Muon's *post-intro* values
+  // (paramsResetValues in GSAP/params.js) rather than the pre-intro
+  // zeros — we dropped the cameraIntro tween that used to ramp them up
+  // because it would clobber a shared game camera.
   const params = {
-    maxPoints: 0,
-    colorSpectrum: 3,
+    maxPoints: 5400,
+    colorSpectrum: 18,
     aperture: 3,
     sineCounterMultiplier: 1,
     idleMultiplier: 0.27,
