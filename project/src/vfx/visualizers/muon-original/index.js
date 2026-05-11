@@ -203,15 +203,30 @@ export function createMuonOriginal({
   const clock = new THREE.Clock();
 
   // === Wavesurfer mock (analyser bridge) ============================
+  // The "active" analyser is normally the project's BGM analyser
+  // (audio.analyser) but can be overridden via setExternalAnalyser() for
+  // external tab capture (Settings → Spiral → Capture browser tab). When
+  // override is set we ignore the BGM one entirely; clearing the override
+  // (setExternalAnalyser(null)) falls back transparently.
+  let _externalAnalyser = null;
+  const activeAnalyser = () => _externalAnalyser ?? audio?.analyser ?? null;
+
+  const setExternalAnalyser = (a) => {
+    _externalAnalyser = a;
+    // Force the FFT buffer to be re-sized on the next tick — the new
+    // analyser may have a different frequencyBinCount.
+    dataArray = new Uint8Array(0);
+  };
+
   const wavesurfer = {
-    isPlaying: () => !!audio?.analyser,
+    isPlaying: () => !!activeAnalyser(),
     backend: {
-      get analyser() { return audio?.analyser ?? null; },
+      get analyser() { return activeAnalyser(); },
     },
   };
 
   const initFftBuffer = () => {
-    const a = wavesurfer.backend.analyser;
+    const a = activeAnalyser();
     if (!a) return null;
     if (dataArray.length !== a.frequencyBinCount) {
       dataArray = new Uint8Array(a.frequencyBinCount);
@@ -444,6 +459,7 @@ export function createMuonOriginal({
     spiralGroup,                       // expose for ad-hoc tuning
     pulseOpacity,                      // gameplay hooks: transient brightness
     triggerMorph,                      // gameplay hooks: force preset switch
+    setExternalAnalyser,               // external tab audio capture override
     params,
     gui,
   };

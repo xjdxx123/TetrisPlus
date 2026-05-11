@@ -45,6 +45,7 @@ import { createEnvReaction } from '../vfx/emitters/env-reaction.js';
 // We bridge our existing AnalyserNode into Muon's render loop so the visual
 // stays byte-equivalent to the reference demo.
 import { createMuonOriginal as createSpiralVisualizer } from '../vfx/visualizers/muon-original/index.js';
+import { startTabAudioCapture, isTabCaptureSupported } from '../audio/external-capture.js';
 
 // Shader sources are imported as raw strings via Vite's ?raw suffix.
 // Files live under src/shaders/. This unlocks shader hot-reload during dev
@@ -5795,6 +5796,60 @@ if (spiralWave.pulseOpacity && spiralWave.triggerMorph) {
   });
 }
 
+// === External tab audio capture =====================================
+// Lets the spiral visualizer dance to audio playing in another browser
+// tab (YouTube, Spotify Web, Bilibili, etc.) instead of TetrisPlus's
+// own BGM. Plumbing here so the Settings → Spiral panel can drive it.
+let _captureHandle = null;
+async function onToggleTabCapture() {
+  // Already capturing? Stop.
+  if (_captureHandle) {
+    _captureHandle.dispose();
+    _captureHandle = null;
+    if (spiralWave.setExternalAnalyser) spiralWave.setExternalAnalyser(null);
+    if (settingsPanel && settingsPanel.refreshAudioInput) {
+      settingsPanel.refreshAudioInput({ capturing: false });
+    }
+    return;
+  }
+  // Start capture. Need an AudioContext to attach the analyser to —
+  // the existing BGM analyser already has one we can reuse.
+  if (!isTabCaptureSupported()) {
+    console.warn('[external-capture] not supported in this browser');
+    return;
+  }
+  const ctx = audio.analyser && audio.analyser.context;
+  if (!ctx) {
+    console.warn('[external-capture] BGM analyser not initialised yet — interact with the page first');
+    return;
+  }
+  try {
+    const cap = await startTabAudioCapture({ audioCtx: ctx });
+    if (spiralWave.setExternalAnalyser) spiralWave.setExternalAnalyser(cap.analyser);
+    cap.onEnded(() => {
+      // Browser-initiated stop (user clicked "Stop sharing" in the
+      // browser indicator). Tear down our side and refresh UI.
+      _captureHandle = null;
+      if (spiralWave.setExternalAnalyser) spiralWave.setExternalAnalyser(null);
+      if (settingsPanel && settingsPanel.refreshAudioInput) {
+        settingsPanel.refreshAudioInput({ capturing: false });
+      }
+    });
+    _captureHandle = cap;
+    if (settingsPanel && settingsPanel.refreshAudioInput) {
+      settingsPanel.refreshAudioInput({ capturing: true });
+    }
+  } catch (err) {
+    console.error('[external-capture] failed:', err);
+    // User-cancelled (browser dialog dismissed) raises a NotAllowedError
+    // we can swallow silently; anything else is worth surfacing.
+    if (err && err.name !== 'NotAllowedError') {
+      // eslint-disable-next-line no-alert
+      alert(err.message || 'Failed to capture tab audio');
+    }
+  }
+}
+
 // Effects toggle panel — E key toggles. Each entry's `onChange` runs once
 // at boot to apply the initial state. The body tint cache lets us cleanly
 // restore the radial gradient when re-enabled.
@@ -6142,6 +6197,11 @@ const settingsPanel = createSettingsPanel({
     useFeatureBus: {
       value: !!spiralWave.params.useFeatureBus,
       onChange: (v) => { spiralWave.params.useFeatureBus = v; _persistSettingsSnapshot(); },
+    },
+    audioInput: {
+      capturing: !!_captureHandle,
+      supported: isTabCaptureSupported(),
+      onToggleCapture: onToggleTabCapture,
     },
     maxPoints: {
       value: spiralWave.params.maxPoints || 5400,

@@ -293,6 +293,9 @@ export function createSettingsPanel(cfg) {
   panes.visualizer = visualizerPane;
   content.appendChild(visualizerPane);
 
+  // Forward-declared so the api object below can wire it.
+  let _refreshAudioInputFn = null;
+
   if (cfg.visualizer) {
     const v = cfg.visualizer;
     const sectionLabel = (text) => {
@@ -358,6 +361,40 @@ export function createSettingsPanel(cfg) {
       value: v.useFeatureBus.value,
       onChange: v.useFeatureBus.onChange,
     });
+
+    // External tab capture — browser tab audio (YouTube, Spotify Web, etc.)
+    // becomes the spiral's input. Button label / status text update via
+    // refreshAudioInput() called from main.js.
+    if (v.audioInput) {
+      const ai = v.audioInput;
+      const captureRow = document.createElement('div');
+      captureRow.style.cssText = 'display:flex; align-items:center; gap:8px; padding:6px 4px 0; flex-wrap:wrap;';
+
+      const captureBtn = document.createElement('button');
+      captureBtn.type = 'button';
+      captureBtn.className = 'tp-button';
+      captureBtn.textContent = ai.capturing ? 'Stop capture' : 'Capture browser tab';
+      if (!ai.supported) {
+        captureBtn.disabled = true;
+        captureBtn.title = 'Not supported in this browser';
+      }
+      captureBtn.addEventListener('click', () => ai.onToggleCapture && ai.onToggleCapture());
+
+      const status = document.createElement('span');
+      status.className = 'tp-status';
+      status.style.cssText = 'font-size:11px;';
+      status.textContent = ai.capturing ? 'Source: external tab' : 'Source: BGM';
+
+      captureRow.appendChild(captureBtn);
+      captureRow.appendChild(status);
+      visualizerPane.appendChild(captureRow);
+
+      // Stash refresh fn for the api object exposed below.
+      _refreshAudioInputFn = ({ capturing }) => {
+        captureBtn.textContent = capturing ? 'Stop capture' : 'Capture browser tab';
+        status.textContent = capturing ? 'Source: external tab' : 'Source: BGM';
+      };
+    }
 
     // --- Geometry --------------------------------------------------------
     visualizerPane.appendChild(sectionLabel('Geometry'));
@@ -843,6 +880,11 @@ export function createSettingsPanel(cfg) {
     /** Sync mute toggle when external code (the 🔊 button) flips it. */
     syncMute(muted) {
       if (muteToggle.input.checked !== muted) muteToggle.input.checked = muted;
+    },
+    /** Update the Spiral tab's "Capture browser tab" button + status text
+     *  after main.js starts or stops external tab capture. */
+    refreshAudioInput(state) {
+      if (_refreshAudioInputFn) _refreshAudioInputFn(state);
     },
     /** Sync mode buttons when console / event-driven changes happen. */
     syncMode(m) { _setModeActive(m); },
