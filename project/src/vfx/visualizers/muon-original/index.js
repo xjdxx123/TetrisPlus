@@ -149,10 +149,21 @@ export function createMuonOriginal({
   particles.renderOrder           = 999;
   particles2.renderOrder          = 999;
   emittedParticleSystem.renderOrder = 999;
-  // depthWrite is on by default for ShaderMaterial — disable so spiral
-  // particles don't stamp their own depth and accidentally hide later
-  // transparent draws.
+  // Depth setup for "spiral behind blocks" occlusion:
+  //   depthTest:true  → spiral fragments fail vs the z-buffer where game
+  //                     blocks (drawn earlier in the opaque pass) sit
+  //                     closer to the camera → blocks visually occlude
+  //                     the spiral instead of the spiral bleeding
+  //                     through them.
+  //   depthWrite:false → spiral particles don't stamp their own depth, so
+  //                      additive blending across particles still stacks
+  //                      properly (multiple particles at the same pixel
+  //                      all pass the same z-test against blocks).
+  // Vendored Muon shipped depthTest:false because they had an empty
+  // scene; with our embedded background that needs occluders, we flip it.
+  materials.particleMaterial.depthTest = true;
   materials.particleMaterial.depthWrite = false;
+  emittedParticleSystem.material.depthTest = true;
   emittedParticleSystem.material.depthWrite = false;
 
   const spiralGroup = new THREE.Group();
