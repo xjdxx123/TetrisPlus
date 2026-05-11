@@ -5758,38 +5758,40 @@ try {
 //
 // HARD_DROP intentionally skipped — fires every piece, too dense.
 if (spiralWave.pulseOpacity && spiralWave.triggerMorph) {
+  // Pulse multipliers are big (2–6×) because RGB-multiply mode pushes
+  // additive contribution into HDR territory; tone mapping in the
+  // composer compresses the visible result back into "this clearly just
+  // flashed" range. Tuned by playtest: smaller values were getting
+  // tonemapped flat.
   bus.on(EVENTS.LINE_CLEAR, ({ simultaneous = 1 } = {}) => {
     if (simultaneous >= 4) {
-      spiralWave.pulseOpacity(1.8, 700);
+      spiralWave.pulseOpacity(5.0, 800);
       spiralWave.triggerMorph();
     } else if (simultaneous >= 3) {
-      spiralWave.pulseOpacity(1.5, 500);
+      spiralWave.pulseOpacity(3.5, 600);
       spiralWave.triggerMorph();
     } else if (simultaneous >= 2) {
-      spiralWave.pulseOpacity(1.3, 400);
+      spiralWave.pulseOpacity(2.5, 450);
     } else {
-      spiralWave.pulseOpacity(1.15, 300);
+      spiralWave.pulseOpacity(1.8, 350);
     }
   });
   bus.on(EVENTS.T_SPIN, () => {
-    spiralWave.pulseOpacity(1.4, 500);
+    spiralWave.pulseOpacity(3.0, 550);
     spiralWave.triggerMorph();
   });
   bus.on(EVENTS.LEVEL_UP, () => {
-    spiralWave.pulseOpacity(1.4, 800);
+    spiralWave.pulseOpacity(3.5, 900);
     spiralWave.triggerMorph();
   });
   bus.on(EVENTS.PERFECT_CLEAR, () => {
-    spiralWave.pulseOpacity(2.0, 1200);
+    spiralWave.pulseOpacity(6.0, 1400);
     spiralWave.triggerMorph();
-    // Second morph 600ms in for a "wow" double-tap on Perfect Clears.
     setTimeout(() => spiralWave.triggerMorph(), 600);
   });
   bus.on(EVENTS.B2B_CHAIN, ({ count = 1 } = {}) => {
-    // Stack the chain count into the pulse — 2-stack subtle, 5+ chain
-    // really brightens.
-    const mult = 1.2 + Math.min(count, 6) * 0.15;
-    spiralWave.pulseOpacity(mult, 500);
+    const mult = 2.0 + Math.min(count, 6) * 0.5;
+    spiralWave.pulseOpacity(mult, 600);
   });
 }
 

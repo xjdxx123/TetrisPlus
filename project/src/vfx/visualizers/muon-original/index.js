@@ -402,18 +402,17 @@ export function createMuonOriginal({
       exponentialBassScaler = maxExponentialScaler;
 
     const hue = CoreControls.hueControl((_delta * timeDelta) / 2);
-    // Final lightness = user opacity × transient pulse multiplier.
-    // Clamped to [0, 1] (HSL spec) — pulse can exceed 1 for a moment and
-    // it just saturates to white, which reads as "flash".
+    // Bright "flash" events (Tetris, Perfect Clear) want headroom beyond
+    // HSL's L=1 saturation. Set the base colour at Muon's L=0.5 and then
+    // RGB-multiply by opacity × pulse — values > 1 push the additive
+    // contribution into HDR, which the game composer's tone mapping
+    // compresses back into a visible "flash". Without this, anything
+    // above ~2× pulse looked the same as 2×.
     const _opacityLive = (params.opacity ?? 1) * _pulseRef.value;
-    const _L = 0.5 * Math.max(0, Math.min(2, _opacityLive));
-    const _Lclamp = Math.min(1, _L);
-    particles.material.uniforms.color.value.setHSL(hue, 0.7, _Lclamp);
-    particles2.material.uniforms.color.value.setHSL(hue, 0.7, _Lclamp);
+    particles.material.uniforms.color.value.setHSL(hue, 0.7, 0.5).multiplyScalar(_opacityLive);
+    particles2.material.uniforms.color.value.setHSL(hue, 0.7, 0.5).multiplyScalar(_opacityLive);
     if (params.syncColors) {
-      emittedParticleSystem.material.uniforms.color.value.setHSL(
-        hue, 0.7, _Lclamp,
-      );
+      emittedParticleSystem.material.uniforms.color.value.setHSL(hue, 0.7, 0.5).multiplyScalar(_opacityLive);
     }
 
     emitParticle(
