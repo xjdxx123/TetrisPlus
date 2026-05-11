@@ -71,7 +71,20 @@
       "Bash(pkill -f \"vite --port 5174\")",
       "Bash(curl -s -o /dev/null -w \"tetris.html=%{http_code}\\\\nmain.js=\" http://127.0.0.1:5174/tetris.html)",
       "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\nboard-view.js=\" http://127.0.0.1:5174/src/app/main.js)",
-      "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" http://127.0.0.1:5174/src/world/board-view.js)"
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" http://127.0.0.1:5174/src/world/board-view.js)",
+      "Bash(xargs -I{} wc -l {})",
+      "Bash(git checkout *)",
+      "Bash(pnpm install *)",
+      "Bash(node --input-type=module -e ' *)",
+      "Bash(git -C /Users/clintongao/coding/TetrisPlus status --short document/plan_gameplay_2.md)",
+      "Bash(git -C /Users/clintongao/coding/TetrisPlus diff document/plan_gameplay_2.md)",
+      "Bash(git branch *)",
+      "Bash(git -C /Users/clintongao/coding/TetrisPlus diff project/src/physics/world.js)",
+      "Bash(git -C /Users/clintongao/coding/TetrisPlus diff project/pnpm-lock.yaml)",
+      "Bash(git -C /Users/clintongao/coding/TetrisPlus add document/plan_gameplay_2.md project/src/gameplay/experimental/README.md project/src/gameplay/rules.js project/src/gameplay/rules.test.js project/src/gameplay/experimental/3d/)",
+      "Bash(git -C /Users/clintongao/coding/TetrisPlus diff --cached --stat)",
+      "Bash(git -C /Users/clintongao/coding/TetrisPlus commit -m ' *)",
+      "Bash(git -C /Users/clintongao/coding/TetrisPlus log --oneline -3)"
     ]
   }
 }

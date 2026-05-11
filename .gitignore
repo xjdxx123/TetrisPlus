@@ -6,3 +6,6 @@ dist/
 
 # graphify knowledge-graph cache (regenerable via /graphify)
 graphify-out/
+
+# Claude Code per-task worktrees
+.claude/worktrees/
