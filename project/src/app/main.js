@@ -40,6 +40,11 @@ import { createBindings } from '../vfx/reactive/bindings.js';
 import { createEffectsPanel } from '../ui/effects-panel.js';
 import { bakeCurlNoise3D } from '../vfx/curl-noise.js';
 import { createEnvReaction } from '../vfx/emitters/env-reaction.js';
+// Music visualizer overlay — V toggles. Vendored verbatim from
+// najafmohammed/muon-music-visualizer (MIT) under ./visualizers/muon-original/.
+// We bridge our existing AnalyserNode into Muon's render loop so the visual
+// stays byte-equivalent to the reference demo.
+import { createMuonOriginal as createSpiralVisualizer } from '../vfx/visualizers/muon-original/index.js';
 
 // Shader sources are imported as raw strings via Vite's ?raw suffix.
 // Files live under src/shaders/. This unlocks shader hot-reload during dev
@@ -4755,6 +4760,10 @@ function animate(dt, envTime) {
   versusBadge.tick(score);
   bindings.tick();
   featureDebug.update();
+  // Wrap spiral tick — a throw here would kill the animate() loop entirely
+  // and freeze the page. Log + isolate so the game keeps running.
+  try { spiralWave.tick(); }
+  catch (err) { console.error('[spiralWave.tick] error, disabling overlay:', err); spiralWave.setVisible(false); }
   playbackProgress.update();
   // Settings panel — drive the open/close animation tween and keep the
   // gear-button chrome in sync with the panel's visibility (the panel's
@@ -5273,9 +5282,15 @@ function animate(dt, envTime) {
   camera.position.add(shake.offset).add(punchZoom.offset);
   // Stage 2 — render the bloom layer first (masked render → blur). The
   // result is sampled by the combine pass inside the main composer below.
-  selectiveBloom.renderBloomLayer();
-  composer.render();
-  cssRenderer.render(cssScene, camera);
+  // While the spiral overlay is in front (V mode), skip the game's heavy
+  // post-processed render — two 3D pipelines competing for one GPU pushes
+  // integrated GPUs past the frame budget. Game logic still ticks; only the
+  // GPU work is suppressed.
+  if (!spiralWave.isVisible()) {
+    selectiveBloom.renderBloomLayer();
+    composer.render();
+    cssRenderer.render(cssScene, camera);
+  }
   camera.position.sub(shake.offset).sub(punchZoom.offset);
 }
 
@@ -5676,6 +5691,25 @@ const bindings = createBindings({
 // Stage 5 verification window; comment out `visibleByDefault: true` once the
 // audio→visual loop has been confirmed working.
 const featureDebug = createFeatureDebugOverlay({ feature: featureBus, audio, beatGrid, hotkey: 'KeyF', visibleByDefault: true });
+
+// Muon-style spiral wave overlay — toggle with V. Standalone canvas + own
+// renderer/composer so AfterimagePass damp doesn't smear the game scene.
+// Wrapped in try/catch so a load-time throw can't take down main.js.
+let spiralWave;
+try {
+  spiralWave = createSpiralVisualizer({
+    audio,
+    feature: featureBus,   // optional — enables in-panel "Use FeatureBus" toggle
+    beatGrid,              // for future beat-anticipation hook
+    hotkey: 'KeyV',
+    visibleByDefault: false,
+  });
+} catch (err) {
+  console.error('[spiralVisualizer] failed to initialise — stubbing out:', err);
+  spiralWave = {
+    tick() {}, setVisible() {}, isVisible() { return false; }, dispose() {}, params: {},
+  };
+}
 
 // Effects toggle panel — E key toggles. Each entry's `onChange` runs once
 // at boot to apply the initial state. The body tint cache lets us cleanly
@@ -6301,6 +6335,7 @@ if (typeof window !== 'undefined') {
   window.__feature = featureBus;
   window.__bindings = bindings;
   window.__featureDebug = featureDebug;
+  window.__spiralWave = spiralWave;
   window.__audio = audio;
   window.__bgm = bgmPlaylist;
   window.__playlistPanel = playlistPanel;
