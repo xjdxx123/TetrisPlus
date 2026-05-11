@@ -4764,12 +4764,18 @@ function animate(dt, envTime) {
   // and freeze the page. Log + isolate so the game keeps running.
   try { spiralWave.tick(); }
   catch (err) { console.error('[spiralWave.tick] error, disabling overlay:', err); spiralWave.setVisible(false); }
-  // Hide the procedural nebula sky in background mode so the game canvas
-  // is genuinely transparent (apart from board pieces) and the spiral
-  // shows through. Restore in off / theater. Cheap to write every frame.
+  // Background-mode glue. Cheap to write every frame.
+  //   - Hide nebula so the game canvas is "transparent" (apart from board)
+  //     and the spiral shows through.
+  //   - Drop the game canvas opacity below 1: composer's post chain (bloom +
+  //     vignette + afterimage + chromatic) fills alpha=1 by default, so
+  //     even with alpha:true the canvas pixels are opaque. CSS opacity is
+  //     the simplest way to let the spiral underneath bleed through.
+  const _mode = spiralWave.getMode ? spiralWave.getMode() : 'off';
   if (nebula && nebula.mesh) {
-    nebula.mesh.visible = spiralWave.getMode ? spiralWave.getMode() !== 'background' : true;
+    nebula.mesh.visible = _mode !== 'background';
   }
+  renderer.domElement.style.opacity = (_mode === 'background') ? '0.65' : '1';
   playbackProgress.update();
   // Settings panel — drive the open/close animation tween and keep the
   // gear-button chrome in sync with the panel's visibility (the panel's
