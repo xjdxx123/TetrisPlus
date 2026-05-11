@@ -1,0 +1,24 @@
+# Worktrees — duplicate copies of the same code at different commits.
+.claude/
+
+# Node toolchain output
+node_modules/
+project/node_modules/
+dist/
+.vite/
+
+# Asset binaries (graphify can index images/video, but those would
+# need [video]/extra deps and are not the architectural surface
+# we want to graph here).
+project/asset/
+project/screenshots/
+project/uploads/
+
+# Lockfiles, build artifacts
+*.lock
+package-lock.json
+pnpm-lock.yaml
+
+# Other detritus
+.DS_Store
+*.log
