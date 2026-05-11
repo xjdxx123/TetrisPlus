@@ -52,12 +52,19 @@ const maxExponentialScaler = 0.1;
 // formulas (sineCounter advance, dust beatScalerFactor, preset morph) read
 // the same physical "intensity" regardless of source.
 function deriveAudioFeatsFromFeatureBus(feature) {
+  const sub  = feature.bands.sub;
   const bass = feature.bands.bass;
   const air  = feature.bands.air;
+  // Combine sub + bass kick envelopes for a fuller "drum impact" signal —
+  // sub.kick carries 20–60 Hz body that bass.kick alone misses (and vice
+  // versa for the 60–200 Hz punch). Math.min clamps to 1 when both kicks
+  // happen to fire on the same hit. Same expression is used in bindings.js
+  // and main.js so kick reactions stay matched across surfaces.
+  const kickImpact = Math.min(1, sub.kick * 0.6 + bass.kick * 0.7);
   return {
     baseFr: bass.norm * 0.08,            // unused downstream but kept for shape
     trebleFr: air.norm * 0.02,
-    coreScaler: 1 + bass.kick * 5,
+    coreScaler: 1 + kickImpact * 6,
     exponentialBassScaler:   bass.norm * 0.1,
     exponentialTrebleScaler: air.norm  * 0.1,
   };

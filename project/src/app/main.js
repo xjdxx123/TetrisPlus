@@ -115,6 +115,18 @@ const TWEAK_PANEL_DEFAULTS = Object.freeze({
 });
 const TWEAKS = { ...TWEAK_DEFAULTS, ...TWEAK_PANEL_DEFAULTS };
 
+// Rising-edge thresholds for the spiral's direct kick-flash hook (see
+// `animate()` below where featureBus.tick is called). Reading the
+// sub+bass kick envelope each frame catches the beat ~400ms earlier
+// than waiting on the onset event would. Tuned so the flash lands on
+// the actual beat without misfiring on bass-line sustain.
+const SPIRAL_KICK_FLASH_RISING_THRESH  = 0.55;   // fire when combined kick exceeds this…
+const SPIRAL_KICK_FLASH_FALLING_THRESH = 0.30;   // …only after it had previously dropped below this
+// Persistent across `animate()` invocations — the rising-edge detector
+// needs last frame's value to compare against. Declared at module scope
+// so the closure captures a stable binding (TDZ-safe by hoist position).
+let _prevSpiralKickVal = 0;
+
 // Hydrate from localStorage at boot. Order: TWEAK defaults → saved
 // effects overlay → mood applied. The host-protocol path (postMessage
 // from the editor app) still overwrites later if a host is attached;
@@ -4748,6 +4760,30 @@ function animate(dt, envTime) {
   // featureBus.tick is a safe no-op until the user gesture wakes the
   // AudioContext (audio.analyser is null up to that point).
   featureBus.tick(dt);
+
+  // Direct kick → spiral flash. Onset-event-driven hooks have ~400ms
+  // structural delay (24-frame median-threshold detector); reading the
+  // `kick` envelope directly hits the beat on-time. Short 120ms gsap
+  // pulse so it doesn't fight the longer game-event tweens (LINE_CLEAR
+  // etc go 350–1400ms). Spiral may be the no-op stub on construction
+  // failure — the optional chain handles that.
+  if (spiralWave && spiralWave.pulseOpacity && featureBus.bands) {
+    const kickNow = Math.min(
+      1,
+      featureBus.bands.sub.kick * 0.6 + featureBus.bands.bass.kick * 0.7,
+    );
+    if (
+      kickNow > SPIRAL_KICK_FLASH_RISING_THRESH
+      && _prevSpiralKickVal < SPIRAL_KICK_FLASH_FALLING_THRESH
+    ) {
+      // kick=0.55 → 1.75×, kick=1.0 → 2.20×. Bounded so it sits below
+      // the game-event pulse ceiling (Tetris = 5×) — direct kick is
+      // continuous reactivity, gameplay events are punctuation.
+      const mult = 1.2 + kickNow * 1.0;
+      spiralWave.pulseOpacity(mult, 120);
+    }
+    _prevSpiralKickVal = kickNow;
+  }
   // Stage 5b — beat-grid scheduler. Cheap when not analyzed (early-return).
   // Once BPM is cached, projects upcoming beat times from bgmEl.currentTime
   // and dispatches beat / preBeat events — bindings consume `anticipation`.

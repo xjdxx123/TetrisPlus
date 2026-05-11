@@ -69,6 +69,33 @@ export function createBindings({ feature, targets, beatGrid = null } = {}) {
       },
       apply: (v) => { targets.selectiveBloom.setBloomScale(v); },
     }));
+
+    // sub + bass kick → selectiveBloom flash. Direct envelope read (not
+    // the discrete onset event, which has ~400ms structural latency from
+    // the 24-frame median threshold) so the flash lands on the actual
+    // beat instead of trailing it. Pushed AFTER the highMid binding so
+    // its apply() runs second this tick — we read what highMid just
+    // wrote and take max, never demoting it. Reach for kick=1 → 3.5,
+    // hotter than highMid's 2.6 ceiling so kick clearly dominates when
+    // both fire (and gracefully no-ops on the down-beat when only the
+    // highMid sustain is non-zero).
+    bindings.push(named('sub+bass.kick → selectiveBloom.scale (max-merge)', {
+      get: () => {
+        const kick = Math.min(
+          1,
+          feature.bands.sub.kick * 0.6 + feature.bands.bass.kick * 0.7,
+        );
+        return lerp(1.0, 3.5, kick);
+      },
+      apply: (v) => {
+        const cur = targets.selectiveBloom.combinePass
+          && targets.selectiveBloom.combinePass.uniforms
+          && targets.selectiveBloom.combinePass.uniforms.uBloomScale
+          ? targets.selectiveBloom.combinePass.uniforms.uBloomScale.value
+          : 1.0;
+        if (v > cur) targets.selectiveBloom.setBloomScale(v);
+      },
+    }));
   }
 
   // Same hybrid for FOV breathing — small sustain swell + impulsive expand
