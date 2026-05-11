@@ -5995,6 +5995,67 @@ const settingsPanel = createSettingsPanel({
     onTestSfx:       () => playSfx('clear', 4),
   },
 
+  // Spiral visualizer (muon-original) — only the player-facing knobs.
+  // The full param surface stays available via the legacy lil-gui panel
+  // for dev tuning. localStorage persistence for useFeatureBus is handled
+  // inside muon-original itself; the rest are session-only edits.
+  visualizer: {
+    useFeatureBus: {
+      value: !!spiralWave.params.useFeatureBus,
+      onChange: (v) => { spiralWave.params.useFeatureBus = v; },
+    },
+    maxPoints: {
+      value: spiralWave.params.maxPoints || 5400,
+      onChange: (v) => { spiralWave.params.maxPoints = v; },
+    },
+    colorSpectrum: {
+      value: spiralWave.params.colorSpectrum ?? 18,
+      onChange: (v) => { spiralWave.params.colorSpectrum = v; },
+    },
+    aperture: {
+      value: spiralWave.params.aperture ?? 3,
+      onChange: (v) => { spiralWave.params.aperture = v; },
+    },
+    spacing: {
+      value: spiralWave.params.spacing ?? 1,
+      onChange: (v) => { spiralWave.params.spacing = v; },
+    },
+    particleMirror: {
+      value: spiralWave.params.particleMirror !== false,
+      onChange: (v) => { spiralWave.params.particleMirror = v; },
+    },
+    visualizationPreset: {
+      value: spiralWave.params.visualizationPreset !== false,
+      onChange: (v) => { spiralWave.params.visualizationPreset = v; },
+    },
+    divisions: {
+      value: spiralWave.params.divisions ?? 21,
+      onChange: (v) => { spiralWave.params.divisions = v; },
+    },
+    lifespan: {
+      value: spiralWave.params.lifespan ?? 200,
+      onChange: (v) => { spiralWave.params.lifespan = v; },
+    },
+    noiseScale: {
+      value: spiralWave.params.noiseScale ?? 0.3,
+      onChange: (v) => { spiralWave.params.noiseScale = v; },
+    },
+    syncColors: {
+      value: spiralWave.params.syncColors !== false,
+      onChange: (v) => { spiralWave.params.syncColors = v; },
+    },
+    enableMonoColor: {
+      value: !!spiralWave.params.enableMonoColor,
+      onChange: (v) => { spiralWave.params.enableMonoColor = v; },
+    },
+    monoColor: {
+      h: {
+        value: (spiralWave.params.monoColor && spiralWave.params.monoColor.h) ?? 350,
+        onChange: (v) => { spiralWave.params.monoColor.h = v; },
+      },
+    },
+  },
+
   mode: {
     current:      Mode.current,
     available:    Mode.available,

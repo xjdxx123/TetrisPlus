@@ -131,10 +131,11 @@ export function createSettingsPanel(cfg) {
   root.appendChild(tabBar);
 
   const TAB_DEFS = [
-    { key: 'effects', label: 'Effects' },
-    { key: 'audio',   label: 'Audio' },
-    { key: 'mode',    label: 'Mode' },
-    { key: 'stats',   label: 'Stats' },
+    { key: 'effects',    label: 'Effects' },
+    { key: 'audio',      label: 'Audio' },
+    { key: 'visualizer', label: 'Spiral' },
+    { key: 'mode',       label: 'Mode' },
+    { key: 'stats',      label: 'Stats' },
   ];
 
   // Tab content area — body for each pane sits inside this scrolling box.
@@ -281,6 +282,113 @@ export function createSettingsPanel(cfg) {
   testRow.appendChild(testAnnounce);
   testRow.appendChild(testSfx);
   audioPane.appendChild(testRow);
+
+  // === Visualizer (Spiral) tab =========================================
+  // Live tuning of the muon-original visualizer's most player-facing
+  // parameters. Underlying `params` object is mutated in place; muon's
+  // CoreControls.redrawGeometry picks up geometry changes (maxPoints /
+  // colorSpectrum / aperture / spacing) on the next tick automatically.
+  const visualizerPane = document.createElement('div');
+  visualizerPane.className = 'tp-tab-pane';
+  panes.visualizer = visualizerPane;
+  content.appendChild(visualizerPane);
+
+  if (cfg.visualizer) {
+    const v = cfg.visualizer;
+    const sectionLabel = (text) => {
+      const el = document.createElement('div');
+      el.className = 'tp-panel__section-label';
+      el.textContent = text;
+      el.style.cssText += 'margin-top:8px;';
+      return el;
+    };
+    const addSlider = (spec) => {
+      const r = makeSliderRow(spec);
+      visualizerPane.appendChild(r.row);
+      return r;
+    };
+    const addToggle = (spec) => {
+      const t = makeToggleRow({ label: spec.label, checked: spec.value });
+      t.input.addEventListener('change', () => spec.onChange(t.input.checked));
+      visualizerPane.appendChild(t.row);
+      return t;
+    };
+
+    // --- Audio source ----------------------------------------------------
+    visualizerPane.appendChild(sectionLabel('Audio source'));
+    addToggle({
+      label: 'Use FeatureBus (vs Muon native)',
+      value: v.useFeatureBus.value,
+      onChange: v.useFeatureBus.onChange,
+    });
+
+    // --- Geometry --------------------------------------------------------
+    visualizerPane.appendChild(sectionLabel('Geometry'));
+    addSlider({
+      label: 'Particle count', min: 360, max: 12240, step: 360,
+      value: v.maxPoints.value, onChange: v.maxPoints.onChange,
+      format: (n) => n.toFixed(0),
+    });
+    addSlider({
+      label: 'Color spectrum', min: 3, max: 30, step: 1,
+      value: v.colorSpectrum.value, onChange: v.colorSpectrum.onChange,
+      format: (n) => n.toFixed(0),
+    });
+    addSlider({
+      label: 'Aperture', min: 0, max: Math.PI, step: 0.01,
+      value: v.aperture.value, onChange: v.aperture.onChange,
+    });
+    addSlider({
+      label: 'Spacing', min: 0, max: 1, step: 0.01,
+      value: v.spacing.value, onChange: v.spacing.onChange,
+    });
+    addToggle({
+      label: 'Mirror spiral',
+      value: v.particleMirror.value, onChange: v.particleMirror.onChange,
+    });
+    addToggle({
+      label: 'Auto-morph on bass',
+      value: v.visualizationPreset.value, onChange: v.visualizationPreset.onChange,
+    });
+
+    // --- Dust emitter ----------------------------------------------------
+    visualizerPane.appendChild(sectionLabel('Dust emitter'));
+    addSlider({
+      label: 'Divisions', min: 1, max: 150, step: 1,
+      value: v.divisions.value, onChange: v.divisions.onChange,
+      format: (n) => n.toFixed(0),
+    });
+    addSlider({
+      label: 'Lifespan', min: 10, max: 250, step: 1,
+      value: v.lifespan.value, onChange: v.lifespan.onChange,
+      format: (n) => n.toFixed(0),
+    });
+    addSlider({
+      label: 'Noise scale', min: 0, max: 2, step: 0.01,
+      value: v.noiseScale.value, onChange: v.noiseScale.onChange,
+    });
+
+    // --- Color -----------------------------------------------------------
+    visualizerPane.appendChild(sectionLabel('Color'));
+    addToggle({
+      label: 'Sync dust to spiral hue',
+      value: v.syncColors.value, onChange: v.syncColors.onChange,
+    });
+    addToggle({
+      label: 'Mono color (override hue cycle)',
+      value: v.enableMonoColor.value, onChange: v.enableMonoColor.onChange,
+    });
+    addSlider({
+      label: 'Mono hue', min: 0, max: 360, step: 1,
+      value: v.monoColor.h.value, onChange: v.monoColor.h.onChange,
+      format: (n) => `${n.toFixed(0)}°`,
+    });
+  } else {
+    const note = document.createElement('div');
+    note.className = 'tp-status';
+    note.textContent = 'Visualizer not initialised.';
+    visualizerPane.appendChild(note);
+  }
 
   // === Mode tab ========================================================
   const modePane = document.createElement('div');

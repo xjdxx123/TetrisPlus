@@ -233,15 +233,15 @@ export function createMuonOriginal({
   colorFolder.add(params.monoColor, "v", 0, 1,  0.01).name("mono.v");
 
   // === Visibility / hotkey ==========================================
+  // lil-gui stays hidden by default — the Settings panel ("Spiral" tab)
+  // is the user-facing surface now. Dev shortcut for the full param
+  // surface: `__spiralWave.gui.show()` from the console.
   const setVisible = (v) => {
     canvas.style.display = v ? "block" : "none";
     canvas.style.pointerEvents = v ? "auto" : "none";
     if (v) {
-      gui.show();
       // Re-run intro every time we open the overlay.
       gsapControls.cameraIntro(camera, params);
-    } else {
-      gui.hide();
     }
   };
   setVisible(visibleByDefault);
@@ -382,6 +382,7 @@ export function createMuonOriginal({
     isVisible: () => canvas.style.display !== "none",
     canvas,
     params,
+    gui,            // exposed for dev: __spiralWave.gui.show()
   };
 }
 
