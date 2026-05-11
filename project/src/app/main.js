@@ -5725,6 +5725,17 @@ try {
   if (typeof _persistedVis.mode === 'string' && spiralWave.setMode) {
     spiralWave.setMode(_persistedVis.mode);
   }
+  // Hydrate placement: persisted bgZ/bgScale on params won't propagate to
+  // the Group transform on their own (transform was applied once at
+  // construction). Re-apply here.
+  if (spiralWave.spiralGroup) {
+    if (typeof spiralWave.params.bgZ === 'number') {
+      spiralWave.spiralGroup.position.z = spiralWave.params.bgZ;
+    }
+    if (typeof spiralWave.params.bgScale === 'number') {
+      spiralWave.spiralGroup.scale.setScalar(spiralWave.params.bgScale);
+    }
+  }
 } catch (err) {
   console.error('[spiralVisualizer] failed to initialise — stubbing out:', err);
   spiralWave = {
@@ -5895,6 +5906,8 @@ function _persistSettingsSnapshot() {
     // block right after spiralWave is created.
     visualizer: {
       mode:                spiralWave.getMode ? spiralWave.getMode() : 'off',
+      bgZ:                 spiralWave.params.bgZ,
+      bgScale:             spiralWave.params.bgScale,
       useFeatureBus:       !!spiralWave.params.useFeatureBus,
       maxPoints:           spiralWave.params.maxPoints,
       colorSpectrum:       spiralWave.params.colorSpectrum,
@@ -6054,6 +6067,22 @@ const settingsPanel = createSettingsPanel({
         { value: 'background', label: 'On'  },
       ],
       onChange: (v) => { spiralWave.setMode(v); _persistSettingsSnapshot(); },
+    },
+    bgZ: {
+      value: spiralWave.params.bgZ ?? -200,
+      onChange: (v) => {
+        spiralWave.params.bgZ = v;
+        if (spiralWave.spiralGroup) spiralWave.spiralGroup.position.z = v;
+        _persistSettingsSnapshot();
+      },
+    },
+    bgScale: {
+      value: spiralWave.params.bgScale ?? 3.3,
+      onChange: (v) => {
+        spiralWave.params.bgScale = v;
+        if (spiralWave.spiralGroup) spiralWave.spiralGroup.scale.setScalar(v);
+        _persistSettingsSnapshot();
+      },
     },
     useFeatureBus: {
       value: !!spiralWave.params.useFeatureBus,

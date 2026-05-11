@@ -326,6 +326,24 @@ export function createSettingsPanel(cfg) {
       visualizerPane.appendChild(modeCtl.row);
     }
 
+    // --- Placement -------------------------------------------------------
+    // Both ranges around the user-tested sweet spot (-200, 3.3). Push
+    // further only if you want a tiny dust-ball look or a very near
+    // wallpaper effect.
+    if (v.bgZ && v.bgScale) {
+      visualizerPane.appendChild(sectionLabel('Placement'));
+      addSlider({
+        label: 'Distance', min: -1000, max: -50, step: 5,
+        value: v.bgZ.value, onChange: v.bgZ.onChange,
+        format: (n) => n.toFixed(0),
+      });
+      addSlider({
+        label: 'Scale', min: 1, max: 10, step: 0.1,
+        value: v.bgScale.value, onChange: v.bgScale.onChange,
+        format: (n) => n.toFixed(1),
+      });
+    }
+
     // --- Audio source ----------------------------------------------------
     visualizerPane.appendChild(sectionLabel('Audio source'));
     addToggle({
