@@ -5694,7 +5694,21 @@ const bindings = createBindings({
 // Live FeatureBus inspector — F key toggles. Visible by default during the
 // Stage 5 verification window; comment out `visibleByDefault: true` once the
 // audio→visual loop has been confirmed working.
-const featureDebug = createFeatureDebugOverlay({ feature: featureBus, audio, beatGrid, hotkey: 'KeyF', visibleByDefault: true });
+// _captureHandle holds the external tab capture (Settings → Spiral). It's
+// referenced by featureDebug's getAnalyser closure below; the actual
+// assignment happens further down in the toggle handler. Hoist the let
+// here so the closure captures a real binding.
+let _captureHandle = null;
+
+const featureDebug = createFeatureDebugOverlay({
+  feature: featureBus,
+  audio,
+  beatGrid,
+  hotkey: 'KeyF',
+  visibleByDefault: true,
+  // Source the active analyser — falls back to BGM when no external capture.
+  getAnalyser: () => (_captureHandle && _captureHandle.analyser) || (audio && audio.analyser) || null,
+});
 
 // Muon-style spiral wave overlay — toggle with V. Standalone canvas + own
 // renderer/composer so AfterimagePass damp doesn't smear the game scene.
@@ -5799,8 +5813,8 @@ if (spiralWave.pulseOpacity && spiralWave.triggerMorph) {
 // === External tab audio capture =====================================
 // Lets the spiral visualizer dance to audio playing in another browser
 // tab (YouTube, Spotify Web, Bilibili, etc.) instead of TetrisPlus's
-// own BGM. Plumbing here so the Settings → Spiral panel can drive it.
-let _captureHandle = null;
+// own BGM. _captureHandle is hoisted above for the featureDebug getAnalyser
+// closure; assigned here when capture starts.
 async function onToggleTabCapture() {
   // Already capturing? Stop.
   if (_captureHandle) {
