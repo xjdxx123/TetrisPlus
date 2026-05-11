@@ -1,27 +1,36 @@
 // Vendored Muon Music Visualizer (najafmohammed/muon-music-visualizer, MIT)
-// — MINIMAL ENTRY POINT.
+// — SCENE-EMBEDDED ENTRY POINT.
 //
-// This file replaces Muon's original src/index.js. We strip everything
-// non-visual (DOM controls, video player, search modal, equalizer, stats
-// HUD, file picker, dat.gui) and bridge the audio source: instead of
-// `wavesurfer.backend.analyser`, we feed the project's existing
-// `audio.analyser` (AnalyserNode) directly into Muon's render pipeline.
+// We embed Muon's spiral particles + curl-noise dust directly into the
+// host game's scene (instead of rendering to a standalone canvas with its
+// own renderer/composer). This gives the spiral several properties for
+// free that the standalone approach can't:
 //
-// Purpose: A/B comparison vs our own ported spiral. Toggle with the `B`
-// hotkey. Mounts a separate <canvas>; the game render loop is suppressed
-// while this overlay is visible (gated in main.js via spiralWave/muon
-// isVisible checks).
+//   - Automatically rotates / pans with the game camera. No camera-link
+//     glue needed — they share the camera.
+//   - Naturally picks up the host's post chain (selectiveBloom, vignette,
+//     chromatic). No double-pipeline GPU pressure.
+//   - No alpha-preservation issues at canvas composite time — particles
+//     just render after the game's opaque pieces.
 //
-// `globalParams` is re-exported here because CoreControls/wave.js does
-// `import { globalParams } from ".."` — i.e. expects to find it on this
-// file. Same shape Muon used in their original index.js.
+// The spiral lives inside a single Object3D group positioned far behind
+// the playfield (default `bgZ: -800`, `bgScale: 10`) so it reads as a
+// "background sky", not a 3D object the player can collide with.
+//
+// Audio source: same options as before. Set `params.useFeatureBus = true`
+// (via Settings → Spiral panel) to switch from Muon's piecewise
+// audioProcessing to the project's FeatureBus signals (bass/air norm +
+// onset events).
+//
+// `globalParams` is re-exported because CoreControls/wave.js does
+// `import { globalParams } from ".."` — must be importable on this file.
 
 import * as THREE from "three";
 import GUI from "lil-gui";
 import { Operations } from "./Utils/operations";
 import { CoreControls } from "./CoreControls";
-import { Objects } from "./Resources/objects";
-import { gsapControls } from "./GSAP";
+import { generateParticlesSpiral } from "./Resources/geometries";
+import materials from "./Resources/materials";
 import {
   emittedParticleSystem,
   emitParticle,
@@ -41,13 +50,6 @@ const maxExponentialScaler = 0.1;
 // returns. Magnitudes chosen to land near Muon's typical range so downstream
 // formulas (sineCounter advance, dust beatScalerFactor, preset morph) read
 // the same physical "intensity" regardless of source.
-//
-//   exponentialBassScaler:   Muon caps at 0.1 → bass.norm (∈ [0,1]) × 0.1
-//   exponentialTrebleScaler: same cap → air.norm × 0.1
-//   coreScaler:              Muon's typical range 1..6 → 1 + bass.kick × 5
-//   _delta synth:            FB's onsets are discrete events, not a derivative;
-//                            we synthesise a one-frame _delta when a kick fires
-//                            so wavePresetController's threshold check trips.
 function deriveAudioFeatsFromFeatureBus(feature) {
   const bass = feature.bands.bass;
   const air  = feature.bands.air;
@@ -62,31 +64,17 @@ function deriveAudioFeatsFromFeatureBus(feature) {
 
 export function createMuonOriginal({
   audio,
+  scene,                  // REQUIRED — game scene the spiral group attaches to
   feature = null,
-  beatGrid = null,
-  hotkey = "KeyB",
+  beatGrid = null,        // eslint-disable-line no-unused-vars
+  hotkey = "KeyV",
   visibleByDefault = false,
 } = {}) {
-  // === Canvas + DOM mount ============================================
-  // Mount inside #app (same stacking context as the game canvas) so z-index
-  // ordering is direct: spiral z=1 sits below game z=2 in background mode,
-  // both at z=41 and z=2 means spiral covers in theater mode.
-  const canvas = document.createElement("canvas");
-  canvas.id = "muon-original-canvas";
-  canvas.className = "webgl";   // matches Muon's HTML class
-  Object.assign(canvas.style, {
-    position: "fixed",
-    inset: "0",
-    width: "100%",
-    height: "100%",
-    pointerEvents: "none",
-    zIndex: "41",
-    display: "none",
-    background: "#000000",
-  });
-  (document.getElementById("app") || document.body).appendChild(canvas);
+  if (!scene) {
+    throw new Error("[muon-original] `scene` is required for scene-embedded mode");
+  }
 
-  // === Muon's params (verbatim from original src/index.js) ===========
+  // === Muon's params (verbatim from original src/index.js) + our extras
   const params = {
     maxPoints: 0,
     colorSpectrum: 3,
@@ -108,15 +96,12 @@ export function createMuonOriginal({
     timeMult: 0.01,
     enableMonoColor: false,
     monoColor: { h: 350, s: 0.9, v: 0.3 },
-    // A/B audio source toggle. false = Muon's vendored audioProcessing on
-    // raw FFT bytes (matches the reference demo). true = TetrisPlus
-    // FeatureBus (6-band + AGC + onset detection). FB only takes effect if
-    // a `feature` argument was passed to createMuonOriginal.
     useFeatureBus: false,
-    // Display mode — set via setMode(). 'off' hides the canvas entirely;
-    // 'background' renders behind the game (z-index below game canvas);
-    // 'theater' renders in front and suppresses the game render so the
-    // GPU isn't doing two heavy 3D pipelines at once.
+    // Scene-embedded geometry: how far back + how big. Tune via Settings →
+    // Spiral or via console (__spiralWave.params.bgZ = -1200).
+    bgZ: -800,
+    bgScale: 10,
+    // 'off' = group detached from scene; 'background' = attached.
     mode: "off",
   };
 
@@ -134,44 +119,36 @@ export function createMuonOriginal({
   let prevExponentialBassScalar = 0;
   let dataArray = new Uint8Array(0);
 
-  // FeatureBus onset bridge. Muon's wavePresetController triggers a preset
-  // morph when |_delta| exceeds deltaResponseLimit (default 0.005). FB
-  // exposes onsets as discrete events instead of as a derivative, so we
-  // latch a flag on each kick and synthesise a one-frame _delta in tick.
+  // FeatureBus onset bridge.
   let _fbOnsetFired = false;
-  if (feature && feature.onsets && typeof feature.onsets.on === 'function') {
-    feature.onsets.on('kick', () => { _fbOnsetFired = true; });
+  if (feature && feature.onsets && typeof feature.onsets.on === "function") {
+    feature.onsets.on("kick", () => { _fbOnsetFired = true; });
   }
 
-  // === Three.js scene assembly (uses Muon's Objects helpers) =========
-  const scene = new THREE.Scene();
-  let particles = Objects.initParticles(params.maxPoints);
-  scene.add(particles);
-  let particles2 = Objects.initParticles(params.maxPoints);
+  // === Scene assembly =================================================
+  // No standalone scene/camera/renderer/composer — those all belong to
+  // the host. We build the spiral Points + dust ourselves (used to come
+  // from Objects.initParticles, but that ties to materials we already
+  // have) and parent them under a single group that hosts the bgZ/bgScale
+  // transform. Setting depthTest:false keeps additive blending dense; the
+  // tradeoff is spiral particles "show through" opaque game pieces a bit,
+  // which actually reads as glow rather than wrong.
+  const particles  = new THREE.Points(generateParticlesSpiral(params.maxPoints), materials.particleMaterial);
+  const particles2 = new THREE.Points(generateParticlesSpiral(params.maxPoints), materials.particleMaterial);
+  particles2.rotation.z = -Math.PI / 2;
 
-  const camera = Objects.initCamera();
-  const controls = Objects.initOrbitControls(camera, canvas);
-
-  const renderer = Objects.initRenderer(canvas);
-  const composer = Objects.initComposer(renderer, scene, camera);
-
-  Objects.initResize(camera, renderer, composer);
-
-  // GSAP intro animation — same one Muon plays on first load. Tweens
-  // maxPoints 0 → 1080 → 7920 → 5400, camera scale 0 → 1, etc. This is
-  // the "explosive reveal" that makes Muon's first 3 seconds feel alive.
-  // We re-trigger it every time the overlay is shown so the user gets
-  // the same effect on every B-press.
-
-  // Emission particles.
-  scene.add(emittedParticleSystem);
+  const spiralGroup = new THREE.Group();
+  spiralGroup.name = "muon-spiral-bg";
+  spiralGroup.position.z = params.bgZ;
+  spiralGroup.scale.setScalar(params.bgScale);
+  spiralGroup.add(particles);
+  // particles2 + emittedParticleSystem are toggled in tick based on params.
+  spiralGroup.add(particles2);
+  spiralGroup.add(emittedParticleSystem);
 
   const clock = new THREE.Clock();
 
-  // === Wavesurfer mock — bridges our analyser to Muon's expected API.
-  // Muon checks `wavesurfer.isPlaying()` (boolean, NOT a property) and
-  // reads FFT bytes from `wavesurfer.backend.analyser`. Mirror that shape
-  // exactly and forward to our shared AudioContext analyser.
+  // === Wavesurfer mock (analyser bridge) ============================
   const wavesurfer = {
     isPlaying: () => !!audio?.analyser,
     backend: {
@@ -189,11 +166,7 @@ export function createMuonOriginal({
   };
 
   // === lil-gui dev panel ============================================
-  // Ranges mirror Muon's own GUI/index.js where applicable. Geometry params
-  // (maxPoints/colorSpectrum/aperture/spacing) are picked up by
-  // CoreControls.redrawGeometry every tick — no manual rebuild needed.
   const STORAGE_KEY = "muon-original.useFeatureBus";
-  // Hydrate persisted toggle BEFORE building the panel so the UI reflects it.
   if (localStorage.getItem(STORAGE_KEY) === "true") params.useFeatureBus = true;
 
   const gui = new GUI({ title: "Muon Visualizer", width: 280 });
@@ -206,11 +179,16 @@ export function createMuonOriginal({
     .name("Use FeatureBus (vs Muon)")
     .onChange((v) => {
       localStorage.setItem(STORAGE_KEY, String(v));
-      console.log(`[muon-original] audio source = ${v ? "FeatureBus" : "Muon vendored"}`);
     });
   if (!feature) {
     audioFolder.add({ note: "no feature passed in" }, "note").disable();
   }
+
+  const placementFolder = gui.addFolder("Placement");
+  placementFolder.add(params, "bgZ",     -3000, 0,   10)
+    .onChange((v) => { spiralGroup.position.z = v; });
+  placementFolder.add(params, "bgScale", 0.5,   30,  0.1)
+    .onChange((v) => { spiralGroup.scale.setScalar(v); });
 
   const geomFolder = gui.addFolder("Geometry");
   geomFolder.add(params, "maxPoints",        360, 12240, 360);
@@ -241,81 +219,40 @@ export function createMuonOriginal({
   colorFolder.add(params.monoColor, "v", 0, 1,  0.01).name("mono.v");
 
   // === Mode / visibility / hotkey ===================================
-  // lil-gui stays hidden by default — the Settings panel ("Spiral" tab)
-  // is the user-facing surface now. Dev shortcut for the full param
-  // surface: `__spiralWave.gui.show()` from the console.
-  //
-  // cameraIntro is the cinematic explosion — camera scales from 0, params
-  // tween through 0→1080→7920→5400 over 4s. We only run it ONCE per page
-  // load: subsequent mode flips just re-style the canvas without restarting
-  // the tween, otherwise it would clobber any user-set Particle count /
-  // Color spectrum / Spacing.
-  //
-  // Three modes:
-  //   off        — canvas hidden, game renders normally
-  //   background — spiral canvas behind game (z-index 1, game canvas is at
-  //                z-index 2 with alpha:true so transparent areas reveal
-  //                the spiral); pointer events pass through to the game so
-  //                play continues uninterrupted
-  //   theater    — spiral canvas in front (z-index 41), captures pointer
-  //                events for OrbitControls; game render is suppressed by
-  //                main.js so we don't double-pipeline the GPU
-  let _introPlayed = false;
-  const MODES = ["off", "background", "theater"];
+  // Two modes now: 'off' detaches the group; 'background' attaches it.
+  // The host's render loop handles painting — nothing to draw here.
+  const MODES = ["off", "background"];
 
   const setMode = (mode) => {
     if (!MODES.includes(mode)) return;
     params.mode = mode;
-    if (mode === "off") {
-      canvas.style.display = "none";
-      canvas.style.pointerEvents = "none";
-      canvas.style.zIndex = "41";
-      controls.enabled = false;
-    } else if (mode === "background") {
-      canvas.style.display = "block";
-      canvas.style.pointerEvents = "none";
-      canvas.style.zIndex = "1";
-      controls.enabled = false;
-    } else if (mode === "theater") {
-      canvas.style.display = "block";
-      canvas.style.pointerEvents = "auto";
-      canvas.style.zIndex = "41";
-      controls.enabled = true;
-    }
-    if (mode !== "off" && !_introPlayed) {
-      _introPlayed = true;
-      gsapControls.cameraIntro(camera, params);
+    if (mode === "off" && spiralGroup.parent) {
+      scene.remove(spiralGroup);
+    } else if (mode === "background" && !spiralGroup.parent) {
+      scene.add(spiralGroup);
     }
   };
-  setMode(params.mode);
+  setMode(visibleByDefault ? "background" : params.mode);
 
   // Backward-compat shim — older call sites use setVisible/isVisible.
-  // setVisible(true) maps to "theater" (the original full-screen behaviour).
-  const setVisible = (v) => setMode(v ? "theater" : "off");
-  if (visibleByDefault) setMode("theater");
+  const setVisible = (v) => setMode(v ? "background" : "off");
 
-  // V cycles modes: off → background → theater → off. The first non-off
-  // press triggers the cinematic intro.
+  // V toggles between off and background.
   const onKey = (e) => {
     if (e.code !== hotkey) return;
     const t = e.target;
     if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
-    const i = MODES.indexOf(params.mode);
-    setMode(MODES[(i + 1) % MODES.length]);
+    setMode(params.mode === "off" ? "background" : "off");
   };
   window.addEventListener("keydown", onKey);
 
-  // === Per-frame render — direct port of Muon's render() body =======
-  // Skips: stats.update, DOM updateStats, video sync, currentTime DOM,
-  // file/pause button event setup. Keeps every visual call.
+  // === Per-frame audio + uniform update =============================
+  // Same body as Muon's render() minus the composer.render() — host
+  // handles drawing. We still update geometry + uniforms every frame so
+  // the host's renderer picks up our changes when it traverses the scene.
   const tick = () => {
-    if (canvas.style.display === "none") return;
+    if (params.mode === "off") return;
 
-    // Resize/fill the FFT buffer FIRST — Muon's original src/index.js sets
-    // it up via audioAnalyzer() before the render loop starts, so the first
-    // call to audioProcessing always sees a populated array. We don't have
-    // that lifecycle, so do it inline. Bail until the analyser is online to
-    // avoid Operations.avg's `reduce` crashing on an empty Uint8Array.
     const analyser = initFftBuffer();
     if (!analyser || dataArray.length === 0) return;
     analyser.getByteFrequencyData(dataArray);
@@ -326,16 +263,11 @@ export function createMuonOriginal({
     let _delta = exponentialBassScaler - prevExponentialBassScalar;
     prevExponentialBassScalar = exponentialBassScaler;
 
-    // Audio source A/B switch. FB path falls back to Muon's own pipeline
-    // when feature wasn't supplied (or hasn't ticked yet).
     const useFB = params.useFeatureBus && feature && feature.bands;
     const audioFeats = useFB
       ? deriveAudioFeatsFromFeatureBus(feature)
       : CoreControls.audioProcessing(dataArray);
 
-    // FB has no derivative-style _delta, so synthesise one when an onset
-    // just fired. Magnitude (0.01) chosen above deltaResponseLimit (0.005)
-    // so wavePresetController's threshold trips reliably.
     if (useFB) {
       _delta = _fbOnsetFired ? 0.01 : 0;
       _fbOnsetFired = false;
@@ -343,8 +275,6 @@ export function createMuonOriginal({
 
     const coreScaler = audioFeats.coreScaler;
     exponentialBassScaler = audioFeats.exponentialBassScaler;
-    // NB: Muon's original assigns bass to treble as well — preserved for
-    // the Muon path; FB path uses the real treble band.
     exponentialTrebleScaler = useFB
       ? audioFeats.exponentialTrebleScaler
       : audioFeats.exponentialBassScaler;
@@ -355,8 +285,9 @@ export function createMuonOriginal({
       sineCounter += params.idleMultiplier * timeDelta * 7;
     }
 
-    composer.render();
-
+    // Spacing override matches Muon's behaviour: 0.6 during playback,
+    // 1.0 when idle. Slightly disagrees with the Settings → Spiral slider
+    // (it gets overwritten each frame); we accept that for parity.
     if (!wavesurfer.isPlaying()) {
       params.radiusMultiplier =
         (params.radiusMultiplier + 0.00012 * timeDelta) % 1;
@@ -365,11 +296,9 @@ export function createMuonOriginal({
       params.spacing = 0.6;
     }
 
-    if (params.particleMirror) {
-      scene.add(particles2);
-    } else {
-      scene.remove(particles2);
-    }
+    // Mirror + dust visibility toggles. Adding/removing children is cheap.
+    if (params.particleMirror && !particles2.parent) spiralGroup.add(particles2);
+    if (!params.particleMirror && particles2.parent) spiralGroup.remove(particles2);
 
     CoreControls.redrawGeometry(
       wavesurfer.isPlaying(),
@@ -394,8 +323,6 @@ export function createMuonOriginal({
     sineCounter += Math.abs(_delta * 250) * timeDelta;
 
     CoreControls.wavePresetController(params, _delta, particles2);
-
-    // (FFT fetch already done at the top of tick so audioProcessing has data.)
 
     if (exponentialBassScaler > maxExponentialScaler)
       exponentialBassScaler = maxExponentialScaler;
@@ -422,8 +349,9 @@ export function createMuonOriginal({
   const dispose = () => {
     window.removeEventListener("keydown", onKey);
     gui.destroy();
-    renderer.dispose();
-    canvas.remove();
+    if (spiralGroup.parent) scene.remove(spiralGroup);
+    particles.geometry.dispose();
+    particles2.geometry.dispose();
   };
 
   return {
@@ -432,11 +360,11 @@ export function createMuonOriginal({
     setVisible,
     setMode,
     getMode: () => params.mode,
-    isVisible:    () => params.mode !== "off",
-    isInFront:    () => params.mode === "theater", // gates main game render
-    canvas,
+    isVisible:  () => params.mode !== "off",
+    isInFront:  () => false,           // never — host always renders
+    spiralGroup,                       // expose for ad-hoc tuning
     params,
-    gui,            // exposed for dev: __spiralWave.gui.show()
+    gui,
   };
 }
 

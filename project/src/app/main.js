@@ -4764,18 +4764,9 @@ function animate(dt, envTime) {
   // and freeze the page. Log + isolate so the game keeps running.
   try { spiralWave.tick(); }
   catch (err) { console.error('[spiralWave.tick] error, disabling overlay:', err); spiralWave.setVisible(false); }
-  // Background-mode glue. Cheap to write every frame.
-  //   - Hide nebula so the game canvas is "transparent" (apart from board)
-  //     and the spiral shows through.
-  //   - Drop the game canvas opacity below 1: composer's post chain (bloom +
-  //     vignette + afterimage + chromatic) fills alpha=1 by default, so
-  //     even with alpha:true the canvas pixels are opaque. CSS opacity is
-  //     the simplest way to let the spiral underneath bleed through.
-  const _mode = spiralWave.getMode ? spiralWave.getMode() : 'off';
-  if (nebula && nebula.mesh) {
-    nebula.mesh.visible = _mode !== 'background';
-  }
-  renderer.domElement.style.opacity = (_mode === 'background') ? '0.65' : '1';
+  // Spiral now coexists with nebula in the same scene at different depths
+  // (spiral at z=-800 default, nebula somewhere closer). No need to hide
+  // nebula or drop the game canvas opacity any more.
   playbackProgress.update();
   // Settings panel — drive the open/close animation tween and keep the
   // gear-button chrome in sync with the panel's visibility (the panel's
@@ -5294,17 +5285,11 @@ function animate(dt, envTime) {
   camera.position.add(shake.offset).add(punchZoom.offset);
   // Stage 2 — render the bloom layer first (masked render → blur). The
   // result is sampled by the combine pass inside the main composer below.
-  // Skip the game's heavy post-processed render only when the spiral
-  // overlay is "theater" mode (in front + opaque). In "background" mode
-  // the spiral sits BEHIND the game canvas so both must render. Two 3D
-  // pipelines on one GPU is fine for the bg + game combo on most hardware;
-  // the freezes we hit earlier were specifically theater-mode bloom +
-  // afterimage on top of game's selectiveBloom.
-  if (!spiralWave.isInFront()) {
-    selectiveBloom.renderBloomLayer();
-    composer.render();
-    cssRenderer.render(cssScene, camera);
-  }
+  // Spiral is scene-embedded now (lives inside game scene as a far-back
+  // Group). Game composer renders both pieces and spiral in one pass.
+  selectiveBloom.renderBloomLayer();
+  composer.render();
+  cssRenderer.render(cssScene, camera);
   camera.position.sub(shake.offset).sub(punchZoom.offset);
 }
 
@@ -5713,6 +5698,7 @@ let spiralWave;
 try {
   spiralWave = createSpiralVisualizer({
     audio,
+    scene,                 // host scene — spiral particles attach as a child group
     feature: featureBus,   // optional — enables in-panel "Use FeatureBus" toggle
     beatGrid,              // for future beat-anticipation hook
     hotkey: 'KeyV',
@@ -6061,8 +6047,7 @@ const settingsPanel = createSettingsPanel({
       value: spiralWave.getMode ? spiralWave.getMode() : 'off',
       choices: [
         { value: 'off',        label: 'Off' },
-        { value: 'background', label: 'BG'  },
-        { value: 'theater',    label: 'Theater' },
+        { value: 'background', label: 'On'  },
       ],
       onChange: (v) => { spiralWave.setMode(v); _persistSettingsSnapshot(); },
     },
