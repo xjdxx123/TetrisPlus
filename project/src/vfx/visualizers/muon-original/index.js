@@ -141,6 +141,19 @@ export function createMuonOriginal({
   const particles  = new THREE.Points(generateParticlesSpiral(params.maxPoints), materials.particleMaterial);
   const particles2 = new THREE.Points(generateParticlesSpiral(params.maxPoints), materials.particleMaterial);
   particles2.rotation.z = -Math.PI / 2;
+  // Force the spiral to render after everything else in the transparent
+  // queue, regardless of how Three's distance sort would normally order
+  // it. Without this, host-scene transparent objects (ambientField, dust
+  // around the board, etc.) intermittently win the sort and occlude
+  // chunks of the spiral at specific camera angles.
+  particles.renderOrder           = 999;
+  particles2.renderOrder          = 999;
+  emittedParticleSystem.renderOrder = 999;
+  // depthWrite is on by default for ShaderMaterial — disable so spiral
+  // particles don't stamp their own depth and accidentally hide later
+  // transparent draws.
+  materials.particleMaterial.depthWrite = false;
+  emittedParticleSystem.material.depthWrite = false;
 
   const spiralGroup = new THREE.Group();
   spiralGroup.name = "muon-spiral-bg";
@@ -261,7 +274,6 @@ export function createMuonOriginal({
   const onKey = (e) => {
     if (e.code !== hotkey) return;
     if (isTextInput(e.target)) return;
-    console.log(`[muon-original] V pressed, current mode=${params.mode}`);
     setMode(params.mode === "off" ? "background" : "off");
   };
   window.addEventListener("keydown", onKey, true);   // capture phase
