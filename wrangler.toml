@@ -1,0 +1,24 @@
+# Cloudflare Workers Static Assets — TetrisPlus frontend deploy.
+#
+# This is a pure static site (no Worker runtime code). The build pipeline
+# is:
+#   1. Cloudflare clones the repo
+#   2. Runs the build command (configured in the Workers project UI):
+#        cd project && npm install -g pnpm && pnpm install --frozen-lockfile && pnpm build
+#      → produces `project/dist/{tetris.html,assets/*.js,asset/sounds/*}`.
+#   3. Runs the deploy command (default: `npx wrangler deploy`).
+#      Wrangler reads this file, finds `[assets].directory`, uploads.
+#
+# The multiplayer relay Worker (server/relay/) is a SEPARATE deploy —
+# it has its own wrangler config under server/relay/. Not deployed here.
+
+name = "tetris-plus"
+compatibility_date = "2026-05-12"
+
+[assets]
+directory = "./project/dist"
+# Root-path serving: when a visitor hits `/` we want `/tetris.html`
+# served. The build's `index.html` symlink/copy (see vite.config.js
+# `tetris-copy-index` plugin) makes the default Worker assets handler
+# resolve `/` → `/index.html` → tetris.html content.
+not_found_handling = "404-page"

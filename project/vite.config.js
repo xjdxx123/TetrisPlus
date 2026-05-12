@@ -1,5 +1,5 @@
 import { defineConfig } from 'vite';
-import { cpSync } from 'node:fs';
+import { cpSync, copyFileSync } from 'node:fs';
 
 // Notes:
 // - Audio lives under `asset/sounds/{bgm,effects}/`. BGM is loaded by the
@@ -15,15 +15,19 @@ import { cpSync } from 'node:fs';
 //   of `asset/...` directly off disk.
 
 /** Mirror `asset/` into `dist/asset/` post-build so static hosts (Cloudflare
- *  Pages, etc.) ship the BGM / SFX alongside the JS bundle. cpSync's
- *  recursive option lands clean on macOS / Linux / Windows. Failures
- *  bubble up rather than silently producing a broken deploy. */
+ *  Pages / Workers Static Assets) ship the BGM / SFX alongside the JS
+ *  bundle. Also clone `tetris.html` to `index.html` so the static-asset
+ *  handler serves the game when a visitor hits `/` (Cloudflare's default
+ *  file lookup is `index.html`). cpSync recursive lands clean on macOS /
+ *  Linux / Windows; failures bubble up rather than silently producing a
+ *  broken deploy. */
 function copyAssetsPlugin() {
   return {
     name: 'tetris-copy-assets',
     apply: 'build',
     closeBundle() {
       cpSync('asset', 'dist/asset', { recursive: true });
+      copyFileSync('dist/tetris.html', 'dist/index.html');
     },
   };
 }
