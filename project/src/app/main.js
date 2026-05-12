@@ -6298,7 +6298,7 @@ const settingsPanel = createSettingsPanel({
       onChange: (v) => { spiralWave.setMode(v); _persistSettingsSnapshot(); },
     },
     bgZ: {
-      value: spiralWave.params.bgZ ?? -200,
+      value: spiralWave.params.bgZ ?? -160,
       onChange: (v) => {
         spiralWave.params.bgZ = v;
         if (spiralWave.spiralGroup) spiralWave.spiralGroup.position.z = v;

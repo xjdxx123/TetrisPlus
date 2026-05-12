@@ -33,7 +33,10 @@ import {
   formatTimeFriendly,
 } from './format/mode-stats.js';
 
-const PANEL_WIDTH_PX  = 360;
+// Wider than the original 360 so long control rows (e.g. the
+// chroma-tint mix slider, history readouts) don't cause horizontal
+// scrollbars at the panel's overflow:auto content container.
+const PANEL_WIDTH_PX  = 420;
 const PANEL_HEIGHT_PX = 480;
 const WORLD_SCALE     = 0.025;
 

@@ -1,24 +1,39 @@
-# Cloudflare Workers Static Assets — TetrisPlus frontend deploy.
+# Cloudflare Worker — TetrisPlus frontend deploy.
 #
-# This is a pure static site (no Worker runtime code). The build pipeline
-# is:
-#   1. Cloudflare clones the repo
-#   2. Runs the build command (configured in the Workers project UI):
-#        cd project && npm install -g pnpm && pnpm install --frozen-lockfile && pnpm build
-#      → produces `project/dist/{tetris.html,assets/*.js,asset/sounds/*}`.
-#   3. Runs the deploy command (default: `npx wrangler deploy`).
-#      Wrangler reads this file, finds `[assets].directory`, uploads.
+# This is mostly a Static Assets deploy (Vite build output served from the
+# edge CDN). The small worker.js handles host-level redirects so we don't
+# have to lean on dashboard rules that aren't in git.
 #
-# The multiplayer relay Worker (server/relay/) is a SEPARATE deploy —
-# it has its own wrangler config under server/relay/. Not deployed here.
+# Build pipeline (configured in the Cloudflare Workers project UI):
+#   1. Clone repo
+#   2. Build command: `cd project && pnpm install --frozen-lockfile && pnpm build`
+#      → produces `project/dist/{tetris.html,index.html,assets/*,asset/sounds/*}`
+#   3. Deploy command: `npx wrangler deploy`
+#      → reads this file, uploads the worker script + uploads the static
+#        assets, attaches the routes.
+#
+# The multiplayer relay Worker (server/relay/) is a SEPARATE deploy with
+# its own wrangler config. Not affected by this file.
 
 name = "tetris-plus"
+main = "worker.js"
 compatibility_date = "2026-05-12"
+
+# Custom domains — declared in code so the binding is reproducible. The
+# matching DNS records were created when "Add Custom Domain" was clicked
+# in the dashboard; this section makes the route attachment idempotent
+# across redeploys.
+routes = [
+  { pattern = "tetraplus.app", custom_domain = true },
+  { pattern = "www.tetraplus.app", custom_domain = true },
+]
 
 [assets]
 directory = "./project/dist"
-# Root-path serving: when a visitor hits `/` we want `/tetris.html`
-# served. The build's `index.html` symlink/copy (see vite.config.js
-# `tetris-copy-index` plugin) makes the default Worker assets handler
-# resolve `/` → `/index.html` → tetris.html content.
+# Allow the Worker script to handle requests before the static-asset
+# handler — required for the www → apex redirect logic in worker.js.
+# Without `run_worker_first`, the asset handler would intercept hosts
+# and the redirect would never fire.
+run_worker_first = true
+binding = "ASSETS"
 not_found_handling = "404-page"

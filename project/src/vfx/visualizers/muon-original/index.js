@@ -112,7 +112,7 @@ export function createMuonOriginal({
     // Scene-embedded geometry: how far back + how big. Defaults are the
     // hand-tuned values that look right against TetrisPlus's camera; raise
     // bgScale or push bgZ farther negative to make it more "distant sky".
-    bgZ: -200,
+    bgZ: -160,
     bgScale: 3.3,
     // Brightness multiplier. Additive blending has no real "opacity", so
     // we dim by scaling the HSL lightness of the colour uniform (0 = HSL
