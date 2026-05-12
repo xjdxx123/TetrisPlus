@@ -16,6 +16,8 @@
     "@dimforge/rapier3d-compat": "^0.19.3",
     "gsap": "^3.15.0",
     "lil-gui": "^0.21.0",
+    "meyda": "^5.6.3",
+    "realtime-bpm-analyzer": "^5.0.13",
     "three": "0.160.0",
     "web-audio-beat-detector": "^8.2.36"
   },

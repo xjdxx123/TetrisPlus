@@ -475,6 +475,21 @@ export function createSettingsPanel(cfg) {
       value: v.monoColor.h.value, onChange: v.monoColor.h.onChange,
       format: (n) => `${n.toFixed(0)}°`,
     });
+    // Meyda chroma tint — pull the spiral's hue toward the music's
+    // tonal centre. The toggle is the on/off; the slider scales how
+    // strongly chroma overrides the time-based hue cycle. 0 = legacy
+    // look, 1 = full override on confident chroma frames.
+    if (v.enableChromaTint && v.chromaTintMultiplier) {
+      addToggle({
+        label: 'Chroma tint (key → hue)',
+        value: v.enableChromaTint.value, onChange: v.enableChromaTint.onChange,
+      });
+      addSlider({
+        label: 'Chroma mix', min: 0, max: 1, step: 0.05,
+        value: v.chromaTintMultiplier.value, onChange: v.chromaTintMultiplier.onChange,
+        format: (n) => `${(n * 100).toFixed(0)}%`,
+      });
+    }
   } else {
     const note = document.createElement('div');
     note.className = 'tp-status';

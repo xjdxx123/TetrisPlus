@@ -16,7 +16,7 @@
 
 function lerp(a, b, t) { return a + (b - a) * t; }
 
-export function createBindings({ feature, targets, beatGrid = null } = {}) {
+export function createBindings({ feature, targets, beatGrid = null, meydaFeatures = null } = {}) {
   // The bindings table. Order doesn't matter (writes are independent).
   // Shape kept identical for every entry so future bindings drop in trivially.
   const bindings = [];
@@ -172,6 +172,27 @@ export function createBindings({ feature, targets, beatGrid = null } = {}) {
     });
   }
 
+  // Meyda L-1 — chroma circular-mean → spiral hue tint. The chroma
+  // vector's resultant angle is the tonal centre of the music as a
+  // continuous value in [0, 360); we feed it to the spiral as a target
+  // hue, weighted by chroma confidence (low when the signal is atonal
+  // / silent → no tint applied → the spiral falls back to its time-
+  // based cycle).
+  //
+  // Apply receives the hue and reads confidence from `meydaFeatures`
+  // directly — bindings convention is one scalar through `get` for
+  // the `debug()` console helper, with side-channel reads in apply
+  // when a binding needs a second signal.
+  if (targets.spiralWave && meydaFeatures && targets.spiralWave.setChromaHue) {
+    bindings.push({
+      name: 'meyda.chroma → spiralWave.hue (tint)',
+      get: () => meydaFeatures.chromaHueDeg,
+      apply: (deg) => {
+        targets.spiralWave.setChromaHue(deg, meydaFeatures.chromaConfidence);
+      },
+    });
+  }
+
   // (Stage 5b still pending: sparkle/dust spawn rates from mid + air, kick
   // onset → beat pulse emitter — both wait for new emitters from Stage 8c.)
 
@@ -202,6 +223,11 @@ export function createBindings({ feature, targets, beatGrid = null } = {}) {
     if (targets.ambientField)       targets.ambientField.setFlowSpeed(0.85);
     if (targets.activePieceEdges)   targets.activePieceEdges.setEdgeIntensity(0.55);
     if (targets.nebula)             targets.nebula.setIntensity(nebulaBaseIntensity);
+    // Drop the chroma tint when reactivity is off so the spiral's hue
+    // returns to its pure time-based cycle.
+    if (targets.spiralWave && targets.spiralWave.setChromaHue) {
+      targets.spiralWave.setChromaHue(0, 0);
+    }
   }
 
   return {

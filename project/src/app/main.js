@@ -33,6 +33,8 @@ import { createAfterimagePass } from '../rendering/post/afterimage.js';
 import { createChromaticPass } from '../rendering/post/chromatic.js';
 import { createFeatureBus } from '../audio/reactive/feature-bus.js';
 import { createLiveBeatTracker } from '../audio/reactive/live-beat-tracker.js';
+import { createMeydaFeatures } from '../audio/reactive/meyda-features.js';
+import { createAudioTestPanel } from '../audio/reactive/audio-test-panel.js';
 import { createFeatureDebugOverlay } from '../audio/reactive/debug-overlay.js';
 import { createBeatGrid } from '../audio/reactive/beat-grid.js';
 import { createBpmCache } from '../audio/reactive/bpm-cache.js';
@@ -4798,6 +4800,7 @@ function animate(dt, envTime) {
   versusBadge.tick(score);
   bindings.tick();
   featureDebug.update();
+  audioTestPanel.update();
   // Wrap spiral tick — a throw here would kill the animate() loop entirely
   // and freeze the page. Log + isolate so the game keeps running.
   try { spiralWave.tick(); }
@@ -5657,6 +5660,15 @@ const bgmPlaylist = createBgmPlaylist({
     // back in mid-song the moment the analyzer lands.
     try { applyActiveTrackBpm(); }
     catch (err) { console.warn('[bgm-playlist] applyActiveTrackBpm threw:', err?.message || err); }
+    // Reset the live BPM tracker so the new track's tempo doesn't get
+    // averaged with the previous one's — worklet accumulator + median
+    // bootstrap both forget the old observations.
+    try { if (liveBeat && liveBeat.reset) liveBeat.reset(); }
+    catch (err) { console.warn('[live-beat-tracker] reset threw:', err?.message || err); }
+    // Same for Meyda — drop the previous track's smoothed chroma / AGC
+    // peak so the new track's tonal centre isn't averaged with it.
+    try { if (meydaFeatures && meydaFeatures.reset) meydaFeatures.reset(); }
+    catch (err) { console.warn('[meyda-features] reset threw:', err?.message || err); }
     _firePlaylistTrack(idx, track);
   },
   onPlayingChange: (playing) => {
@@ -5687,6 +5699,12 @@ const featureBus = createFeatureBus({
 // (replaces the offline beat-grid for the spiral, which doesn't have a
 // pre-decoded AudioBuffer when external capture is the source).
 const liveBeat = createLiveBeatTracker({ feature: featureBus });
+
+// Meyda feature extractor — harmonic + timbral signals (chroma, MFCC,
+// spectral centroid, RMS, spectral flux) that FeatureBus doesn't
+// provide. Drives the spiral's chroma hue tint via bindings.js.
+// plan_audio_interaction.md L-1.
+const meydaFeatures = createMeydaFeatures();
 
 // Stage 5b — beat grid (anticipatory beat scheduler).
 // The grid uses the BGM element's currentTime as its source of truth (NOT
@@ -5732,18 +5750,12 @@ const activePieceEdges = {
   },
 };
 
-const bindings = createBindings({
-  feature: featureBus,
-  beatGrid,
-  targets: {
-    selectiveBloom,
-    breathe,
-    chromatic: chromaticPass,
-    ambientField,
-    activePieceEdges,
-    nebula,
-  },
-});
+// `bindings` is constructed AFTER `spiralWave` so the chroma → hue
+// binding has a real target. Declared here as a hoisted `let` because
+// several blocks below this point reference it (toggle handler,
+// console handle); they all run after construction completes.
+let bindings;
+
 // Live FeatureBus inspector — F key toggles. Visible by default during the
 // Stage 5 verification window; comment out `visibleByDefault: true` once the
 // audio→visual loop has been confirmed working.
@@ -5757,6 +5769,19 @@ const featureDebug = createFeatureDebugOverlay({
   visibleByDefault: true,
   // Source the active analyser — falls back to BGM when no external capture.
   getAnalyser: () => (_captureHandle && _captureHandle.analyser) || (audio && audio.analyser) || null,
+});
+
+// Comprehensive audio-test panel — toggle with B. Shows every audio-
+// analysis signal in one place (FeatureBus bands × signals, onsets, live
+// BPM tracker, Meyda features) plus a tiny canvas viz that demos how
+// each signal *looks like* when driving simple primitives. Built for
+// development / effect tuning; hidden by default.
+const audioTestPanel = createAudioTestPanel({
+  feature: featureBus,
+  liveBeat,
+  meydaFeatures,
+  hotkey: 'KeyB',
+  visibleByDefault: false,
 });
 
 // Muon-style spiral wave overlay — toggle with V. Standalone canvas + own
@@ -5808,9 +5833,28 @@ try {
     tick() {}, setVisible() {}, setMode() {}, getMode: () => 'off',
     isVisible() { return false; }, isInFront() { return false; },
     dispose() {}, params: { monoColor: {} },
-    pulseOpacity() {}, triggerMorph() {},
+    pulseOpacity() {}, triggerMorph() {}, setChromaHue() {},
   };
 }
+
+// Now that spiralWave exists, construct the audio→visual bindings layer.
+// Meyda features go in via the `meydaFeatures` dep (parallel to
+// `beatGrid`); the spiral is reachable as a binding target so the
+// chroma → hue binding lives next to the other audio→visual rules.
+bindings = createBindings({
+  feature: featureBus,
+  beatGrid,
+  meydaFeatures,
+  targets: {
+    selectiveBloom,
+    breathe,
+    chromatic: chromaticPass,
+    ambientField,
+    activePieceEdges,
+    nebula,
+    spiralWave,
+  },
+});
 
 // === Gameplay event → Spiral hooks ===================================
 // The spiral isn't just music-reactive — it also reacts to what the
@@ -5872,6 +5916,10 @@ async function onToggleTabCapture() {
     _captureHandle.dispose();
     _captureHandle = null;
     if (spiralWave.setExternalAnalyser) spiralWave.setExternalAnalyser(null);
+    // Re-attach the live beat tracker to BGM. Without this it would keep
+    // pulling tempo from the now-disconnected external source.
+    if (liveBeat.setSource) liveBeat.setSource(audio.analyser || null);
+    if (meydaFeatures.setSource) meydaFeatures.setSource(audio.analyser || null);
     if (settingsPanel && settingsPanel.refreshAudioInput) {
       settingsPanel.refreshAudioInput({ capturing: false });
     }
@@ -5891,11 +5939,17 @@ async function onToggleTabCapture() {
   try {
     const cap = await startTabAudioCapture({ audioCtx: ctx });
     if (spiralWave.setExternalAnalyser) spiralWave.setExternalAnalyser(cap.analyser);
+    // Point the live beat tracker at the external stream so anticipation
+    // reflects what the user is actually hearing.
+    if (liveBeat.setSource) liveBeat.setSource(cap.analyser);
+    if (meydaFeatures.setSource) meydaFeatures.setSource(cap.analyser);
     cap.onEnded(() => {
       // Browser-initiated stop (user clicked "Stop sharing" in the
       // browser indicator). Tear down our side and refresh UI.
       _captureHandle = null;
       if (spiralWave.setExternalAnalyser) spiralWave.setExternalAnalyser(null);
+      if (liveBeat.setSource) liveBeat.setSource(audio.analyser || null);
+      if (meydaFeatures.setSource) meydaFeatures.setSource(audio.analyser || null);
       if (settingsPanel && settingsPanel.refreshAudioInput) {
         settingsPanel.refreshAudioInput({ capturing: false });
       }
@@ -6098,6 +6152,8 @@ function _persistSettingsSnapshot() {
         s: spiralWave.params.monoColor && spiralWave.params.monoColor.s,
         v: spiralWave.params.monoColor && spiralWave.params.monoColor.v,
       },
+      enableChromaTint:      spiralWave.params.enableChromaTint !== false,
+      chromaTintMultiplier:  spiralWave.params.chromaTintMultiplier,
     },
   });
 }
@@ -6333,6 +6389,14 @@ const settingsPanel = createSettingsPanel({
         value: (spiralWave.params.monoColor && spiralWave.params.monoColor.h) ?? 350,
         onChange: (v) => { spiralWave.params.monoColor.h = v; _persistSettingsSnapshot(); },
       },
+    },
+    enableChromaTint: {
+      value: spiralWave.params.enableChromaTint !== false,
+      onChange: (v) => { spiralWave.params.enableChromaTint = v; _persistSettingsSnapshot(); },
+    },
+    chromaTintMultiplier: {
+      value: spiralWave.params.chromaTintMultiplier ?? 0.6,
+      onChange: (v) => { spiralWave.params.chromaTintMultiplier = v; _persistSettingsSnapshot(); },
     },
   },
 
@@ -6676,8 +6740,10 @@ if (typeof window !== 'undefined') {
   window.__feature = featureBus;
   window.__bindings = bindings;
   window.__featureDebug = featureDebug;
+  window.__audioTestPanel = audioTestPanel;
   window.__spiralWave = spiralWave;
   window.__liveBeat = liveBeat;
+  window.__meyda = meydaFeatures;
   window.__audio = audio;
   window.__bgm = bgmPlaylist;
   window.__playlistPanel = playlistPanel;
@@ -6749,6 +6815,14 @@ const _audioBoot = async () => {
   window.removeEventListener('pointerdown', _audioBoot);
   try { await initAudio(); }
   catch (err) { console.warn('[audio] init failed:', err?.message || err); }
+  // Attach the live beat tracker to the BGM analyser. AnalyserNode is a
+  // pass-through audio node, so feeding it into realtime-bpm-analyzer's
+  // worklet input works without rerouting the main playback graph. The
+  // tracker lazy-creates its AudioWorklet on this first call.
+  if (audio.analyser && liveBeat.setSource) liveBeat.setSource(audio.analyser);
+  // Same plumbing for Meyda — it taps the same analyser node and
+  // produces chroma/centroid/MFCC for the harmonic-reactive bindings.
+  if (audio.analyser && meydaFeatures.setSource) meydaFeatures.setSource(audio.analyser);
   // Kick off whole-track BPM analysis for every track in the playlist.
   // bpmCache serializes the work and persists results — repeat boots skip
   // any track whose URL is already cached.

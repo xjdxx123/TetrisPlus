@@ -129,9 +129,23 @@ export function createMuonOriginal({
     enableBeatAntic: true,
     beatAnticBoost:  0.35,        // beatScaler boost peak
     beatAnticGlow:   0.15,        // opacity boost peak (lighter touch)
+    // Chroma-driven hue tint (Meyda L-1). When bindings.js calls
+    // setChromaHue(deg, weight) each tick, the spiral's time-based
+    // hue cycle is blended toward the tonal-centre hue at `weight ×
+    // chromaTintMultiplier`. 0 = pure time cycle (legacy); 1 = full
+    // override. Default 0.6 — visible "songs in different keys look
+    // different" without losing the slow time cycle that makes the
+    // spiral feel alive during silent passages.
+    enableChromaTint: true,
+    chromaTintMultiplier: 0.6,
     // 'off' = group detached from scene; 'background' = attached.
     mode: "off",
   };
+
+  // Latest values pushed by bindings.js. Re-read every frame; bindings
+  // tick runs *before* spiralWave.tick so values are fresh.
+  let _chromaHueDeg = 0;
+  let _chromaWeight = 0;
 
   let sineCounter = 0;
   const prevParams = {
@@ -303,6 +317,9 @@ export function createMuonOriginal({
   colorFolder.add(params.monoColor, "h", 0, 360, 1).name("mono.h");
   colorFolder.add(params.monoColor, "s", 0, 1,  0.01).name("mono.s");
   colorFolder.add(params.monoColor, "v", 0, 1,  0.01).name("mono.v");
+  // Note: chroma-tint controls (`enableChromaTint`, `chromaTintMultiplier`)
+  // live exclusively in the 3D Settings panel — lil-gui is deprecated as
+  // the user-facing surface; new knobs only go in the CSS3D overlay.
 
   // === Mode / visibility / hotkey ===================================
   // Two modes now: 'off' detaches the group; 'background' attaches it.
@@ -447,7 +464,21 @@ export function createMuonOriginal({
     if (exponentialBassScaler > maxExponentialScaler)
       exponentialBassScaler = maxExponentialScaler;
 
-    const hue = CoreControls.hueControl((_delta * timeDelta) / 2);
+    const baseHue = CoreControls.hueControl((_delta * timeDelta) / 2);
+    // Chroma blend — shortest-arc circular interpolation between the
+    // time-driven base and the Meyda-derived tonal hue. Skipped (no-op)
+    // when no chroma signal is being pushed; weight stays at 0.
+    const chromaTintW = params.enableChromaTint
+      ? Math.max(0, Math.min(1, _chromaWeight * (params.chromaTintMultiplier ?? 0)))
+      : 0;
+    let hue = baseHue;
+    if (chromaTintW > 0) {
+      const target = ((((_chromaHueDeg % 360) + 360) % 360) / 360);
+      let d = target - baseHue;
+      if (d >  0.5) d -= 1;
+      if (d < -0.5) d += 1;
+      hue = (baseHue + d * chromaTintW + 1) % 1;
+    }
     // Bright "flash" events (Tetris, Perfect Clear) want headroom beyond
     // HSL's L=1 saturation. Set the base colour at Muon's L=0.5 and then
     // RGB-multiply by opacity × pulse × beat-anticipation glow — values
@@ -478,6 +509,15 @@ export function createMuonOriginal({
     particles2.geometry.dispose();
   };
 
+  /** bindings.js → spiral hook for Meyda's harmonic colour signal.
+   *  `hueDeg` is the chroma circular-mean in [0, 360). `weight` is
+   *  the per-frame strength (typically the chroma confidence, 0..1).
+   *  No-op when params.enableChromaTint is false. */
+  function setChromaHue(hueDeg, weight) {
+    _chromaHueDeg = Number.isFinite(hueDeg) ? hueDeg : 0;
+    _chromaWeight = Number.isFinite(weight) ? Math.max(0, Math.min(1, weight)) : 0;
+  }
+
   return {
     tick,
     dispose,
@@ -490,6 +530,7 @@ export function createMuonOriginal({
     pulseOpacity,                      // gameplay hooks: transient brightness
     triggerMorph,                      // gameplay hooks: force preset switch
     setExternalAnalyser,               // external tab audio capture override
+    setChromaHue,                      // Meyda L-1 hue tint
     params,
     gui,
   };
