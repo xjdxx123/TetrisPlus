@@ -1,4 +1,5 @@
 import { defineConfig } from 'vite';
+import { cpSync } from 'node:fs';
 
 // Notes:
 // - Audio lives under `asset/sounds/{bgm,effects}/`. BGM is loaded by the
@@ -7,13 +8,30 @@ import { defineConfig } from 'vite';
 //   AudioBuffers. We keep the directory at the project root so the relative
 //   paths resolve unchanged.
 // - `publicDir: false` disables Vite's public-dir copy step (which would
-//   strip the `asset/` prefix). The dev server serves files from the project
-//   root, so `asset/sounds/effects/foo.wav` resolves directly from disk.
-// - Production bundling for the dynamically-fetched audio files is deferred;
-//   add `?url` imports to src/main.js when we ship a real build.
+//   strip the `asset/` prefix and break the runtime URL contract). Instead
+//   we run a custom closeBundle plugin below that copies `asset/` into
+//   `dist/asset/` with the prefix preserved — the only thing that changes
+//   between dev and prod is that prod reads from `dist/asset/...` instead
+//   of `asset/...` directly off disk.
+
+/** Mirror `asset/` into `dist/asset/` post-build so static hosts (Cloudflare
+ *  Pages, etc.) ship the BGM / SFX alongside the JS bundle. cpSync's
+ *  recursive option lands clean on macOS / Linux / Windows. Failures
+ *  bubble up rather than silently producing a broken deploy. */
+function copyAssetsPlugin() {
+  return {
+    name: 'tetris-copy-assets',
+    apply: 'build',
+    closeBundle() {
+      cpSync('asset', 'dist/asset', { recursive: true });
+    },
+  };
+}
+
 export default defineConfig({
   root: '.',
   publicDir: false,
+  plugins: [copyAssetsPlugin()],
   server: {
     open: '/tetris.html',
   },
