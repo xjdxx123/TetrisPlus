@@ -311,12 +311,10 @@ export function applyLiquidGlass(el, opts = {}) {
   const priorOuter = {};
   for (const p of outerProps) priorOuter[p] = el.style[p];
 
-  // Outer goes transparent. The drop shadow stays on the outer (so it
-  // sits BELOW the clip rectangle — inset shadows would be clipped
-  // out). overflow stays VISIBLE so hover scale(>1) on the warp and
-  // content children can extend past the original host box. The warp
-  // already carries its own border-radius, so corners stay rounded
-  // without the host clipping.
+  // Outer goes transparent. overflow stays VISIBLE so hover scale(>1)
+  // on the warp and content children can extend past the original host
+  // box. The warp already carries its own border-radius, so corners stay
+  // rounded without the host clipping.
   el.style.background = 'transparent';
   el.style.border = '0';
   el.style.borderRadius = `${cornerRadius}px`;
@@ -326,9 +324,12 @@ export function applyLiquidGlass(el, opts = {}) {
   el.style.filter = 'none';
   el.style.webkitFilter = 'none';
   if (!el.style.position) el.style.position = 'relative';
-  el.style.boxShadow = overLight
-    ? '0 16px 70px rgba(0, 0, 0, 0.55)'
-    : '0 12px 40px rgba(0, 0, 0, 0.45)';
+  // No boxShadow on the host — its transform is locked by CSS3DRenderer,
+  // so a shadow here would stay anchored at the original box while the
+  // warp scales away from it (ghost halo around hover/active). Shadow
+  // moves onto its own inner div below, which scales WITH the warp via
+  // the `.liquid-glass-host > :not(.liquid-glass-warp)` selector.
+  el.style.boxShadow = 'none';
 
   // Tag the outer so :hover / .is-glass-active CSS rules apply, and
   // expose the filter URL as a custom property so the stylesheet's
@@ -361,6 +362,25 @@ export function applyLiquidGlass(el, opts = {}) {
   `;
   el.insertBefore(warp, el.firstChild);
 
+  // Drop shadow lives on its own div (inserted BEFORE the warp in DOM
+  // order so it paints underneath) — moving the shadow off the host
+  // lets hover/active scale carry it along with the warp. Without this
+  // the shadow halo would stay anchored at the host's locked CSS3D
+  // transform, peeking out as a "ghost layer" when the warp scales away.
+  const shadow = document.createElement('div');
+  shadow.className = 'liquid-glass-shadow';
+  shadow.setAttribute('aria-hidden', 'true');
+  shadow.style.cssText = `
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    border-radius: ${cornerRadius}px;
+    box-shadow: ${overLight
+      ? '0 16px 70px rgba(0, 0, 0, 0.55)'
+      : '0 12px 40px rgba(0, 0, 0, 0.45)'};
+  `;
+  el.insertBefore(shadow, warp);
+
   // Lift the first non-warp child (typically `.panel-inner`) above the
   // warp via stacking. Without this, the warp's transparent background
   // is fine but anything that the warp's filter samples (the children
@@ -390,7 +410,8 @@ export function applyLiquidGlass(el, opts = {}) {
     el.removeEventListener('pointerleave',  onUp);
     el.classList.remove('liquid-glass-host', 'is-glass-active');
     el.style.removeProperty('--lg-filter');
-    if (warp.parentElement) warp.parentElement.removeChild(warp);
+    if (warp.parentElement)   warp.parentElement.removeChild(warp);
+    if (shadow.parentElement) shadow.parentElement.removeChild(shadow);
     if (content && priorContent) {
       content.style.position = priorContent.position;
       content.style.zIndex   = priorContent.zIndex;
