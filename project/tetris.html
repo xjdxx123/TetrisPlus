@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
 <title>TetrisPlus — 3D Glass</title>
 <style>
   :root {
@@ -59,60 +59,8 @@
     text-shadow: 0 0 12px rgba(108, 240, 255, 0.4);
   }
 
-  /* Help / controls */
-  .help {
-    position: fixed;
-    bottom: 18px;
-    left: 22px;
-    z-index: 5;
-    background: rgba(10, 14, 24, 0.55);
-    backdrop-filter: blur(10px) saturate(140%);
-    -webkit-backdrop-filter: blur(10px) saturate(140%);
-    border: 1px solid rgba(255,255,255,0.08);
-    border-radius: 10px;
-    padding: 10px 14px;
-    color: var(--muted);
-    font-size: 11px;
-    line-height: 1.7;
-    letter-spacing: 0.02em;
-    max-width: 280px;
-    user-select: none;
-    transition: opacity 0.3s;
-  }
-  .help.hidden { opacity: 0; pointer-events: none; }
-  .help kbd {
-    display: inline-block;
-    min-width: 16px;
-    padding: 1px 5px;
-    font-family: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
-    font-size: 10px;
-    color: var(--ink);
-    background: rgba(255,255,255,0.06);
-    border: 1px solid rgba(255,255,255,0.12);
-    border-bottom-color: rgba(255,255,255,0.04);
-    border-radius: 4px;
-    text-align: center;
-  }
-  .help .row { display: flex; justify-content: space-between; gap: 12px; }
-  .help .row span:first-child { color: var(--ink); }
-  .help h4 {
-    margin: 0 0 6px 0;
-    color: var(--ink);
-    font-size: 11px;
-    letter-spacing: 0.16em;
-    text-transform: uppercase;
-    font-weight: 600;
-  }
-
-  /* 3D Tetris (plan v2 §2.1 Phase E) — mode-specific help section.
-     The .help-3d block is hidden by default; it appears only when
-     `<body data-mode="3d">` (set by main.js's Mode.start hook). The
-     2D-specific section (.help-2d) is the inverse — visible always
-     except in 3D mode. Both classes coexist in the same .help panel
-     so the help-toggle button's open/close behavior stays unchanged. */
-  .help-3d                                { display: none; }
-  body[data-mode="3d"] .help-3d           { display: block; }
-  body[data-mode="3d"] .help-2d           { display: none; }
+  /* Help / info panel chrome lives in src/ui/info-panel.js. The
+     #help element below is just the mount point. */
 
   /* Online Versus lobby panel (plan v2 §2.2 Phase J). Shown only when
      `body[data-mode="online"]` AND a `data-lobby-state` flag drives
@@ -395,6 +343,50 @@
     background: rgba(108, 240, 255, 0.2);
     box-shadow: 0 0 24px rgba(108,240,255,0.4);
   }
+
+  /* ─── Mobile / coarse-pointer responsive layer ──────────────────────
+     Triggered by body.is-touch (set in main.js after pointer:coarse
+     detection) and by a width media query so a narrow desktop window
+     also gets the compacted chrome. Goals:
+       - Bottom-right toggles move to the top-right corner so they don't
+         collide with the on-screen button cluster.
+       - Brand mark shrinks; tweaks panel hides (dev tool, not for play).
+       - Score / clear-callout / level-up shrink so they don't dwarf the
+         playfield on small screens.
+       - Game-over button gets a bigger tap target. */
+  body.is-touch .brand { font-size: 11px; }
+  body.is-touch .brand .title { font-size: 13px; }
+
+  body.is-touch .help-toggle,
+  body.is-touch .audio-toggle,
+  body.is-touch .settings-toggle {
+    bottom: auto;
+    top: calc(14px + env(safe-area-inset-top));
+    width: 36px;
+    height: 36px;
+    font-size: 14px;
+  }
+  body.is-touch .help-toggle     { right: calc(14px + env(safe-area-inset-right)); }
+  body.is-touch .audio-toggle    { right: calc(58px + env(safe-area-inset-right)); }
+  body.is-touch .settings-toggle { right: calc(102px + env(safe-area-inset-right)); }
+
+  /* Hide the floating dev "Tweaks" panel on touch — duplicates Settings. */
+  body.is-touch #tweaks-panel { display: none !important; }
+
+  /* Score burst / level-up shrink on phones so they don't span the
+     screen at 56–104px. */
+  @media (max-width: 600px) {
+    .levelup       { font-size: 36px; }
+    .clear-callout { font-size: 30px; }
+    .score-burst-inner          { font-size: 36px; }
+    .score-burst-inner.tier-2   { font-size: 44px; }
+    .score-burst-inner.tier-3   { font-size: 54px; }
+    .score-burst-inner.tier-4   { font-size: 64px; }
+    .game-over .panel { padding: 24px 28px; }
+    .game-over h2 { font-size: 22px; }
+    .game-over .stats { gap: 18px; }
+    .online-lobby { min-width: 0; width: calc(100vw - 36px); padding: 18px 20px; }
+  }
 </style>
 </head>
 <body>
@@ -405,34 +397,18 @@
     <span class="title">GLASS / 3D</span>
   </div>
 
-  <div class="help" id="help">
-    <h4>Controls</h4>
-    <div class="row"><span>Move</span><span><kbd>←</kbd> <kbd>→</kbd></span></div>
-    <div class="row"><span>Soft drop</span><span><kbd>↓</kbd></span></div>
-    <div class="row"><span>Hard drop</span><span><kbd>Space</kbd></span></div>
-    <div class="row help-2d"><span>Rotate</span><span><kbd>↑</kbd> / <kbd>X</kbd></span></div>
-    <div class="row help-2d"><span>Hold</span><span><kbd>C</kbd> / <kbd>Shift</kbd></span></div>
-    <div class="row"><span>Pause</span><span><kbd>P</kbd></span></div>
-    <div class="help-3d">
-      <h4 style="margin-top:10px;">3D Movement</h4>
-      <div class="row"><span>Move depth (back / forward)</span><span><kbd>↑</kbd> / <kbd>↓</kbd></span></div>
-      <div class="row"><span>Pull toward viewer</span><span><kbd>Q</kbd></span></div>
-      <h4 style="margin-top:10px;">3D Rotation</h4>
-      <div class="row"><span>Spin (Z axis)</span><span><kbd>X</kbd> / <kbd>Z</kbd></span></div>
-      <div class="row"><span>Pitch (X axis)</span><span><kbd>W</kbd> / <kbd>S</kbd></span></div>
-      <div class="row"><span>Yaw (Y axis)</span><span><kbd>A</kbd> / <kbd>D</kbd></span></div>
-    </div>
-    <h4 style="margin-top:10px;">Camera</h4>
-    <div class="row"><span>Orbit</span><span>Drag empty space</span></div>
-    <div class="row"><span>Pan</span><span>Right-drag</span></div>
-    <div class="row"><span>Zoom</span><span>Scroll</span></div>
-    <div class="row"><span>Reset view</span><span><kbd>R</kbd></span></div>
-    <h4 style="margin-top:10px;">Panels</h4>
-    <div class="row"><span>Drag in 3D</span><span>Click + drag panel</span></div>
-  </div>
+  <!-- Info panel shell (Controls / Audio / Roadmap / Credits).
+       Content + tab logic come from src/ui/info-panel.js, which is
+       initialised after main.js boots. -->
+  <div id="help"></div>
+
+  <!-- Touch controls overlay shell — populated by src/ui/touch-controls.js
+       and surfaced only when `body.is-touch` (coarse-pointer device). -->
+  <div id="touch-controls"></div>
+
   <button class="settings-toggle" id="settingsToggle" title="Settings (O)">⚙</button>
   <button class="audio-toggle" id="audioToggle" title="Mute / unmute audio">🔊</button>
-  <button class="help-toggle" id="helpToggle" title="Toggle controls">?</button>
+  <button class="help-toggle" id="helpToggle" title="Toggle help (H)">?</button>
 
   <!-- Online Versus lobby (plan v2 §2.2 Phase J). Shown only when
        Mode.current === 'online' via the body[data-mode] CSS hook.
