@@ -27,6 +27,7 @@ import { createSettingsPanel } from '../ui/settings-panel.js';
 import { makeToggleRow, makeHueSlider } from '../ui/panel-shared.js';
 import { createInfoPanel } from '../ui/info-panel.js';
 import { createTouchControls, isTouchDevice } from '../ui/touch-controls.js';
+import { installLiquidGlassFilter, applyLiquidGlass } from '../ui/liquid-glass.js';
 import { createBreathe } from '../camera/breathe.js';
 import { createStageController, STAGE_EVENTS } from '../vfx/stage-controller.js';
 import { STAGES } from '../config/stages.js';
@@ -1099,6 +1100,32 @@ controls.touches = {
   ONE: THREE.TOUCH.ROTATE,
   TWO: THREE.TOUCH.DOLLY_PAN,
 };
+
+// Custom wheel-zoom handler — replaces OrbitControls' built-in wheel
+// dolly because the upstream implementation scales by `Math.abs(deltaY)
+// * 0.01`. That's fine for trackpads (deltaY ~10–30) but goes nuclear
+// for free-spin / high-resolution mouse wheels that can fire deltaY in
+// the thousands per click — the camera dollies all the way from
+// maxDistance to minDistance in a single tick, producing a binary
+// "two-step" zoom feel. Our handler treats every wheel event as one
+// fixed-percentage step regardless of deltaY magnitude.
+controls.enableZoom = false;
+const _camDir = new THREE.Vector3();
+const ZOOM_STEP = 1.08;   // 8 % per tick — ~22 ticks across the 12–60 range
+renderer.domElement.addEventListener('wheel', (e) => {
+  if (!controls.enabled) return;
+  e.preventDefault();
+  const sign = Math.sign(e.deltaY) || 1;
+  const factor = sign > 0 ? ZOOM_STEP : 1 / ZOOM_STEP;
+  _camDir.copy(camera.position).sub(controls.target);
+  const newLen = THREE.MathUtils.clamp(
+    _camDir.length() * factor,
+    controls.minDistance,
+    controls.maxDistance,
+  );
+  _camDir.setLength(newLen);
+  camera.position.copy(controls.target).add(_camDir);
+}, { passive: false });
 
 // =============================================================
 // Glass cube — beveled geometry + real refraction + edge highlights
@@ -2429,6 +2456,25 @@ function panelHTML(label, value, sub, valueClass = '') {
   </div>`;
 }
 
+// Swap a panel's content WITHOUT clobbering applyLiquidGlass' injected
+// `.liquid-glass-warp` child. Using `el.innerHTML = ...` straight wipes
+// the warp, taking the frosted tint + the `:hover` / `.is-glass-active`
+// scale targets with it.
+function setPanelContent(el, html) {
+  const warp = el.querySelector(':scope > .liquid-glass-warp');
+  if (!warp) { el.innerHTML = html; return; }
+  const tmp = document.createElement('div');
+  tmp.innerHTML = html;
+  const newInner = tmp.firstElementChild;
+  if (!newInner) return;
+  // Preserve the stacking lift applyLiquidGlass applied to the prior inner.
+  newInner.style.position = 'relative';
+  newInner.style.zIndex = '1';
+  const oldInner = el.querySelector(':scope > .panel-inner');
+  if (oldInner) el.replaceChild(newInner, oldInner);
+  else el.appendChild(newInner);
+}
+
 const scoreEl = makePanelEl(panelHTML('Score', '0', 'Level 1'));
 scoreEl.id = 'panel-score';
 const scoreObj = new CSS3DObject(scoreEl);
@@ -2464,6 +2510,37 @@ const holdObj = new CSS3DObject(holdEl);
 holdObj.position.set(-13, -5, 4);
 holdObj.scale.setScalar(0.025);
 cssScene.add(holdObj);
+
+// Liquid Glass — all 4 HUD panels share one SVG filter instance (the
+// filter region is element-scoped, so N panels still get N independent
+// refractions). Tint / blur / saturation are tuned on the Score panel;
+// reuse the same look across the set for visual consistency.
+installLiquidGlassFilter({
+  id: 'liquid-glass-hud',
+  displacementScale: 50,
+  aberrationIntensity: 2,
+});
+const HUD_GLASS_OPTS = {
+  filterId: 'liquid-glass-hud',
+  // blurAmount=0.6 → blur(23.2px). (formula: 4 + 0.6 * 32)
+  blurAmount: 0.6,
+  saturation: 170,
+  cornerRadius: 14,
+  // Translucent blue-grey gradient — reads as tinted glass, lets the
+  // WebGL behind bleed through. Alpha is the "frostiness" knob.
+  tint: 'linear-gradient(180deg, rgba(70,86,130,0.32), rgba(36,46,78,0.48))',
+};
+const _hudGlassDispose = [
+  applyLiquidGlass(scoreEl, HUD_GLASS_OPTS),
+  applyLiquidGlass(linesEl, HUD_GLASS_OPTS),
+  applyLiquidGlass(nextEl,  HUD_GLASS_OPTS),
+  applyLiquidGlass(holdEl,  HUD_GLASS_OPTS),
+];
+// Console handle: __unglass() reverts all HUD panels to plain chrome.
+// Useful for A/B without a page reload.
+if (typeof window !== 'undefined') {
+  window.__unglass = () => _hudGlassDispose.forEach((fn) => fn && fn());
+}
 
 // Per-side identification labels for dual-board versus mode (§3.7
 // sub-phase 7e polish). Both objects are constructed at module load
@@ -2715,19 +2792,18 @@ function updateHUD() {
     scoreTween.active = false;
     _displayedScore = score;
   }
-  scoreEl.innerHTML = panelHTML('Score', _displayedScore.toLocaleString(),
-                                `Level ${level}`, 'score-value');
-  linesEl.innerHTML = panelHTML('Lines', lines, `Faces cleared`);
-  // Re-bind drag (innerHTML wipes children but element reference is preserved)
-  // Need to also re-render previews
-  nextEl.innerHTML = `<div class="panel-inner">
+  setPanelContent(scoreEl, panelHTML('Score', _displayedScore.toLocaleString(),
+                                     `Level ${level}`, 'score-value'));
+  setPanelContent(linesEl, panelHTML('Lines', lines, `Faces cleared`));
+  // Re-render previews. setPanelContent preserves liquid-glass warp.
+  setPanelContent(nextEl, `<div class="panel-inner">
     <div style="font-size:10px; letter-spacing:0.22em; color:#8b93ad; text-transform:uppercase; font-weight:600;">Next</div>
     <div id="next-preview" style="margin-top:8px; height:120px; width:140px; display:flex; align-items:center; justify-content:center; position:relative;"></div>
-  </div>`;
-  holdEl.innerHTML = `<div class="panel-inner">
+  </div>`);
+  setPanelContent(holdEl, `<div class="panel-inner">
     <div style="font-size:10px; letter-spacing:0.22em; color:#8b93ad; text-transform:uppercase; font-weight:600;">Hold</div>
     <div id="hold-preview" style="margin-top:8px; height:120px; width:140px; display:flex; align-items:center; justify-content:center; position:relative;"></div>
-  </div>`;
+  </div>`);
   const np = nextEl.querySelector('#next-preview');
   const hp = holdEl.querySelector('#hold-preview');
   if (np && nextQueue.length > 0) renderMiniPiece(np, nextQueue[0]);
