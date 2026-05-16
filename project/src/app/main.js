@@ -25,6 +25,8 @@ import { loadSettings, saveSettings, loadStats, saveStats, loadBpmCache, saveBpm
 import { Mode } from '../gameplay/mode.js';
 import { createSettingsPanel } from '../ui/settings-panel.js';
 import { makeToggleRow, makeHueSlider } from '../ui/panel-shared.js';
+import { createInfoPanel } from '../ui/info-panel.js';
+import { createTouchControls, isTouchDevice } from '../ui/touch-controls.js';
 import { createBreathe } from '../camera/breathe.js';
 import { createStageController, STAGE_EVENTS } from '../vfx/stage-controller.js';
 import { STAGES } from '../config/stages.js';
@@ -6982,13 +6984,40 @@ function resetAnnouncerForNewGame() {
 }
 
 // =============================================================
-// Help toggle
+// Info panel (Controls / Audio / Roadmap / Credits) + touch controls
 // =============================================================
-const helpEl = document.getElementById('help');
+// Replaces the old static `#help` block; the same `?` button + an H
+// hotkey toggle it. Content lives in src/ui/info-panel.js; mobile gets
+// the full-screen sheet layout via CSS media queries.
+const helpEl     = document.getElementById('help');
 const helpToggle = document.getElementById('helpToggle');
+const infoPanel  = createInfoPanel({ root: helpEl, toggleBtn: helpToggle });
 helpToggle.addEventListener('click', () => {
-  helpEl.classList.toggle('hidden');
+  infoPanel.toggle();
+  helpToggle.blur();
 });
+window.addEventListener('keydown', (e) => {
+  if (e.code !== 'KeyH') return;
+  // Avoid hijacking H when the user is typing into the online-lobby
+  // input or any future form field.
+  if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT')) return;
+  infoPanel.toggle();
+  e.preventDefault();
+});
+
+// Touch-controls overlay — only surfaced on coarse-pointer devices.
+// Buttons dispatch synthetic KeyboardEvents on window, so existing
+// keyboard handlers (window-level keydown + InputRouter) handle them
+// without any other code being touch-aware. Two canvas gestures
+// (double-tap = hard drop, fast swipe-down = soft-drop burst) add on
+// top.
+if (isTouchDevice()) document.body.classList.add('is-touch');
+const touchControls = createTouchControls({
+  root: document.getElementById('touch-controls'),
+  canvasEl: renderer.domElement,
+});
+// Expose for console diagnostics — flip with __touch.setVisible(true).
+if (typeof window !== 'undefined') window.__touch = touchControls;
 
 // =============================================================
 // Mood — recolor rim/fill lights and case frame based on TWEAKS.mood
