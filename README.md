@@ -4,7 +4,7 @@
 
 🎮 **Play it:** [tetraplus.app](https://tetraplus.app)
 
-![TetrisPlus screenshot](project/screenshots/glass-final.png)
+![TetrisPlus screenshot](project/screenshots/Screenshot 2026-05-18 at 23.38.46.png)
 
 ## What it is
 
