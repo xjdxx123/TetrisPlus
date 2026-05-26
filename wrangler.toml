@@ -15,7 +15,7 @@
 # The multiplayer relay Worker (server/relay/) is a SEPARATE deploy with
 # its own wrangler config. Not affected by this file.
 
-name = "tetris-plus"
+name = "tetrisplus"
 main = "worker.js"
 compatibility_date = "2026-05-12"
 
