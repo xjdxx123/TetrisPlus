@@ -2127,6 +2127,21 @@ function spawnPiece(key) {
 
 const cubeAnims = [];
 function animateCubeTo(cube, target) {
+  // Last-write-wins: drop any in-flight tween already targeting this cube.
+  // Without this, a second animateCubeTo call for the same cube in the same
+  // tick leaves BOTH entries in cubeAnims. The consumer loop iterates in
+  // REVERSE (length-1 → 0), so the older entry overwrites cube.position
+  // AFTER the newer one — every frame — leaving the cube parked at the
+  // older animation's `to`. The bug surfaces when 2+ GARBAGE_APPLIED events
+  // fire in one lockPiece (queueLen ≥ 2 at drain time): each event's
+  // _onGarbageApplied calls animateCubeTo on the SAME locked-stack cube
+  // with a different `to` (one row higher per drain). The first call's
+  // stale target wins, so shifted cubes settle 1+ rows below where they
+  // should — visually, the locked piece appears to float with empty rows
+  // beneath it until the next single-row drain "re-syncs" the position.
+  for (let i = cubeAnims.length - 1; i >= 0; i--) {
+    if (cubeAnims[i].cube === cube) cubeAnims.splice(i, 1);
+  }
   cubeAnims.push({
     cube,
     from: cube.position.clone(),
